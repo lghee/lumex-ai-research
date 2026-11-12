@@ -1,8 +1,8 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "lumex-ai-research",
+  "name": "lumex-ai-research2",
   "main": "src/index.js",
-  "compatibility_date": "2026-11-13",
+  "compatibility_date": "2026-11-01",
   "workers_dev": true,
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com"
