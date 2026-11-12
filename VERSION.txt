@@ -1,0 +1,5 @@
+LUMEX GitHub Cloudflare Auto Deploy Bootstrap
+Version: 1.0.0
+Release date: 2026-11-13
+Root Wrangler config: safe bootstrap (NO automated research, NO live orders)
+Production candidate source: production/ (DO NOT switch root until Cloudflare resources configured)
