@@ -4,6 +4,31 @@
   "main": "src/index.js",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "ResearchContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RESEARCH_CONTAINER",
+        "class_name": "ResearchContainer"
+      }
+    ]
+  },
+  "exports": {
+    "ResearchContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
   "r2_buckets": [
     {
       "binding": "MARKET_DATA",
@@ -16,9 +41,25 @@
         "binding": "RESEARCH_QUEUE",
         "queue": "lumex-research-jobs"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "lumex-research-jobs",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "lumex-research-dead",
+        "max_concurrency": 1
+      }
     ]
   },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "vars": {
-    "LUMEX_SITE_URL": "https://lumexbot.com"
+    "LUMEX_SITE_URL": "https://lumexbot.com",
+    "AUTO_RESEARCH": "false",
+    "AUTO_FETCH": "false",
+    "AUTO_AI": "false"
   }
 }
