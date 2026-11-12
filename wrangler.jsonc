@@ -4,6 +4,20 @@
   "main": "src/index.js",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  "r2_buckets": [
+    {
+      "binding": "MARKET_DATA",
+      "bucket_name": "lumex-ai-data"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "RESEARCH_QUEUE",
+        "queue": "lumex-research-jobs"
+      }
+    ]
+  },
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com"
   }
