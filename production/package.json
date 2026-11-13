@@ -1,11 +1,11 @@
 {
   "name": "lumex-ai-research-production",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "type": "module",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
-    "check:js": "node --check src/index.js && node tests/test-production.mjs && node tests/test-quality.mjs && node tests/test_115_fastpoll.mjs && node tests/test_116_forward.mjs && node tests/test_117_ai_cooldown.mjs && node tests/test_118_worker_ai_direct.mjs && node tests/test_market_hub_120.mjs && node tests/test_public_stream_121.mjs",
+    "check:js": "node --check src/index.js && node tests/test-production.mjs && node tests/test-quality.mjs && node tests/test_115_fastpoll.mjs && node tests/test_116_forward.mjs && node tests/test_117_ai_cooldown.mjs && node tests/test_118_worker_ai_direct.mjs && node tests/test_market_hub_120.mjs && node tests/test_public_stream_121.mjs && node tests/test_btc_whale_122.mjs",
     "check:python": "python3 -m py_compile server.py engine/lumex_ai_worker.py tools/audit_market_csv.py && python3 -m unittest discover -s tests -p \"test_*.py\" -v",
     "check": "npm run check:js && npm run check:python"
   },

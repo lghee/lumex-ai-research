@@ -28,6 +28,10 @@
       {
         "name": "MARKET_LIVE_COLLECTOR",
         "class_name": "MarketLiveCollector"
+      },
+      {
+        "name": "BTC_RESERVE_COLLECTOR",
+        "class_name": "BtcReserveCollector"
       }
     ]
   },
@@ -41,6 +45,10 @@
       "storage": "sqlite"
     },
     "MarketLiveCollector": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BtcReserveCollector": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -80,7 +88,8 @@
     "AUTO_RESEARCH": "false",
     "AUTO_FETCH": "false",
     "AUTO_AI": "false",
-    "AUTO_LIVE_STREAM": "true"
+    "AUTO_LIVE_STREAM": "true",
+    "AUTO_WHALE_FETCH": "true"
   },
   "observability": {
     "logs": {
