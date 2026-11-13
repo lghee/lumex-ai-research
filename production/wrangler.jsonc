@@ -20,11 +20,19 @@
       {
         "name": "RESEARCH_CONTAINER",
         "class_name": "ResearchContainer"
+      },
+      {
+        "name": "MARKET_EVENT_HUB",
+        "class_name": "MarketEventHub"
       }
     ]
   },
   "exports": {
     "ResearchContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "MarketEventHub": {
       "type": "durable-object",
       "storage": "sqlite"
     }

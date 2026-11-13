@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.10 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.0 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -539,6 +539,267 @@ async function processJob(env,job){
   }
   throw Error('unknown_action');
 }
+
+// LUMEX Market Hub 1.2.0: authenticated, read-only verified R2 candles and
+// append-only public observation journal. No private exchange accounts/orders.
+const HUB_SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
+const HUB_FRAMES=[5,15,60,240,1440];
+const HUB_KINDS=['trade','liquidation','whale_transfer','ticker'];
+const HUB_ORIGINS=['bybit','binance','gateio','blockstream','mempool','other_public'];
+const hubReply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}});
+const hubAuthorized=(request,env)=> {
+  const bearer=request.headers.get('authorization')||'';
+  const valid=[env.LUMEX_AI_LAB_WORKER_TOKEN,env.LUMEX_ADMIN_API_TOKEN].filter(x=>typeof x==='string'&&x.length>=32);
+  return valid.some(key=>bearer==='Bearer '+key);
+};
+const hubIngestAuthorized=(request,env)=>
+  typeof env.LUMEX_CONTAINER_KEY==='string'&&env.LUMEX_CONTAINER_KEY.length>=32&&
+  request.headers.get('authorization')==='Bearer '+env.LUMEX_CONTAINER_KEY;
+function hubName(s){return HUB_SYMBOLS.includes(s)?s:null}
+function hubFrame(s){const v=Number(s);return HUB_FRAMES.includes(v)?v:null}
+function hubValidPrice(bar){
+  const [t,o,h,l,c,v]=bar;
+  return bar.length===6&&bar.every(Number.isFinite)&&Number.isSafeInteger(t)&&
+    t>=1500000000000&&o>0&&h>=Math.max(o,c,l)&&l>0&&l<=Math.min(o,c)&&c>0&&v>=0;
+}
+const hubCache=new Map();
+async function hubGetCandles(env,symbol,frame,limit=500){
+  const srcFrame=frame===240||frame===1440?60:frame;
+  const key='market/'+symbol+'_'+srcFrame+'.csv',now=Date.now();
+  if(!env.MARKET_DATA)throw Error('r2_binding_unavailable');
+  const head=await env.MARKET_DATA.head(key);
+  const m=head?.customMetadata||{};
+  if(!head||m.schema!=='ohlcv_v2'||m.quality!=='verified')throw Error('market_not_verified');
+  if(!Number.isFinite(Number(m.lastCandleMs))||Number(m.lastCandleMs)>now ||
+     Number(m.rows)<100||Number(head.size)>12_500_000)throw Error('market_metadata_invalid');
+  const hit=hubCache.get(key),version=String(m.lastCandleMs)+':'+String(m.rows);
+  let bars;
+  if(hit&&hit.version===version&&hit.expires>now)bars=hit.bars;
+  else{
+    const obj=await env.MARKET_DATA.get(key);
+    if(!obj)throw Error('market_missing');
+    const raw=await obj.text();
+    if(typeof raw!=='string'||raw.length>12_500_000)throw Error('market_too_large');
+    const rows=raw.trimEnd().split(/\r?\n/);
+    if(rows[0]!=='timestamp,open,high,low,close,volume'||
+       rows.length-1!==Number(m.rows))throw Error('market_rows_mismatch');
+    const tail=rows.slice(-Math.min(rows.length-1,2100));
+    bars=tail.map(row=>row.split(',').map(Number));
+    if(!bars.length||bars.some((bar,i)=>!hubValidPrice(bar)||(i>0&&bar[0]-bars[i-1][0]!==srcFrame*60000))||
+       bars.at(-1)[0]!==Number(m.lastCandleMs))throw Error('market_candles_invalid');
+    if(hubCache.size>24)hubCache.clear();
+    hubCache.set(key,{version,expires:now+15000,bars});
+  }
+  let out=bars;
+  if(frame!==srcFrame){
+    const group=frame/srcFrame,step=frame*60000,complete=[];
+    for(let i=0;i<bars.length;){
+      const bucket=Math.floor(bars[i][0]/step)*step;let j=i;
+      while(j<bars.length&&Math.floor(bars[j][0]/step)*step===bucket)j++;
+      const slice=bars.slice(i,j);i=j;
+      if(slice.length!==group||slice[0][0]!==bucket||slice.at(-1)[0]!==bucket+(group-1)*srcFrame*60000)continue;
+      complete.push([bucket,slice[0][1],Math.max(...slice.map(r=>r[2])),Math.min(...slice.map(r=>r[3])),slice.at(-1)[4],slice.reduce((n,r)=>n+r[5],0)]);
+    }
+    out=complete;
+  }
+  const closed=out.filter(r=>r[0]+frame*60000<=now);
+  if(closed.length<40)throw Error('market_insufficient_closed_candles');
+  const ret=closed.slice(-Math.min(500,Math.max(40,limit)));
+  const last=ret.at(-1)[0],age=Math.max(0,now-last-frame*60000);
+  return {
+    symbol,interval:frame===1440?'D':String(frame),source:String(m.source||'unknown')+' (R2 verified futures candles)',
+    category:'linear',candles:ret.map(([t,o,h,l,c,v])=>({t,o,h,l,c,v})),
+    last_candle_open_ms:last,retrieved_at:new Date(now).toISOString(),
+    retrieved_at_unix:Math.floor(now/1000),as_of_utc:new Date(last+frame*60000).toISOString(),
+    feed_mode:'cloudflare_r2_verified_closed_candles',orders_enabled:false,
+    stale:age>frame*60000*2,age_seconds:Math.floor(age/1000),
+    precision:'closed_candles_only',volume_unit:'exchange_native_contract_units',
+    data_quality:'verified',provenance:'Cloudflare R2 OHLCV quality pipeline',
+    notice:'확정 봉 데이터입니다. 체결 틱 실시간 스트림이나 고객 거래 신호가 아닙니다.'
+  };
+}
+function hubTrend(bars){
+  if(bars.length<51)return {status:'insufficient',trend:null,atr_pct:null};
+  const last=bars.slice(-51),close=last.map(x=>x.c),sma=n=>close.slice(-n).reduce((a,b)=>a+b,0)/n;
+  const a=sma(20),b=sma(50),c=close.at(-1);
+  const trend=c>a&&a>b?'up':(c<a&&a<b?'down':'mixed');
+  let atr=0;
+  for(let i=last.length-14;i<last.length;i++)atr+=Math.max(last[i].h-last[i].l,Math.abs(last[i].h-last[i-1].c),Math.abs(last[i].l-last[i-1].c));
+  return {status:'ok',trend,atr_pct:Number((atr/14/c*100).toFixed(3)),
+    last_completed_open_ms:last.at(-1).t};
+}
+async function hubRadar(env){
+  const items=await Promise.all(HUB_SYMBOLS.map(async symbol=>{
+    const r={symbol,change_24h_pct:null,turnover_24h_usdt:null,
+      '15m':{status:'unavailable',trend:null,atr_pct:null},
+      '1h':{status:'unavailable',trend:null,atr_pct:null}};
+    for(const [frame,name] of [[15,'15m'],[60,'1h']]){
+      try{
+        const v=await hubGetCandles(env,symbol,frame,160);r[name]=hubTrend(v.candles);
+        r[name].age_seconds=v.age_seconds;r[name].stale=v.stale;
+        if(frame===15&&v.candles.length>=97){
+          const c=v.candles,rtn=(c.at(-1).c/c.at(-97).c-1)*100;
+          r.change_24h_pct=Number(rtn.toFixed(3));
+        }
+      }catch(e){r[name]={status:'unavailable',trend:null,atr_pct:null,error:safeError(e)};}
+    }
+    return r;
+  }));
+  return {items,as_of_utc:new Date().toISOString(),ticker_status:'closed_candles_only',
+    scope:'cloudflare_r2_verified_ohlcv',orders_enabled:false,
+    notice:'변동률·SMA/ATR은 검증된 확정 선물 캔들만 계산합니다. 거래량 단위 불명확 시 USD 거래대금을 표시하지 않습니다.',
+    market_realtime:false};
+}
+async function hubCheckTicket(request,env,symbol){
+  const u=new URL(request.url),uid=u.searchParams.get('uid'),exp=u.searchParams.get('exp'),sig=u.searchParams.get('sig');
+  if(!uid||!/^[1-9][0-9]{0,15}$/.test(uid)||!exp||!/^[0-9]{10}$/.test(exp)||
+     !sig||!/^[a-f0-9]{64}$/.test(sig)||!env.LUMEX_AI_LAB_WORKER_TOKEN)return false;
+  const now=Math.floor(Date.now()/1000),expires=Number(exp);
+  if(expires<now||expires>now+120)return false;
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.LUMEX_AI_LAB_WORKER_TOKEN),
+    {name:'HMAC',hash:'SHA-256'},false,['verify']);
+  const bytes=Uint8Array.from(sig.match(/../g),x=>parseInt(x,16));
+  return crypto.subtle.verify('HMAC',key,bytes,new TextEncoder().encode('mh1:'+uid+':'+symbol+':'+exp));
+}
+function hubValidateEvent(ev,symbol,now){
+  if(!ev||typeof ev!=='object'||Array.isArray(ev))return null;
+  const kind=String(ev.kind||''),source=String(ev.source||''),id=String(ev.id||'');
+  const ts=Number(ev.ts),price=Number(ev.price||0),quantity=Number(ev.quantity||0);
+  if(!HUB_KINDS.includes(kind)||!HUB_ORIGINS.includes(source)||!/^[A-Za-z0-9:_-]{8,128}$/.test(id)||
+     !Number.isSafeInteger(ts)||ts<now-366*86400000||ts>now+120000||
+     !Number.isFinite(price)||price<0||!Number.isFinite(quantity)||quantity<0)return null;
+  if((kind==='trade'||kind==='liquidation'||kind==='ticker')&&(price<=0||quantity<=0&&kind!=='ticker'))return null;
+  const side=['buy','sell','in','out','unknown'].includes(ev.side)?ev.side:'unknown';
+  const txhash=typeof ev.txhash==='string'&&/^[a-fA-F0-9]{64}$/.test(ev.txhash)?ev.txhash:null;
+  return {id,kind,source,symbol,ts,price,quantity,side,txhash,observed:true,
+    unit:kind==='whale_transfer'?'BTC':'exchange_native_contract_units'};
+}
+export class MarketEventHub extends DurableObject{
+  constructor(ctx,env){
+    super(ctx,env);
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_events(id TEXT PRIMARY KEY,kind TEXT NOT NULL,source TEXT NOT NULL,ts INTEGER NOT NULL,payload TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0)");
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_time ON hub_events(ts DESC)");
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_kind_time ON hub_events(kind,ts DESC)");
+  }
+  async fetch(request){
+    const u=new URL(request.url);
+    if(u.pathname==='/ws'){
+      if(request.headers.get('Upgrade')?.toLowerCase()!=='websocket')return hubReply({ok:false,error:'websocket_required'},426);
+      const pair=new WebSocketPair();const [client,server]=Object.values(pair);
+      this.ctx.acceptWebSocket(server);
+      server.serializeAttachment({started:Date.now()});
+      server.send(JSON.stringify({type:'hello',scope:'observed_market_events',as_of_utc:new Date().toISOString()}));
+      return new Response(null,{status:101,webSocket:client});
+    }
+    if(u.pathname==='/ingest'&&request.method==='POST'){
+      const body=await request.json(),now=Date.now(),accepted=[],invalid=[];
+      if(!Array.isArray(body.events)||body.events.length>100||body.events.length<1)return hubReply({ok:false,error:'invalid_batch'},400);
+      for(const item of body.events){
+        const event=hubValidateEvent(item,body.symbol,now);
+        if(!event){invalid.push('invalid_event');continue;}
+        const found=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE id=?',event.id).toArray();
+        if(found.length)continue;
+        this.ctx.storage.sql.exec('INSERT INTO hub_events(id,kind,source,ts,payload,archived) VALUES (?,?,?,?,?,0)',
+          event.id,event.kind,event.source,event.ts,JSON.stringify(event));
+        accepted.push(event);
+      }
+      if(accepted.length){
+        const peers=this.ctx.getWebSockets();
+        for(const ev of accepted){
+          const frame=JSON.stringify({type:'observation',data:ev});
+          for(const ws of peers){try{ws.send(frame);}catch{}}
+        }
+        const scheduled=await this.ctx.storage.getAlarm();
+        if(scheduled===null)await this.ctx.storage.setAlarm(Date.now()+15000);
+      }
+      return hubReply({ok:true,accepted:accepted.length,invalid:invalid.length,
+        archive:'pending_r2_flush',observed_at_utc:new Date().toISOString()});
+    }
+    if(u.pathname==='/events'){
+      const limit=Math.max(1,Math.min(100,Number(u.searchParams.get('limit')||40))),
+        kind=String(u.searchParams.get('kind')||'');
+      if(kind&&!HUB_KINDS.includes(kind))return hubReply({ok:false,error:'invalid_kind'},400);
+      const cutoff=Date.now()-14*86400000;
+      const rows=kind?
+        this.ctx.storage.sql.exec('SELECT payload FROM hub_events WHERE kind=? AND ts>=? ORDER BY ts DESC LIMIT ?',kind,cutoff,limit).toArray():
+        this.ctx.storage.sql.exec('SELECT payload FROM hub_events WHERE ts>=? ORDER BY ts DESC LIMIT ?',cutoff,limit).toArray();
+      return hubReply({ok:true,events:rows.map(r=>JSON.parse(r.payload)),scope:'observed_only',
+        hot_retention_days:14,archive:'R2_immutable_batches'});
+    }
+    return hubReply({ok:false,error:'not_found'},404);
+  }
+  async alarm(){
+    const rows=this.ctx.storage.sql.exec('SELECT id,kind,source,ts,payload FROM hub_events WHERE archived=0 ORDER BY ts ASC LIMIT 300').toArray();
+    if(rows.length){
+      const group=new Map();
+      for(const r of rows){
+        const date=new Date(r.ts),key=r.kind+'/'+date.toISOString().slice(0,13).replaceAll('-','/');
+        if(!group.has(key))group.set(key,[]);
+        group.get(key).push(r);
+      }
+      try{
+        for(const [prefix,batch] of group){
+          const key='market-hub/events/'+prefix+'/'+Date.now()+'-'+crypto.randomUUID()+'.jsonl';
+          await this.env.MARKET_DATA.put(key,batch.map(r=>r.payload).join('\n')+'\n',{
+            httpMetadata:{contentType:'application/x-ndjson'}});
+          for(const r of batch)this.ctx.storage.sql.exec('UPDATE hub_events SET archived=1 WHERE id=?',r.id);
+        }
+        // Only hot index expires; immutable R2 event batches retain historical evidence.
+        this.ctx.storage.sql.exec('DELETE FROM hub_events WHERE archived=1 AND ts<?',Date.now()-14*86400000);
+      }catch(e){console.error('market_hub_archive_error',safeError(e));}
+    }
+    const pending=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE archived=0 LIMIT 1').toArray();
+    if(pending.length)await this.ctx.storage.setAlarm(Date.now()+30000);
+  }
+  webSocketMessage(ws,data){
+    if(data==='ping')ws.send('pong');
+  }
+}
+async function hubRoute(request,env){
+  const u=new URL(request.url),path=u.pathname,method=request.method;
+  if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
+    version:'1.2.0',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket'],
+    market_data_scope:'verified_closed_candles',live_exchange_ingestor:'not_activated',
+    order_execution:false});
+  if(path==='/market-hub/v1/radar'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await hubRadar(env))}
+    catch(e){return hubReply({ok:false,error:safeError(e)},503)}
+  }
+  const symbol=hubName(u.searchParams.get('symbol'));
+  if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
+  if(path==='/market-hub/v1/ws'&&method==='GET'){
+    if(!(await hubCheckTicket(request,env,symbol)))return hubReply({ok:false,error:'invalid_session_ticket'},401);
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ws',{
+      headers:{Upgrade:'websocket'}}));
+  }
+  if(path==='/market-hub/v1/ingest'&&method==='POST'){
+    if(!hubIngestAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    const body=await request.text();
+    if(body.length>120000)return hubReply({ok:false,error:'payload_too_large'},413);
+    let json;try{json=JSON.parse(body)}catch{return hubReply({ok:false,error:'bad_json'},400)}
+    if(!Array.isArray(json.events)||json.events.some(ev=>ev?.symbol!==symbol))return hubReply({ok:false,error:'symbol_mismatch'},400);
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ingest',{
+      method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol,events:json.events})}));
+  }
+  if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+  if(path==='/market-hub/v1/candles'&&method==='GET'){
+    const interval=hubFrame(u.searchParams.get('interval'));
+    if(!interval)return hubReply({ok:false,error:'unsupported_interval'},400);
+    try{return hubReply(await hubGetCandles(env,symbol,interval,500))}
+    catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
+  }
+  if(path==='/market-hub/v1/events'&&method==='GET'){
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    const kind=u.searchParams.get('kind')||'';
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/events?kind='+encodeURIComponent(kind)+
+      '&limit='+encodeURIComponent(u.searchParams.get('limit')||'40')));
+  }
+  return hubReply({ok:false,error:'not_found'},404);
+}
+
 export class ResearchContainer extends DurableObject{
   constructor(ctx,env){super(ctx,env);this.starting=null;
     if(ctx.container?.running)void ctx.blockConcurrencyWhile(()=>ctx.container.setInactivityTimeout(120000));
@@ -569,10 +830,11 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.10',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.10',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
