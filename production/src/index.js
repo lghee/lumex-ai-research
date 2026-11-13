@@ -106,6 +106,95 @@ async function callWP(env,endpoint,method='GET',body){
   if(value?.ok===false) throw Error(`wordpress_${endpoint.split('?')[0]}_${safeError(value.state||value.error)}`);
   return value;
 }
+/** AI inference runs in the Worker network, not inside the market-data Container.
+ * The Container can read Gate candles but its origin has seen HTTP 403 to WP or
+ * OpenAI; WordPress telemetry already succeeds from the Worker. The WP reserve
+ * and commit endpoints remain the ONLY usage-budget authority.
+ * No customer signal or exchange order endpoint is accessible here.
+ */
+async function runAiFromWorker(env,symbol,interval=15){
+  if(!SYMBOLS.includes(symbol)||interval!==15)throw Error('ai_market_invalid');
+  if(!env.OPENAI_API_KEY)throw Error('openai_key_missing');
+  // Never reserve API budget for stale/missing WordPress market context.
+  let context;
+  try{context=await callWP(env,'context?symbol='+encodeURIComponent(symbol));}
+  catch(error){throw Error('ai_context_'+safeError(error));}
+  if(context?.market?.fresh!==true || !['scored','partial'].includes(context?.technical?.data_quality))
+    throw Error('ai_context_stale_market');
+  let reservation;
+  try{reservation=await callWP(env,'reserve','POST',{});}
+  catch(error){throw Error('ai_reserve_'+safeError(error));}
+  const id=String(reservation?.reservation_id||'');
+  if(!/^[a-f0-9]{24}$/.test(id))throw Error('ai_reserve_invalid_id');
+  const maxOutput=Math.min(1200,Math.max(200,Number(reservation.max_output_tokens)||1200));
+  const allowed=/^(breakout|pullback|mean_revert|momentum)$/;
+  const fields={
+    family:{type:'string',enum:['breakout','pullback','mean_revert','momentum']},
+    lookback:{type:'integer'},fast:{type:'integer'},slow:{type:'integer'},
+    rsi:{type:'integer'},max_hold:{type:'integer'},volume_mult:{type:'number'},
+    stop_atr:{type:'number'},take_atr:{type:'number'},trend_filter:{type:'boolean'}
+  };
+  let inputTokens=0,outputTokens=0,usageConfirmed=false;
+  let committed=false;
+  try{
+    const contextEvidence={symbol,interval_min:interval,
+      research_history:(Array.isArray(context.research_history)?context.research_history:[]).slice(0,6),
+      market:context.market||{},technical:context.technical||{},
+      chart_timeframes:context.chart_timeframes||{},
+      signals:context.signal_observations||{},indicator_observations:context.indicator_observations||{},
+      whales:context.whales||{},liquidations:context.liquidations||{}};
+    const request={
+      model:String(reservation.model||''),
+      instructions:'Research-only strategy hypothesis generation. Never place orders or claim profit guarantees. Examine previous failed out-of-sample tests and avoid duplicates. Propose up to six distinct testable hypotheses. Families: breakout, pullback, mean_revert, momentum. Requirements: lookback 8..80; fast 5..40; slow 25..240 and greater than fast; rsi 20..80; volume_mult 0.5..3; stop_atr 0.6..4; take_atr 0.7..7; max_hold 3..48; trend_filter boolean. Use output schema exactly.',
+      input:JSON.stringify(contextEvidence).slice(0,9500),
+      reasoning:{effort:'none'},max_output_tokens:maxOutput,
+      text:{format:{type:'json_schema',name:'lumex_research_ideas',strict:true,
+        schema:{type:'object',properties:{ideas:{type:'array',items:{type:'object',properties:fields,
+          required:Object.keys(fields),additionalProperties:false}}},required:['ideas'],additionalProperties:false}}},
+      store:false
+    };
+    let result;
+    try{
+      const r=await fetch('https://api.openai.com/v1/responses',{
+        method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+env.OPENAI_API_KEY},
+        body:JSON.stringify(request),signal:AbortSignal.timeout(45000)});
+      if(!r.ok){
+        let code='';try{
+          const reply=await r.json();const raw=String(reply?.error?.code||reply?.error?.type||'');
+          if(/^[a-zA-Z0-9_-]{1,80}$/.test(raw))code='_'+raw;
+        }catch{}
+        throw Error('ai_openai_http_'+r.status+code);
+      }
+      result=await r.json();
+    }catch(error){if(safeError(error).startsWith('ai_openai_http_'))throw error;
+      throw Error('ai_openai_transport_'+safeError(error));}
+    if(result?.status!=='completed')throw Error('ai_openai_incomplete');
+    inputTokens=Math.max(0,Number(result.usage?.input_tokens||0));
+    outputTokens=Math.max(0,Number(result.usage?.output_tokens||0));
+    usageConfirmed=Boolean(result.usage);
+    const message=(Array.isArray(result.output)?result.output:[])
+      .filter(x=>x?.type==='message').flatMap(x=>Array.isArray(x.content)?x.content:[])
+      .filter(x=>x?.type==='output_text').map(x=>String(x.text||'')).join('');
+    if(!message)throw Error('ai_openai_empty_output');
+    let ideas;
+    try{ideas=JSON.parse(message).ideas;}catch{throw Error('ai_openai_invalid_json');}
+    if(!Array.isArray(ideas)||ideas.length<1||ideas.length>12)throw Error('ai_openai_invalid_ideas');
+    // Server-side WP DSL validator makes the final acceptance decision.
+    const safeIdeas=ideas.slice(0,6).filter(spec=>spec&&typeof spec==='object'&&allowed.test(String(spec.family||'')));
+    if(!safeIdeas.length)throw Error('ai_openai_zero_valid_ideas');
+    let saved;
+    try{saved=await callWP(env,'suggestions','POST',{symbol,interval_min:interval,ideas:safeIdeas});}
+    catch(error){throw Error('ai_suggestions_'+safeError(error));}
+    const accepted=Number(saved?.accepted||0);
+    if(!Number.isInteger(accepted)||accepted<1)throw Error('ai_zero_candidates_accepted');
+    return {ok:true,accepted,symbol,stage:'wordpress_suggestions',transport:'worker_direct'};
+  }finally{
+    // Even failed/unknown outcomes settle the reservation conservatively.
+    try{await callWP(env,'commit','POST',{reservation_id:id,
+      input_tokens:inputTokens,output_tokens:outputTokens,usage_confirmed:usageConfirmed});committed=true;}
+    catch(error){console.error('ai_commit_failed',safeError(error));}
+  }
+}
 async function invokeContainer(env,path,payload){
   if(!env.LUMEX_CONTAINER_KEY || env.LUMEX_CONTAINER_KEY.length<32)throw Error('container_key_not_configured');
   const stub=env.RESEARCH_CONTAINER.getByName('primary-research');
