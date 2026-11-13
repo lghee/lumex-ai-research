@@ -3,7 +3,7 @@ process.on('unhandledRejection',error=>{console.error('CHART_TEST_REJECTION',Str
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
- .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {}');
+ .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}');
 const {decodeGateCandles,MarketLiveCollector,MarketEventHub,default:worker}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const now=Date.now(),opening=Math.floor(now/900000)*900000;
 const row={n:'15m_BTC_USDT',t:opening/1000,o:'100',h:'110',l:'99',c:'105',v:'55'};
