@@ -86,7 +86,8 @@
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com",
     "AUTO_LIVE_STREAM": "true",
-    "AUTO_WHALE_FETCH": "true"
+    "AUTO_WHALE_FETCH": "true",
+    "AUTO_DERIVATIVES_FETCH": "true"
   },
   "keep_vars": true,
   "observability": {
