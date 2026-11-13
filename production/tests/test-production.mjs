@@ -42,8 +42,8 @@ env.RESEARCH_CONTAINER={getByName:(name)=>{
   assert.equal(name,'primary-research');
   return {fetch:async(url,opts)=>{
     const path=new URL(url).pathname;const body=JSON.parse(opts.body);
-    if(path==='/fetch'){fetchRequests.push(body);return new Response(validCsv,{headers:{'content-type':'text/csv'}});}
-    if(path==='/evaluate'){
+    if(path==='/fetch'){fetchRequests.push(body);return new Response(validCsv,{headers:{'content-type':'text/csv','x-lumex-market-source':'binance_usdm_perpetual'}});}
+    if(path==='/evaluate'){assert.equal(body.market_source,'binance_usdm_perpetual');
       if(failEvaluate)return response({reports:body.jobs.map(job=>({...job,error:true,error_code:'bad_test_market'}))});
       return response({reports:body.jobs.map(job=>({id:job.id,job_hash:job.job_hash,claim_token:job.claim_token,train:metrics,oos:metrics,double_cost:metrics,one_bar_delay:metrics,oos_days:30,data_sha256:'c'.repeat(64),last_candle_unix:Math.floor(latest/1000)}))});
     }
@@ -61,7 +61,7 @@ await schedule();assert.equal(queued.length,0,'disabled Cron must not enqueue');
 env.AUTO_FETCH='true';await schedule();assert.equal(queued.length,1);assert.equal(queued.shift().kind,'orchestrate');
 await consume('orchestrate');
 assert.equal(fetchRequests.length,1,'Cold start must be bounded');
-assert(await R2.head('market/BTCUSDT_5.csv'));
+assert(await R2.head('market/BTCUSDT_5.csv'));assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.source,'binance_usdm_perpetual');
 assert.equal(results.length,0);
 assert.equal(eventHistory.length,1,'Telemetry should be the only WordPress operation for fetch-only');
 env.AUTO_FETCH='false';env.AUTO_RESEARCH='true';

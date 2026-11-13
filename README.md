@@ -1,4 +1,6 @@
-# LUMEX AI RESEARCH 1.1.0 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
+> **1.1.1 (2026-11-13):** Bybit HTTP 403 접근 거부가 실제 Cloudflare Container에서 확인되어, 공식 Binance USD-M 무기한 선물 Kline 공개 API 대체 수집을 추가했습니다. 동일 소스만 증분 갱신하며 공급자 전환 시 90일 이상 전체 이력을 재수집합니다. **실제 Cloudflare 환경의 Binance API 응답은 아직 미검증입니다.**
+
+# LUMEX AI RESEARCH 1.1.1 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
 
 **2026-11-13 업데이트. 현재 사용자의 실 배포 프로젝트는 `lumex-ai-research2`이며 Cloudflare Build의 Root directory는 `production` 입니다.** 기존 Worker를 삭제하거나 이름을 바꾸지 마세요.
 

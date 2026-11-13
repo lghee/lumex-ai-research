@@ -53,6 +53,59 @@ class ResearchEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(m.ResearchError,'incremental_provider_gap'):
                 m.refresh_bybit_candles('BTCUSDT',60,self.result,self.previous)
         self.assertFalse(self.result.exists())
+    def test_bybit_403_rebuilds_full_binance_futures_history(self):
+        from urllib.parse import parse_qs,urlparse
+        from urllib.error import HTTPError
+        calls=[]
+        latest=self.current
+        start=latest-(92*24+250)*self.step
+        def provider(url,**kwargs):
+            if url.startswith(m.BASE):raise HTTPError(url,403,'Forbidden',None,None)
+            self.assertTrue(url.startswith(m.BINANCE_FUTURES_BASE))
+            q=parse_qs(urlparse(url).query)
+            self.assertEqual(q['interval'],['1h'])
+            self.assertEqual(q['symbol'],['BTCUSDT'])
+            self.assertEqual(q['limit'],['1500'])
+            first=int(q['startTime'][0]);calls.append(first)
+            rows=[]
+            for ts in range(first,min(first+1500*self.step,latest+self.step),self.step):
+                rows.append([ts,'100','101','99','100','12',ts+self.step-1,'','','','',''])
+            return rows
+        with patch.object(m,'http_json',side_effect=provider):
+            count,source=m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'bybit_public_linear')
+        self.assertEqual(source,'binance_usdm_perpetual')
+        self.assertTrue(len(calls)>=2)
+        self.assertTrue(count>=self.needed)
+        validated=m.load_csv(self.result,60,True)
+        self.assertEqual(int(validated[-1,0]),latest)
+        self.assertEqual(float(validated[0,1]),100.)  # old Bybit history was discarded
+
+    def test_existing_binance_never_mixes_bybit_when_updating(self):
+        old=m.load_csv(self.previous,60,False)
+        endpoints=[]
+        def provider(url,**kwargs):
+            from urllib.parse import parse_qs,urlparse
+            endpoints.append(url)
+            self.assertTrue(url.startswith(m.BINANCE_FUTURES_BASE))
+            q=parse_qs(urlparse(url).query)
+            return [[int(old[-1,0]),*map(str,old[-1,1:])]+[0]*6,
+                    [self.current-self.step,'100','101','99','100','10',0,0,0,0,0,0],
+                    [self.current,'100','101','99','100','10',0,0,0,0,0,0]]
+        with patch.object(m,'http_json',side_effect=provider):
+            count,source=m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'binance_usdm_perpetual')
+        self.assertEqual(source,'binance_usdm_perpetual')
+        self.assertGreater(count,2000)
+        self.assertTrue(endpoints)
+
+    def test_alternate_provider_403_preserves_existing_file(self):
+        from urllib.error import HTTPError
+        def blocked(url,**kwargs):raise HTTPError(url,403,'Forbidden',None,None)
+        with patch.object(m,'http_json',side_effect=blocked):
+            with self.assertRaisesRegex(m.ResearchError,'bybit_403_binance_403_access_restricted'):
+                m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'bybit_public_linear')
+        self.assertFalse(self.result.exists())
+        self.assertTrue(self.previous.exists())
+
     def test_ai_feedback_is_structured_and_billed_once(self):
         history=[{'spec':{'family':'momentum','lookback':12},'gate':'failed_gate','oos':{'profit_factor':0.8}}]
         class StubClient:

@@ -24,6 +24,8 @@ from typing import Any
 import numpy as np
 
 BASE = "https://api.bybit.com/v5/market/kline"
+BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1/klines"
+MARKET_SOURCES = {"bybit_public_linear", "binance_usdm_perpetual"}
 SUPPORTED = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
 FRAMES = {5, 15, 60}
 USER_AGENT = "LUMEX-AI-Research-Worker/1.0 (read-only; no trading)"
@@ -173,6 +175,120 @@ def refresh_bybit_candles(symbol: str, interval: int, out: Path, previous: Path 
     load_csv(tmp,interval,require_fresh=True)
     tmp.replace(out)
     return len(old)
+
+def fetch_binance_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
+    """Backfill authorized public Binance USD-M perpetual trades, not Binance spot.
+
+    This is a **full** coherent history: never concatenate exchange candles.
+    The same 90-day + warm-up validation used for Bybit remains mandatory.
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES: raise ResearchError("invalid_selection")
+    if days < 90 or days > 120: raise ResearchError("invalid_days")
+    step = interval * 60_000
+    latest = (int(time.time()*1000)//step - 1)*step
+    cursor = ((latest - days*86_400_000 - 250*step)//step)*step
+    found = {}
+    calls = 0
+    unit = {5:"5m", 15:"15m", 60:"1h"}[interval]
+    while cursor <= latest:
+        params = {"symbol":symbol,"interval":unit,"startTime":str(cursor),
+                  "endTime":str(latest+step-1),"limit":"1500"}
+        raw = http_json(BINANCE_FUTURES_BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list) or not raw: raise ResearchError("binance_futures_empty_or_invalid")
+        last_ts = None
+        for row in raw:
+            if not isinstance(row,list) or len(row)<6:raise ResearchError("binance_futures_bad_schema")
+            record = (int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            ts = record[0]
+            if last_ts is not None and ts<=last_ts:raise ResearchError("binance_futures_order_invalid")
+            last_ts = ts
+            if ts<cursor or ts>latest:continue
+            if ts in found and found[ts]!=record:raise ResearchError("conflicting_candle")
+            found[ts]=record
+        if last_ts is None or last_ts<cursor:raise ResearchError("binance_futures_pagination_stuck")
+        cursor = last_ts+step
+        calls += 1
+        if calls>180:raise ResearchError("too_many_provider_pages")
+        if cursor<=latest:time.sleep(0.08)
+    if not found:raise ResearchError("no_market_candles")
+    ordered=[found[k] for k in sorted(found)]
+    if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):raise ResearchError("provider_gaps")
+    if len(ordered)<90*1440/interval+250:raise ResearchError("insufficient_provider_history")
+    if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError("provider_stale")
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",newline="",encoding="utf-8") as file:
+        writer=csv.writer(file);writer.writerow(["timestamp","open","high","low","close","volume"])
+        writer.writerows(ordered)
+    load_csv(tmp,interval,True)
+    tmp.replace(out)
+    return len(ordered)
+
+
+def refresh_binance_futures_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Incrementally update a Binance-only candle history with closed bars."""
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    if previous is None or not previous.is_file():return fetch_binance_futures_candles(symbol,interval,out)
+    try:old=load_csv(previous,interval,require_fresh=False)
+    except (ResearchError,ValueError,OSError):return fetch_binance_futures_candles(symbol,interval,out)
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0]); missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_binance_futures_candles(symbol,interval,out)
+    if missing>0:
+        params={"symbol":symbol,"interval":{5:"5m",15:"15m",60:"1h"}[interval],
+                "startTime":str(last),"endTime":str(latest+step-1),"limit":str(min(1500,missing+2))}
+        raw=http_json(BINANCE_FUTURES_BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list):raise ResearchError("binance_incremental_unavailable")
+        points={}
+        for row in raw:
+            if not isinstance(row,list) or len(row)<6:raise ResearchError("binance_futures_bad_schema")
+            r=(int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            if r[0]>latest or r[0]<last:continue
+            if r[0] in points and points[r[0]]!=r:raise ResearchError("conflicting_provider_candle")
+            points[r[0]]=r
+        # Overlap is optional. If the exchange supplies it, validate it exactly.
+        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
+            raise ResearchError("provider_revised_closed_candle")
+        appended=[points[t] for t in sorted(points) if t>last]
+        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+            raise ResearchError("incremental_provider_gap")
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int(90*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",newline="",encoding="utf-8") as file:
+        writer=csv.writer(file);writer.writerow(["timestamp","open","high","low","close","volume"])
+        for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,require_fresh=True)
+    tmp.replace(out)
+    return len(old)
+
+
+def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
+                                      previous: Path | None = None,
+                                      previous_source: str = "") -> tuple[int,str]:
+    """Prefer Bybit; on explicit IP restriction replace with full Binance history.
+
+    Existing Binance data uses only Binance for increments. No cross-exchange
+    continuity, price or volume mixing is allowed even with matching timestamps.
+    """
+    if previous_source not in ("", *MARKET_SOURCES):raise ResearchError("unknown_previous_market_source")
+    if previous_source == "binance_usdm_perpetual":
+        return refresh_binance_futures_candles(symbol,interval,out,previous),"binance_usdm_perpetual"
+    try:
+        return refresh_bybit_candles(symbol,interval,out,previous),"bybit_public_linear"
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403,451):raise
+        try:
+            # Always rebuild from scratch when changing exchanges.
+            return fetch_binance_futures_candles(symbol,interval,out),"binance_usdm_perpetual"
+        except urllib.error.HTTPError as secondary:
+            raise ResearchError(f"bybit_{exc.code}_binance_{secondary.code}_access_restricted") from secondary
+        except ResearchError as secondary:
+            raise ResearchError(f"bybit_{exc.code}_binance_{str(secondary)[:60]}") from secondary
+
 
 def ema(v: np.ndarray, n: int) -> np.ndarray:
     a=2.0/(n+1);out=np.empty_like(v);out[0]=v[0]

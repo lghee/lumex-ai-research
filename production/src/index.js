@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.1 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -57,7 +57,10 @@ async function fetchPair(env,sym,interval){
   const key=marketKey(sym,interval);
   const old=await env.MARKET_DATA.get(key);
   const prior=old && old.size<MAX_CSV_BYTES ? await old.text() : '';
-  const response=await invokeContainer(env,'/fetch',{symbol:sym,interval_min:interval,existing_csv:prior});
+  const existingSource=old?.customMetadata?.source || (old?'bybit_public_linear':'');
+  const response=await invokeContainer(env,'/fetch',{symbol:sym,interval_min:interval,existing_csv:prior,existing_source:existingSource});
+  const source=response.headers.get('X-Lumex-Market-Source');
+  if(!['bybit_public_linear','binance_usdm_perpetual'].includes(source))throw Error('market_source_unverified');
   const bytes=await response.arrayBuffer();
   if(bytes.byteLength<20000 || bytes.byteLength>MAX_CSV_BYTES)throw Error('market_data_size_invalid');
   const csv=new TextDecoder().decode(bytes);
@@ -67,8 +70,8 @@ async function fetchPair(env,sym,interval){
   if(!Number.isSafeInteger(lastCandleMs) || lastCandleMs<=0 || lastCandleMs>now || now-lastCandleMs>Math.max(3600000,interval*180000))throw Error('fetched_market_stale_or_invalid');
   // The Container validated every candle, chronological continuity and minimum history.
   // Do not overwrite an existing R2 object when this validation fails.
-  await env.MARKET_DATA.put(key,bytes,{httpMetadata:{contentType:'text/csv'},customMetadata:{source:'bybit_public_linear',lastCandleMs:String(lastCandleMs),fetchedAtMs:String(now),schema:'ohlcv_v1'}});
-  return {market:marketId(sym,interval),bytes:bytes.byteLength,lastCandleMs};
+  await env.MARKET_DATA.put(key,bytes,{httpMetadata:{contentType:'text/csv'},customMetadata:{source,lastCandleMs:String(lastCandleMs),fetchedAtMs:String(now),schema:'ohlcv_v1'}});
+  return {market:marketId(sym,interval),source,bytes:bytes.byteLength,lastCandleMs};
 }
 async function getMarketInventory(env,now){
   const result=[];
@@ -117,7 +120,7 @@ async function runJobs(env,readyMarkets){
         const [sym,intervalText]=market.split(':');const interval=Number(intervalText);
         const obj=await env.MARKET_DATA.get(marketKey(sym,interval));
         if(!obj || obj.size>MAX_CSV_BYTES)throw Error('r2_market_missing_or_large');
-        const rr=await invokeContainer(env,'/evaluate',{csv:await obj.text(),jobs:group,interval_min:interval});
+        const rr=await invokeContainer(env,'/evaluate',{csv:await obj.text(),jobs:group,interval_min:interval,market_source:obj.customMetadata?.source||'bybit_public_linear'});
         const data=await rr.json();
         if(!Array.isArray(data.reports) || data.reports.length!==group.length)throw Error('invalid_container_result');
         const byId=new Map(data.reports.map(x=>[Number(x.id),x]));
@@ -254,11 +257,11 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
-      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
+      const out={ok:true,version:'1.1.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
     }

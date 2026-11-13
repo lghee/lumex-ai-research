@@ -1,4 +1,4 @@
-# LUMEX AI Research 1.1.0 — Cloudflare/GitHub/WordPress 실제 적용 가이드
+# LUMEX AI Research 1.1.1 — Cloudflare/GitHub/WordPress 실제 적용 가이드
 
 ## 원칙
 - 운영 Worker: **`lumex-ai-research2`** (기존 프로젝트를 그대로 업데이트)
@@ -24,7 +24,7 @@
 3. `production/src/index.js`, `production/engine/lumex_ai_worker.py`, `production/server.py`, `production/wrangler.jsonc`, `production/tests`가 모두 반영됐는지 확인.
 4. Cloudflare → Workers & Pages → **`lumex-ai-research2`** → **Deployments**에서 **새 배포 성공** 확인.
 5. Settings → Builds → Git repository/Production branch/Root directory: **기존 GitHub / main / production** 을 유지. 배포 명령도 기존 `npx wrangler deploy --name lumex-ai-research2 --compatibility-date 2026-11-01` 그대로 사용 가능.
-6. `https://lumex-ai-research2.kpiplus195.workers.dev/health` 접속 → `"version":"1.1.0"`, 모든 auto 토글 `false`, `trading_enabled:false` 확인.
+6. `https://lumex-ai-research2.kpiplus195.workers.dev/health` 접속 → `"version":"1.1.1"`, 모든 auto 토글 `false`, `trading_enabled:false` 확인.
 
 ## 3. 환경변수 / 비밀키 등록
 
@@ -64,7 +64,7 @@ wp option get lumex_ai_lab_worker_token_v1
 
 1. Cron (5분): `scheduled` → Queue `orchestrate`
 2. Worker: 12개 R2 캔들 캐시의 **완료봉 시각**·파일 크기 검사
-3. 필요 시 Container `POST /fetch` → 최초 약 92일 전체/이후 증분 공개 Bybit 데이터 → 유효성 검사 → R2 CSV 덮어쓰기
+3. 필요 시 Container `POST /fetch` → 최초 약 92일 전체/이후 증분 공개 Bybit 데이터. Bybit가 HTTP 403/451로 거부하면 **Binance USD-M 선물 공식 Kline API**에서 약 92일 전체 재수집 (거래소 데이터 혼합 금지) → 유효성 검사 → R2 CSV 덮어쓰기
 4. WordPress `research-lab/tick`: 연구 조합 100개까지 등록, 400건 이상 대기 시 backpressure, 최대 일일 목표 설정 준수
 5. Worker는 **준비된 마켓만** `research-lab/jobs?markets=...`로 임대
 6. Container `POST /evaluate` → train 60일 이상 + OOS 30일 + 비용 두 배 + 한 봉 지연 테스트
@@ -98,3 +98,12 @@ wp option get lumex_ai_lab_worker_token_v1
 - PHP 문법 검사, Node Worker 흐름 모의 통합 테스트, Python 증분/갭/백테스트 합성 데이터 테스트는 수행.
 - **미검증**: 실제 Cloudflare 컨테이너 기동·Bybit 공개 API 수집 성공·운영 WordPress/MySQL REST 왕복·OpenAI 결제 호출·5,000건/일 실제 처리량·실거래 수익성.
 - Auto Research가 실주문/실계정 전략을 활성화하지 않도록 분리 유지.
+
+## 1.1.1 실제 장애 복구 메모 — Bybit HTTP 403
+
+- 2026-11-13 10:30 KST 운영 로그: `container_fetch_422_HTTP_Error_403__Forbidden`, R2 수집 0/8 성공. 기존 설정/인증 문제는 해결됐고 Python Container 내부 공개 Bybit HTTP GET이 거부됨.
+- 교체된 `production/engine/lumex_ai_worker.py`: 공개 Bybit 선물의 HTTP 403/451시에만 Binance USD-M 무기한 선물 공개 API로 **전량 다시** 적재. 이후 Binance 데이터는 Binance API로만 증분 갱신.
+- Worker의 R2 `source` 메타, 연구결과 `source`에 `binance_usdm_perpetual` 또는 `bybit_public_linear` 표시. 다른 거래소 시장 데이터는 동일하지 않으며 수익률 검증·주문 시 가격 차이가 있음.
+- Binance 측도 403/451인 경우 오류를 `bybit_403_binance_403_access_restricted`로 명시, 실패를 숨기지 않음. 같은 접근 IP의 외부 API 미허용 시 승인된 데이터 제공처/해당 지역 사용 가능한 데이터 인프라 별도 검토.
+- WordPress Core 0.5.05.20에는 변경 없음. Cron/Queue/R2 이름, Secret 값과 `AUTO_FETCH=true`, 다른 토글 false 유지. **기존 market CSV는 검증 실패시 덮어쓰지 않음.**
+- Cloudflare 실제 외부 API 접근 성공은 재배포 후 R2 `market/` CSV 및 로그 확인 필요. 오프라인 모의 테스트 성공 ≠ 실데이터 수집 확인.

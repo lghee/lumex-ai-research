@@ -3,20 +3,21 @@ from __future__ import annotations
 import csv, io, json, os, tempfile, hmac, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv,
+from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv, refresh_public_perpetual_candles, MARKET_SOURCES,
                                      indicators, evaluate, Client, ai_ideas, refresh_bybit_candles)
 SUPPORTED={'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'}
 FRAMES={5,15,60}
 MAX_PAYLOAD=12_500_000
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
-    def send(self, status:int, value, content_type='application/json'):
+    def send(self, status:int, value, content_type='application/json', extra_headers=None):
         if isinstance(value,(dict,list)):body=json.dumps(value,ensure_ascii=False,separators=(',',':')).encode()
         elif isinstance(value,bytes):body=value
         else:body=str(value).encode()
         self.send_response(status)
         self.send_header('content-type',content_type)
         self.send_header('cache-control','no-store')
+        for name,value in (extra_headers or {}).items():self.send_header(name,value)
         self.send_header('content-length',str(len(body)))
         self.end_headers();self.wfile.write(body)
     def do_GET(self):
@@ -39,18 +40,25 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(existing,str) or len(existing)>12_000_000:raise ResearchError('bad_previous_csv')
                     previous=Path(tmp)/'previous.csv'
                     if existing:previous.write_text(existing,encoding='utf-8')
-                    refresh_bybit_candles(sym,interval,filename,previous if existing else None)
+                    prior_source=str(arg.get('existing_source',''))
+                    if prior_source not in ('', *MARKET_SOURCES):raise ResearchError('bad_previous_source')
+                    _,source=refresh_public_perpetual_candles(sym,interval,filename,previous if existing else None,prior_source)
                     data=filename.read_bytes()
-                    return self.send(200,data,'text/csv')
+                    return self.send(200,data,'text/csv',{'X-Lumex-Market-Source':source})
             if self.path=='/evaluate':
                 interval=int(arg.get('interval_min',0));jobs=arg.get('jobs',[]);csv_data=arg.get('csv','')
                 if interval not in FRAMES or not isinstance(jobs,list) or len(jobs)>24 or len(csv_data)>MAX_PAYLOAD:raise ResearchError('bad_job_batch')
+                source=arg.get('market_source','')
+                if source not in MARKET_SOURCES:raise ResearchError('unverified_market_source')
                 with tempfile.TemporaryDirectory() as tmp:
                     filename=Path(tmp)/'candles.csv';filename.write_text(csv_data,encoding='utf-8')
                     data=load_csv(filename,interval,True);common=indicators(data)
                     reports=[]
                     for job in jobs:
-                        try:reports.append(evaluate(job,data,common))
+                        try:
+                            report=evaluate(job,data,common)
+                            report['source']=source+'_ohlcv_csv_90d'
+                            reports.append(report)
                         except (ResearchError,ValueError,KeyError,TypeError) as e:
                             reports.append({'id':job.get('id'), 'job_hash':job.get('job_hash'),'claim_token':job.get('claim_token'),'error':True,'error_code':str(e)[:70],'source':'cloudflare_research_validation'})
                     return self.send(200,{'reports':reports})
