@@ -1,6 +1,6 @@
 """LUMEX Cloudflare Container HTTP interface. Never sends exchange orders."""
 from __future__ import annotations
-import csv, io, json, os, tempfile, hmac, urllib.error, hashlib, math
+import csv, io, json, os, tempfile, hmac, urllib.error, urllib.parse, hashlib, math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv, refresh_public_perpetual_candles, MARKET_SOURCES,
@@ -95,6 +95,13 @@ class Handler(BaseHTTPRequestHandler):
                 client=Client(os.environ.get('LUMEX_SITE_URL',''),os.environ.get('LUMEX_AI_LAB_WORKER_TOKEN',''))
                 return self.send(200,ai_ideas(client,key,sym,interval))
             return self.send(404,{'error':'not_found'})
+        except urllib.error.HTTPError as e:
+            # Unexpected upstream HTTP error: identify only the upstream host, never
+            # log the request URL, Authorization headers, prompt, or response body.
+            host=urllib.parse.urlparse(getattr(e,'url','')).hostname or ''
+            upstream='wordpress' if host=='lumexbot.com' else ('openai' if host=='api.openai.com' else 'other')
+            self.send(422,{'ok':False,'error_code':'upstream_http_error',
+                'detail':f'{upstream}_unhandled_http_{int(e.code)}'})
         except (ResearchError,ValueError,KeyError,TypeError,urllib.error.URLError) as e:
             self.send(422,{'ok':False,'error_code':type(e).__name__,'detail':str(e)[:120]})
         except Exception as e:

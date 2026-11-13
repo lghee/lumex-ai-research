@@ -33,6 +33,26 @@ USER_AGENT = "LUMEX-AI-Research-Worker/1.0 (read-only; no trading)"
 
 class ResearchError(Exception): pass
 
+def safe_http_failure(stage: str, exc: urllib.error.HTTPError) -> dict:
+    """Return only HTTP status and bounded public provider error code, never messages."""
+    status=int(exc.code)
+    result={"ok":False,"error":f"{stage}_http_{status}","stage":stage,"http_status":status}
+    try:
+        raw=exc.read(8193)
+        if len(raw)>8192:return result
+        payload=json.loads(raw)
+        if not isinstance(payload,dict):return result
+        err=payload.get('error',{})
+        name=(err.get('code') or err.get('type')) if isinstance(err,dict) else payload.get('code')
+        # WordPress REST uses top-level `code`. Do not output server error strings.
+        if not name and stage.startswith('wordpress'):name=payload.get('code')
+        if isinstance(name,str) and 1<=len(name)<=60 and all(x.isascii() and (x.isalnum() or x in '_-') for x in name):
+            result['error']+='_'+name
+            result['upstream_code']=name
+    except (ValueError,TypeError,AttributeError,OSError):
+        pass
+    return result
+
 # Gate history at page boundaries has produced zero-volume, flat-price
 # rows in live BTC data. A time-contiguous CSV is therefore NOT enough.
 # These rows are quarantined and independently re-queried, never invented.
@@ -684,7 +704,7 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     try:
         ctx=client.get("context",symbol=symbol)
     except urllib.error.HTTPError as exc:
-        return {"ok":False,"error":f"wordpress_context_http_{exc.code}"}
+        return safe_http_failure("wordpress_context",exc)
     except (ResearchError,urllib.error.URLError,TimeoutError,ValueError):
         return {"ok":False,"error":"wordpress_context_unavailable"}
     market=ctx.get("market",{});tech=ctx.get("technical",{})
@@ -693,7 +713,7 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     try:
         reservation=client.post("reserve",{})
     except urllib.error.HTTPError as exc:
-        return {"ok":False,"error":f"wordpress_ai_reservation_http_{exc.code}"}
+        return safe_http_failure("wordpress_ai_reservation",exc)
     except (ResearchError,urllib.error.URLError,TimeoutError):
         return {"ok":False,"error":"wordpress_ai_reservation_unavailable"}
     if not reservation.get("ok"):return {"ok":False,"error":"reserve_denied"}
@@ -728,7 +748,10 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
                        "schema":{"type":"object","properties":{"ideas":{"type":"array","items":{
                            "type":"object","properties":fields,"required":list(fields),"additionalProperties":False}}},
                            "required":["ideas"],"additionalProperties":False}}},"store":False}
-        result=http_json("https://api.openai.com/v1/responses","POST",data,api_key,timeout=40)
+        try:
+            result=http_json("https://api.openai.com/v1/responses","POST",data,api_key,timeout=40)
+        except urllib.error.HTTPError as exc:
+            return safe_http_failure("openai",exc)
         if result.get("status")!="completed":raise ResearchError("ai_response_not_completed")
         usage=result.get("usage",{})
         input_tokens=int(usage.get("input_tokens",0));output_tokens=int(usage.get("output_tokens",0));confirmed=bool(usage)
@@ -737,9 +760,15 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
         if not output:raise ResearchError("empty_ai_output")
         ideas=json.loads(output).get("ideas",[])
         if not isinstance(ideas,list):raise ResearchError("ai_non_array")
-        return client.post("suggestions",{"symbol":symbol,"interval_min":interval,"ideas":ideas[:6]})
+        try:
+            result=client.post("suggestions",{"symbol":symbol,"interval_min":interval,"ideas":ideas[:6]})
+        except urllib.error.HTTPError as exc:
+            return safe_http_failure("wordpress_suggestions",exc)
+        if not isinstance(result,dict) or result.get('ok') is not True:
+            return {"ok":False,"error":"wordpress_suggestions_rejected","stage":"wordpress_suggestions"}
+        return result
     except urllib.error.HTTPError as exc:
-        return {"ok":False,"error":f"openai_or_wordpress_http_{exc.code}"}
+        return safe_http_failure("ai_unclassified",exc)
     except (ValueError,KeyError,ResearchError,urllib.error.URLError) as exc:
         return {"ok":False,"error":type(exc).__name__}
     finally:

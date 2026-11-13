@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.6 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.7 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -332,7 +332,9 @@ async function orchestrate(env,fetchOnly=false){
         const ready15=ready.filter(p=>p.interval_min===15);
         if(!ready15.length)summary.ai={state:'no_verified_15m_market',ok:false};
         else if(now-Number(state.aiAttempts||0)<(state.aiLastOk?6*3600000:30*60000)){
-          summary.ai={state:'cooldown',ok:false,nextAttemptAt:Number(state.aiAttempts||0)+(state.aiLastOk?6*3600000:30*60000)};
+          summary.ai={state:'cooldown',ok:false,nextAttemptAt:Number(state.aiAttempts||0)+(state.aiLastOk?6*3600000:30*60000),
+            lastAttempt:state.aiLastExecution||null};
+          if(state.aiLastExecution?.error)summary.ai.error=state.aiLastExecution.error;
         }else{
           const p=ready15[(Number(state.aiCursor)||0)%ready15.length];
           const symbol=p.symbol;
@@ -341,9 +343,12 @@ async function orchestrate(env,fetchOnly=false){
             const res=await invokeContainer(env,'/ai',{symbol,interval_min:15});
             const data=await res.json();
             if(!data.ok)throw Error(safeError(data.error||'ai_not_accepted'));
-            summary.ai={symbol,accepted:Number(data.accepted||0),state:'completed',ok:true};state.aiLastOk=true;
+            const accepted=Number(data.accepted||0);
+            if(!Number.isSafeInteger(accepted)||accepted<1)throw Error('ai_zero_candidates_accepted');
+            summary.ai={symbol,accepted,state:'completed',ok:true};state.aiLastOk=true;
           }catch(error){summary.ai={symbol,state:'failed',ok:false,error:safeError(error)};
             summary.errors.push(`ai_${safeError(error)}`);state.aiLastOk=false;}
+          state.aiLastExecution={...summary.ai,attemptedAt:now};
         }
       }
       state.aiLastResult=summary.ai;
@@ -412,10 +417,10 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.1.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
