@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.1 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.2 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -671,11 +671,13 @@ function hubValidateEvent(ev,symbol,now){
   if((kind==='trade'||kind==='liquidation'||kind==='ticker')&&(price<=0||quantity<=0&&kind!=='ticker'))return null;
   const side=['buy','sell','in','out','unknown'].includes(ev.side)?ev.side:'unknown';
   const txhash=typeof ev.txhash==='string'&&/^[a-fA-F0-9]{64}$/.test(ev.txhash)?ev.txhash:null;
-  const capture=['public_stream','sampled_1s','sampled_2s'].includes(ev.capture)?ev.capture:'public_observation';
+  const capture=['public_stream','sampled_1s','sampled_2s','confirmed_chain_poll'].includes(ev.capture)?ev.capture:'public_observation';
   const price_type=['bankruptcy_price','trade_price','last_trade_price'].includes(ev.price_type)?ev.price_type:'unspecified';
   const position_side=['long','short'].includes(ev.position_side)?ev.position_side:null;
+  const watched_address=kind==='whale_transfer'&&btcAddress(ev.watched_address)?ev.watched_address:null;
+  const watch_label=watched_address?String(ev.watch_label||'watched reserve address').replace(/[^a-zA-Z0-9가-힣 _-]/g,'').slice(0,80):null;
   return {id,kind,source,symbol,ts,price,quantity,side,txhash,observed:true,capture,price_type,position_side,
-    unit:kind==='whale_transfer'?'BTC':'exchange_native_contract_units'};
+    watched_address,watch_label,unit:kind==='whale_transfer'?'BTC':'exchange_native_contract_units'};
 }
 // Live public stream source adapters. These are observed exchange packets only:
 // Bybit's liquidation "p" is BANKRUPTCY price, not an actual filled price.
@@ -731,6 +733,159 @@ async function liveLiquidationId(e){
   const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
   return 'bybit:liq:'+e.symbol+':'+Array.from(new Uint8Array(bytes).slice(0,16),x=>x.toString(16).padStart(2,'0')).join('');
 }
+
+// BTC reserve-address observatory: confirmed address net changes only.
+// Public Esplora amounts are satoshis; wallet flow does not prove a trade.
+// Default seeds mirror the historical WordPress read-only watchlist while the
+// signed WordPress watchlist endpoint is not installed.
+const BTC_RESERVE_SEEDS=[
+  {address:'34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo',label:'Binance legacy source label'},
+  {address:'3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6',label:'Binance legacy source label'},
+  {address:'3BMEX1cYYJt4jrtBdRJdD5A9deuxS6CCV3',label:'BitMEX legacy source label'},
+  {address:'bc1qchctnvmdva5z9vrpxkkxck64v7nmzdtyxsrq64',label:'BitMEX legacy source label'}
+];
+const btcAddress=s=>typeof s==='string'&&
+  (/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(s)||/^bc1[ac-hj-np-z02-9]{11,87}$/.test(s));
+const sats=v=>Number.isSafeInteger(Number(v))&&Number(v)>=0?Number(v):null;
+export function decodeBtcAddressFlow(tx,address,label='watched reserve address'){
+  if(!btcAddress(address)||!tx||typeof tx!=='object'||!tx.status?.confirmed ||
+     !/^[a-fA-F0-9]{64}$/.test(String(tx.txid||'')))return null;
+  const ts=Number(tx.status.block_time)*1000;
+  if(!Number.isSafeInteger(ts)||ts<1500000000000||ts>Date.now()+120000)return null;
+  let incoming=0,outgoing=0;
+  for(const v of Array.isArray(tx.vout)?tx.vout:[]){
+    if(v?.scriptpubkey_address===address){const val=sats(v.value);if(val===null)return null;incoming+=val;}
+  }
+  for(const v of Array.isArray(tx.vin)?tx.vin:[]){
+    if(v?.prevout?.scriptpubkey_address===address){const val=sats(v.prevout.value);if(val===null)return null;outgoing+=val;}
+  }
+  const net=incoming-outgoing;
+  if(!Number.isSafeInteger(net)||net===0)return null;
+  const quantity=Math.abs(net)/100000000;
+  if(!(quantity>0))return null;
+  return {kind:'whale_transfer',source:'blockstream',symbol:'BTCUSDT',
+    id:'btc:addressflow:'+tx.txid+':'+address.slice(0,18),
+    ts,price:0,quantity,side:net>0?'in':'out',txhash:tx.txid.toLowerCase(),
+    capture:'confirmed_chain_poll',watched_address:address,
+    watch_label:String(label).slice(0,80)};
+}
+export class BtcReserveCollector extends DurableObject{
+  constructor(ctx,env){super(ctx,env);this.ctx=ctx;this.env=env;}
+  async state(){
+    return await this.ctx.storage.get('state')||{
+      nextIndex:0,watchlist_source:'uninitialized',last_run_ms:0,last_success_ms:0,
+      accepted:0,requests:0,errors:0,addresses:{},error:null,
+      coverage:'confirmed BTC address net changes only;not exchange-wide flows'};
+  }
+  async fetch(request){
+    const path=new URL(request.url).pathname;
+    if(path==='/status'){
+      const state=await this.state(),watch=Object.entries(state.addresses||{})
+        .map(([address,v])=>({address_suffix:address.slice(-8),label:v.label||'',
+          last_checked_ms:v.checked_ms||0,backfill_complete:!!v.backfill_complete,
+          observed_confirmed:v.observed||0,gap_possible:!!v.gap_possible,error:v.error||null}));
+      return hubReply({ok:true,enabled:this.env.AUTO_WHALE_FETCH==='true',source:state.watchlist_source,
+        last_run_ms:state.last_run_ms,last_success_ms:state.last_success_ms,
+        accepted:state.accepted,requests:state.requests,errors:state.errors,
+        last_error:state.error,watchlist:watch,coverage:state.coverage,orders_enabled:false});
+    }
+    if(path==='/poll'){
+      if(this.env.AUTO_WHALE_FETCH!=='true')return hubReply({ok:true,enabled:false,skipped:true});
+      return hubReply(await this.poll());
+    }
+    return hubReply({ok:false,error:'not_found'},404);
+  }
+  async watchlist(){
+    const token=this.env.LUMEX_AI_LAB_WORKER_TOKEN;
+    if(typeof token==='string'&&token.length>=48){
+      try{
+        const r=await fetch('https://lumexbot.com/wp-json/lumex/v1/market-hub/watchlist',{
+          headers:{authorization:'Bearer '+token,accept:'application/json'},
+          signal:AbortSignal.timeout(9000)});
+        if(r.ok){
+          const json=await r.json();
+          const data=Array.isArray(json.watchlist)?json.watchlist:[];
+          const valid=data.filter(v=>btcAddress(v?.address)).slice(0,20).map(v=>({
+            address:v.address,label:String(v.exchange||'observed reserve address').slice(0,80)}));
+          return {items:valid,mode:'wordpress_configured'};
+        }
+        if(r.status!==404)throw Error('wordpress_watchlist_http_'+r.status);
+      }catch(e){if(!String(e?.message||'').includes('wordpress_watchlist_http_')){
+          // WordPress may be an older Core release with no endpoint;
+          // a timeout is NOT treated as an empty or trusted watchlist.
+          throw Error('wordpress_watchlist_unreachable');
+        }
+        throw e;
+      }
+    }
+    return {items:BTC_RESERVE_SEEDS,mode:'legacy_seed_fallback'};
+  }
+  async fetchPage(address,cursor=''){
+    const base='https://blockstream.info/api/address/'+encodeURIComponent(address)+'/txs/chain';
+    const url=cursor?base+'/'+encodeURIComponent(cursor):base;
+    const response=await fetch(url,{headers:{accept:'application/json'},signal:AbortSignal.timeout(12000)});
+    if(!response.ok)throw Error('esplora_http_'+response.status);
+    const text=await response.text();
+    if(text.length>2400000)throw Error('esplora_response_oversize');
+    const rows=JSON.parse(text);
+    if(!Array.isArray(rows)||rows.length>25)throw Error('esplora_invalid_page');
+    return rows;
+  }
+  async poll(){
+    const state=await this.state(),now=Date.now();
+    state.last_run_ms=now;state.addresses||={};
+    try{
+      const {items,mode}=await this.watchlist();
+      state.watchlist_source=mode;
+      if(!items.length)throw Error('watchlist_empty');
+      const a=items[Number(state.nextIndex||0)%items.length];
+      state.nextIndex=(Number(state.nextIndex||0)+1)%items.length;
+      const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
+      const newest=await this.fetchPage(a.address);state.requests++;
+      const pages=[newest];
+      // One bounded historic page per poll to build a 35-day history.
+      const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
+      if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
+        pages.push(await this.fetchPage(a.address,cursor));state.requests++;
+      }
+      const unique=new Map();
+      for(const page of pages)for(const tx of page){
+        if(/^[a-fA-F0-9]{64}$/.test(String(tx?.txid||''))&&tx.status?.confirmed)unique.set(tx.txid,tx);
+      }
+      const events=[...unique.values()].map(tx=>decodeBtcAddressFlow(tx,a.address,a.label)).filter(Boolean);
+      // Only retain the last 35 days; old rows are part of historical coverage metadata.
+      const keep=events.filter(e=>e.ts>=now-35*86400000);
+      let accepted=0;
+      for(let i=0;i<keep.length;i+=90){
+        const batch=keep.slice(i,i+90);
+        const res=await this.env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch(new Request('https://hub/ingest',{
+          method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTCUSDT',events:batch})}));
+        if(!res.ok)throw Error('whale_hub_http_'+res.status);
+        const result=await res.json();accepted+=Number(result.accepted||0);
+      }
+      prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
+      // Historic pagination ends when the last page has <25 rows or older than 35 days.
+      const lastPage=pages.at(-1),oldest=lastPage.at(-1);
+      prior.backfill_complete=lastPage.length<25||
+        (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
+      prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
+      // There may be >25 newly confirmed transactions between polls.
+      prior.gap_possible=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
+      prior.head=newest[0]?.txid||prior.head||null;
+      prior.error=null;state.addresses[a.address]=prior;
+      state.accepted+=accepted;state.last_success_ms=now;state.error=null;
+      await this.ctx.storage.put('state',state);
+      return {ok:true,address_suffix:a.address.slice(-8),watchlist_source:mode,
+        accepted,observed_events:keep.length,backfill_complete:prior.backfill_complete,
+        gap_possible:prior.gap_possible};
+    }catch(error){
+      state.errors++;state.error=String(error?.message||error||'unknown').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,90);
+      await this.ctx.storage.put('state',state);
+      return {ok:false,error:state.error,watchlist_source:state.watchlist_source};
+    }
+  }
+}
+
 export class MarketLiveCollector extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -956,7 +1111,7 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.1',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer'],
+    version:'1.2.2',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
@@ -964,6 +1119,20 @@ async function hubRoute(request,env){
     if(!env.MARKET_LIVE_COLLECTOR)return hubReply({ok:false,error:'live_collector_binding_missing'},503);
     try{return await env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/status')}
     catch(error){return hubReply({ok:false,error:'live_collector_status_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/whale-health'&&method==='GET'){
+    if(!env.BTC_RESERVE_COLLECTOR)return hubReply({ok:false,error:'whale_collector_binding_missing'},503);
+    try{return await env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/status')}
+    catch(error){return hubReply({ok:false,error:'whale_collector_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/archive-health'&&method==='GET'){
+    try{
+      const rows=await env.MARKET_DATA.list({prefix:'market-hub/events/',limit:25});
+      const objects=(rows?.objects||[]);
+      return hubReply({ok:true,objects_sampled:objects.length,truncated:!!rows?.truncated,
+        most_recent_modified_ms:objects.reduce((v,x)=>Math.max(v,Date.parse(x.uploaded)||0),0),
+        archive:'immutable_r2_jsonl',sample_not_total:true,order_execution:false});
+    }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
@@ -1035,10 +1204,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -1055,6 +1224,10 @@ export default{
   },
   async scheduled(controller,env,ctx){
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
+      ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
+        .fetch('https://whales/poll').catch(()=>console.error('btc_whale_poll_failed')));
+    }
     if(live && controller.cron==='* * * * *'){
       // Independent from market research Queue; a stream outage never blocks orders or research.
       ctx.waitUntil(env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/ensure')
