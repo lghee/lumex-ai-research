@@ -5,10 +5,15 @@ const raw=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
 const {default:handler}=await import('data:text/javascript;base64,'+Buffer.from(raw).toString('base64'));
 const market=new Map();const status=new Map();
 const interval=15,now=Date.now(),last=Math.floor(now/900000)*900000-900000;
-status.set('market/BTCUSDT_15.csv',{size:500000,customMetadata:{schema:'ohlcv_v2',quality:'verified',rows:'9000',lastCandleMs:String(last),source:'gateio_usdt_perpetual'}});
+const totalRows=9000;
+const csv=['timestamp,open,high,low,close,volume'];
+for(let n=totalRows-1;n>=0;n--){const ts=last-n*15*60000;const px=100+(totalRows-n)/10000;csv.push(`${ts},${px},${px+1},${px-1},${px},12`);}
+const content=csv.join('\n')+'\n';
+status.set('market/BTCUSDT_15.csv',{size:content.length,customMetadata:{schema:'ohlcv_v2',quality:'verified',rows:String(totalRows),lastCandleMs:String(last),source:'gateio_usdt_perpetual'}});
+market.set('market/BTCUSDT_15.csv',content);
 const R2={
  async head(key){return status.get(key)||null},
- async get(key){return market.has(key)?{json:async()=>JSON.parse(market.get(key))}:null},
+ async get(key){return market.has(key)?{json:async()=>JSON.parse(market.get(key)),text:async()=>market.get(key)}:null},
  async put(key,val){market.set(key,String(val))}
 };
 let mode='wp403',openaiCalls=0,commitCalls=0;
@@ -22,7 +27,7 @@ globalThis.fetch=async (url,init)=>{
     return respond({status:'completed',usage:{input_tokens:200,output_tokens:100},output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({ideas:[{family:'momentum',fast:10,slow:70,lookback:24,rsi:60,max_hold:15,volume_mult:1.4,stop_atr:1.2,take_atr:2.1,trend_filter:true}]})}]}]});
   }
   assert.equal(host,'lumexbot.com');assert.equal(init.headers.authorization,'Bearer '+'w'.repeat(64));
-  if(path.endsWith('/context'))return mode==='wp403'?respond({code:'rest_forbidden'},403):respond({ok:true,market:{fresh:true},technical:{data_quality:'scored'}});
+  if(path.endsWith('/context'))return mode==='wp403'?respond({code:'rest_forbidden'},403):respond({ok:true,market:{fresh:mode!=='wp_stale'},technical:{data_quality:mode==='wp_stale'?'missing':'scored'}});
   if(path.endsWith('/reserve'))return respond({ok:true,reservation_id:'a'.repeat(24),model:'gpt-6-luna',max_output_tokens:1200});
   if(path.endsWith('/commit')){commitCalls++;return respond({ok:true})}
   if(path.endsWith('/suggestions'))return respond({ok:true,accepted:1});
@@ -42,5 +47,9 @@ s=await run();assert.equal(s.aiLastExecution.error,'ai_openai_http_403_unsupport
 market.delete('control/research-scheduler-v1.json');mode='success';
 s=await run();assert.equal(s.aiLastExecution.state,'completed');assert.equal(s.aiLastExecution.accepted,1);assert.equal(s.aiLastExecution.transport,undefined);assert.equal(commitCalls,2);
 assert.equal((await run()).aiLastResult.state,'cooldown');assert.equal(openaiCalls,2);
+market.delete('control/research-scheduler-v1.json');mode='wp_stale';
+s=await run();assert.equal(s.aiLastExecution.state,'completed');assert.equal(openaiCalls,3);
+market.delete('control/research-scheduler-v1.json');market.delete('market/BTCUSDT_15.csv');
+s=await run();assert.equal(s.aiLastExecution.error,'ai_r2_market_missing');assert.equal(openaiCalls,3);
 console.info=oldlog;globalThis.fetch=original;
 console.log('PASS Worker-native AI: WP 403, OpenAI 403 reason, budget settlement, successful hypothesis, cooldown');

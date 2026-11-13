@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.8 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.9 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -112,6 +112,50 @@ async function callWP(env,endpoint,method='GET',body){
  * and commit endpoints remain the ONLY usage-budget authority.
  * No customer signal or exchange order endpoint is accessible here.
  */
+// AI hypotheses use the same verified 15m R2 candles as the backtest engine.
+// WordPress chart/indicator snapshots can be stale independently of R2.
+// Never call stale WordPress data live data; unverified R2 still blocks AI.
+async function loadVerifiedAiMarket(env,symbol){
+  const key=marketKey(symbol,15);
+  const head=await env.MARKET_DATA.head(key);
+  if(!isFresh(head,15,Date.now()))throw Error('ai_r2_market_not_verified_or_stale');
+  if(Number(head.size)>MAX_CSV_BYTES)throw Error('ai_r2_market_too_large');
+  const file=await env.MARKET_DATA.get(key);
+  if(!file)throw Error('ai_r2_market_missing');
+  const raw=await file.text();
+  if(typeof raw!=='string'||raw.length>MAX_CSV_BYTES)throw Error('ai_r2_market_invalid');
+  const lines=raw.trimEnd().split(/\r?\n/);
+  if(lines[0]!=='timestamp,open,high,low,close,volume'||
+    lines.length-1<MIN_CANDLES(15)||lines.length-1!==Number(head.customMetadata.rows))
+    throw Error('ai_r2_market_rows_mismatch');
+  const recent=lines.slice(-97).map(line=>line.split(',').map(Number));
+  const step=15*60000;
+  for(let i=0;i<recent.length;i++){
+    const bar=recent[i];const [ts,o,h,l,c,v]=bar;
+    if(bar.length!==6||!bar.every(Number.isFinite)||!Number.isSafeInteger(ts)||ts%step||
+       o<=0||c<=0||l<=0||v<0||h<Math.max(o,c,l)||l>Math.min(o,c)||
+       (i&&ts-recent[i-1][0]!==step))throw Error('ai_r2_market_recent_candle_invalid');
+  }
+  const latest=recent.at(-1);
+  if(latest[0]!==Number(head.customMetadata.lastCandleMs))throw Error('ai_r2_market_last_candle_mismatch');
+  if(latest[0]+step>Date.now())throw Error('ai_r2_market_unfinished_candle');
+  const avg=bars=>bars.reduce((total,r)=>total+r[5],0)/Math.max(1,bars.length);
+  const last24=recent.slice(-96);
+  const first=last24[0][4],close=latest[4];
+  const returns=last24.slice(1).map((r,i)=>Math.log(r[4]/last24[i][4]));
+  const mean=returns.reduce((a,b)=>a+b,0)/Math.max(1,returns.length);
+  const realizedVol=Math.sqrt(returns.reduce((a,b)=>a+(b-mean)**2,0)/Math.max(1,returns.length));
+  return {
+    source:String(head.customMetadata.source||'unknown'),quality:'verified',
+    interval_min:15,rows:Number(head.customMetadata.rows),
+    first_candle_ms:Number(head.customMetadata.firstCandleMs||0),
+    last_closed_candle_ms:latest[0],last_close:close,
+    return_24h_pct:Number(((close/first-1)*100).toFixed(4)),
+    realized_volatility_15m_pct:Number((realizedVol*100).toFixed(4)),
+    last_24h_volume_avg:Number(avg(last24).toFixed(5)),
+    most_recent_closed_bars:recent.slice(-12).map(([t,o,h,l,c,v])=>({t,o,h,l,c,v}))
+  };
+}
 async function runAiFromWorker(env,symbol,interval=15){
   if(!SYMBOLS.includes(symbol)||interval!==15)throw Error('ai_market_invalid');
   if(!env.OPENAI_API_KEY)throw Error('openai_key_missing');
@@ -119,8 +163,11 @@ async function runAiFromWorker(env,symbol,interval=15){
   let context;
   try{context=await callWP(env,'context?symbol='+encodeURIComponent(symbol));}
   catch(error){throw Error('ai_context_'+safeError(error));}
-  if(context?.market?.fresh!==true || !['scored','partial'].includes(context?.technical?.data_quality))
-    throw Error('ai_context_stale_market');
+  // WP is authenticated historical research context; freshness comes from R2.
+  const marketEvidence=await loadVerifiedAiMarket(env,symbol);
+  const wpContextFresh=context?.market?.fresh===true &&
+    ['scored','partial'].includes(context?.technical?.data_quality);
+
   let reservation;
   try{reservation=await callWP(env,'reserve','POST',{});}
   catch(error){throw Error('ai_reserve_'+safeError(error));}
@@ -139,13 +186,14 @@ async function runAiFromWorker(env,symbol,interval=15){
   try{
     const contextEvidence={symbol,interval_min:interval,
       research_history:(Array.isArray(context.research_history)?context.research_history:[]).slice(0,6),
-      market:context.market||{},technical:context.technical||{},
+      market:marketEvidence,wordpress_market_context:{fresh:wpContextFresh},
+      technical:wpContextFresh?(context.technical||{}):{data_quality:'stale_wp_not_used'},
       chart_timeframes:context.chart_timeframes||{},
       signals:context.signal_observations||{},indicator_observations:context.indicator_observations||{},
       whales:context.whales||{},liquidations:context.liquidations||{}};
     const request={
       model:String(reservation.model||''),
-      instructions:'Research-only strategy hypothesis generation. Never place orders or claim profit guarantees. Examine previous failed out-of-sample tests and avoid duplicates. Propose up to six distinct testable hypotheses. Families: breakout, pullback, mean_revert, momentum. Requirements: lookback 8..80; fast 5..40; slow 25..240 and greater than fast; rsi 20..80; volume_mult 0.5..3; stop_atr 0.6..4; take_atr 0.7..7; max_hold 3..48; trend_filter boolean. Use output schema exactly.',
+      instructions:'Research-only strategy hypothesis generation. Never place orders or claim profit guarantees. Examine previous failed out-of-sample tests and avoid duplicates. Propose 1 to 3 distinct testable hypotheses. Families: breakout, pullback, mean_revert, momentum. Requirements: lookback 8..80; fast 5..40; slow 25..240 and greater than fast; rsi 20..80; volume_mult 0.5..3; stop_atr 0.6..4; take_atr 0.7..7; max_hold 3..48; trend_filter boolean. Use output schema exactly.',
       input:JSON.stringify(contextEvidence).slice(0,9500),
       reasoning:{effort:'none'},max_output_tokens:maxOutput,
       text:{format:{type:'json_schema',name:'lumex_research_ideas',strict:true,
@@ -491,7 +539,7 @@ export class ResearchContainer extends DurableObject{
     const container=this.ctx.container;
     if(!container.running){container.start({image:container.images.base,instance:'lite',enableInternet:true,env:{
       LUMEX_SITE_URL:'https://lumexbot.com',LUMEX_AI_LAB_WORKER_TOKEN:this.env.LUMEX_AI_LAB_WORKER_TOKEN||'',
-      OPENAI_API_KEY:this.env.OPENAI_API_KEY||'',LUMEX_CONTAINER_KEY:this.env.LUMEX_CONTAINER_KEY||''
+      LUMEX_CONTAINER_KEY:this.env.LUMEX_CONTAINER_KEY||''
     }});}
     await container.setInactivityTimeout(120000);
     const port=container.getTcpPort(PORT);
@@ -505,10 +553,10 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.9',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.1.9',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
