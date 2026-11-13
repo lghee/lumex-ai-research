@@ -1,3 +1,14 @@
+# 1.1.4 교체 후 추가 검사
+
+1. Cloudflare Worker `/health`의 `version=1.1.4` 확인.
+2. `AUTO_FETCH=true`, `AUTO_RESEARCH=false`, `AUTO_AI=false` 유지.
+3. Cloudflare Queues → `lumex-research-jobs` → Messages → Send에 `{"kind":"fetch","symbol":"BTCUSDT","interval_min":60}` 전송.
+4. R2 → `lumex-ai-data/control/fetch-BTCUSDT-60.json`에서 `ok`, `quality`, `error`, `rows` 확인.
+5. `market/BTCUSDT_60.csv` R2 custom metadata의 `schema=ohlcv_v2`, `quality=verified` 확인. 15분봉도 검증. 이전 `ohlcv_v1` 파일은 직접 삭제하지 말 것.
+6. 수집 오류 발생 시 별도 시도 없이 비밀키나 Cron을 변경하지 말고 `control/last-market-fetch.json` 및 Worker 로그를 확인.
+
+---
+
 **1.1.3 진단 전용 업데이트**: Gate HTTP 400을 차단으로 오분류했던 문제를 수정했습니다. 배포 후 먼저 `/health`가 1.1.3인지 확인하고 Queue에 `{"kind":"fetch","symbol":"BTCUSDT","interval_min":5}` 단 1회 전송, `control/last-market-fetch.json`의 오류 코드 확인. 시장 데이터가 저장되지 않으면 연구·AI는 켜지 마세요.
 
 # LUMEX AI Research 1.1.3 배포·복구 체크리스트

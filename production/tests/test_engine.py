@@ -182,6 +182,88 @@ class ResearchEngineTests(unittest.TestCase):
                 m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,None,'')
         self.assertFalse(self.result.exists())
 
+    def test_zero_flat_candle_blocked_by_loader(self):
+        p=self.dir/'flat.csv'
+        self.write_candles(p,self.base,self.needed)
+        with p.open() as f:rows=list(csv.reader(f))
+        rows[1999]=[rows[1999][0],'100','100','100','100','0']
+        with p.open('w',newline='') as f:csv.writer(f).writerows(rows)
+        with self.assertRaisesRegex(m.ResearchError,'unverified_zero_flat_candle'):
+            m.load_csv(p,60,False)
+
+    def test_gate_page_boundary_placeholder_recovered(self):
+        from urllib.parse import parse_qs,urlparse
+        expected=self.current
+        calls=[]
+        def provider(url,**kwargs):
+            self.assertTrue(url.startswith(m.GATE_FUTURES_BASE))
+            query=parse_qs(urlparse(url).query)
+            start=int(query['from'][0])*1000
+            end=int(query['to'][0])*1000
+            calls.append((start,end))
+            rows=[]
+            for ts in range(start,min(end,expected)+1,self.step):
+                # Deliberately fake the final candle of each historical page.
+                if ts==end and end<=expected:
+                    rows.append({'t':ts//1000,'o':'100','h':'100','l':'100','c':'100','v':'0'})
+                else:
+                    rows.append({'t':ts//1000,'o':'100','h':'102','l':'99','c':'101','v':'88'})
+            return rows
+        with patch.object(m,'http_json',side_effect=provider):
+            count=m.fetch_gate_futures_candles('BTCUSDT',60,self.result)
+        values=m.load_csv(self.result,60,True)
+        self.assertGreaterEqual(len(calls),3)
+        self.assertGreaterEqual(count,len(values))
+        self.assertEqual(int(values[-1,0]),expected)
+        self.assertFalse(any(m.suspect_candle(x) for x in values))
+        self.assertTrue(all(x[5]==88 for x in values))
+
+    def test_gate_unverified_zero_cannot_publish(self):
+        from urllib.parse import parse_qs,urlparse
+        target=self.current-2*self.step
+        def provider(url,**kwargs):
+            query=parse_qs(urlparse(url).query)
+            start=int(query['from'][0])*1000;end=int(query['to'][0])*1000
+            rows=[]
+            for ts in range(start,min(end,self.current)+1,self.step):
+                if ts==target:rows.append({'t':ts//1000,'o':'100','h':'100','l':'100','c':'100','v':'0'})
+                else:rows.append({'t':ts//1000,'o':'100','h':'102','l':'99','c':'101','v':'88'})
+            return rows
+        with patch.object(m,'http_json',side_effect=provider):
+            with self.assertRaisesRegex(m.ResearchError,'gate_unverified_bar'):
+                m.fetch_gate_futures_candles('BTCUSDT',60,self.result)
+        self.assertFalse(self.result.exists())
+
+    def test_gate_missing_bar_requeried_not_fabricated(self):
+        from urllib.parse import parse_qs,urlparse
+        target=self.current-1000*self.step
+        calls=[]
+        def provider(url,**kwargs):
+            query=parse_qs(urlparse(url).query)
+            start=int(query['from'][0])*1000;end=int(query['to'][0])*1000
+            calls.append((start,end))
+            rows=[]
+            for ts in range(start,min(end,self.current)+1,self.step):
+                if ts==target and end-start>=500*self.step:
+                    continue
+                rows.append({'t':ts//1000,'o':'100','h':'102','l':'99','c':'101','v':'88'})
+            return rows
+        with patch.object(m,'http_json',side_effect=provider):
+            m.fetch_gate_futures_candles('BTCUSDT',60,self.result)
+        self.assertGreaterEqual(len(calls),3)
+        values=m.load_csv(self.result,60,True)
+        self.assertIn(target,values[:,0])
+
+    def test_previous_file_with_placeholder_forces_gate_rebuild(self):
+        # Old v1 file should trigger full source-consistent re-download.
+        with self.previous.open() as f:rows=list(csv.reader(f))
+        rows[1999]=[rows[1999][0],'100','100','100','100','0']
+        with self.previous.open('w',newline='') as f:csv.writer(f).writerows(rows)
+        with patch.object(m,'fetch_gate_futures_candles',return_value=2400) as full:
+            count=m.refresh_gate_futures_candles('BTCUSDT',60,self.result,self.previous)
+        self.assertEqual(count,2400)
+        full.assert_called_once()
+
     def test_ai_feedback_is_structured_and_billed_once(self):
         history=[{'spec':{'family':'momentum','lookback':12},'gate':'failed_gate','oos':{'profit_factor':0.8}}]
         class StubClient:

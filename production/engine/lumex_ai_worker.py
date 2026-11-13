@@ -33,6 +33,24 @@ USER_AGENT = "LUMEX-AI-Research-Worker/1.0 (read-only; no trading)"
 
 class ResearchError(Exception): pass
 
+# Gate history at page boundaries has produced zero-volume, flat-price
+# rows in live BTC data. A time-contiguous CSV is therefore NOT enough.
+# These rows are quarantined and independently re-queried, never invented.
+def suspect_candle(record) -> bool:
+    return (float(record[5]) == 0.0 and
+            float(record[1]) == float(record[2]) == float(record[3]) == float(record[4]))
+
+
+def validate_bar(record, interval: int) -> None:
+    step = interval * 60_000
+    ts = int(record[0]); o,h,l,c,v = map(float, record[1:6])
+    if (not all(math.isfinite(float(x)) for x in record) or
+        ts % step or o <= 0 or c <= 0 or l <= 0 or v < 0 or
+        h < max(o,c,l) or l > min(o,c)):
+        raise ResearchError('invalid_ohlcv')
+    if suspect_candle(record):
+        raise ResearchError('unverified_zero_flat_candle')
+
 def http_json(url: str, method: str = "GET", data: Any = None, bearer: str = "", timeout: int = 25) -> Any:
     body = json.dumps(data, separators=(",", ":")).encode() if data is not None else None
     headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
@@ -72,11 +90,12 @@ def load_csv(path: Path, interval: int, require_fresh: bool = True) -> np.ndarra
             if not all(math.isfinite(x) for x in record):raise ResearchError("nonfinite")
             ts=int(record[0]);o,h,l,c,v=record[1:]
             if ts%step or (prior and ts-prior!=step): raise ResearchError("gap_or_duplicate")
-            if o<=0 or c<=0 or l<=0 or v<0 or h<max(o,c,l) or l>min(o,c):raise ResearchError("invalid_ohlcv")
+            validate_bar(record, interval)
             prior=ts; rows.append(record)
     if not rows:raise ResearchError("empty_file")
     last=rows[-1][0]
-    if last>time.time()*1000:raise ResearchError("future_candle")
+    current_open = (int(time.time()*1000)//step)*step
+    if last >= current_open:raise ResearchError("unfinished_candle")
     if require_fresh and time.time()*1000-last>max(3*step,3_600_000):raise ResearchError("stale_candles")
     needed=int(90*1440/interval)+250
     if len(rows)<needed:raise ResearchError("less_than_90_days_and_warmup")
@@ -267,6 +286,89 @@ def refresh_binance_futures_candles(symbol: str, interval: int, out: Path, previ
     return len(old)
 
 
+def gate_window(symbol: str, interval: int, first: int, last: int) -> dict[int, tuple]:
+    """Ask Gate for a bounded range, rejecting any malformed OHLCV payload.
+
+    Never use 'limit' with from/to (officially mutually exclusive).
+    Overlap/rescue probes use the same public, read-only endpoint.
+    """
+    step = interval * 60_000
+    if last < first or (last-first)//step >= 2000:
+        raise ResearchError('gate_invalid_request_window')
+    params = {'contract': symbol[:-4]+'_USDT',
+              'interval': {5:'5m',15:'15m',60:'1h'}[interval],
+              'from': str(first//1000), 'to': str(last//1000)}
+    raw = http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params), timeout=25)
+    if not isinstance(raw, list) or not raw:
+        raise ResearchError('gate_futures_empty_or_invalid')
+    records = {}
+    for item in raw:
+        if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
+            raise ResearchError('gate_futures_bad_schema')
+        try:
+            record = (int(item['t'])*1000,float(item['o']),float(item['h']),
+                      float(item['l']),float(item['c']),float(item['v']))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ResearchError('gate_futures_bad_numeric') from exc
+        ts = record[0]
+        if ts < first or ts > last:
+            continue
+        if (not all(math.isfinite(v) for v in record) or ts%step or
+            record[1]<=0 or record[4]<=0 or record[3]<=0 or record[5]<0 or
+            record[2]<max(record[1],record[3],record[4]) or record[3]>min(record[1],record[4])):
+            raise ResearchError('gate_futures_invalid_ohlcv')
+        if ts in records and records[ts] != record:
+            raise ResearchError('gate_conflicting_provider_candle')
+        records[ts] = record
+    return records
+
+
+def merge_gate_record(target: dict[int,tuple], incoming: dict[int,tuple]) -> None:
+    """Allow an independently fetched real bar to replace a flat-zero placeholder."""
+    for ts, bar in incoming.items():
+        old = target.get(ts)
+        if old is None or old == bar:
+            target[ts] = bar
+        elif suspect_candle(old) and not suspect_candle(bar):
+            target[ts] = bar
+        elif suspect_candle(bar) and not suspect_candle(old):
+            pass
+        else:
+            # A provider must not silently rewrite already closed good bars.
+            raise ResearchError('gate_conflicting_provider_candle')
+
+
+def repair_gate_range(symbol: str, interval: int, records: dict[int,tuple],
+                      first: int, latest: int) -> None:
+    """Retry suspected placeholders/missing bars with shorter, overlapping windows.
+
+    Do not synthesize prices, use a second exchange, or silently retain gaps.
+    Limit probes to protect the provider and bound Container execution.
+    """
+    step = interval * 60_000
+    missing = [ts for ts in range(first, latest+step, step) if ts not in records]
+    suspect = [ts for ts,bar in records.items() if first<=ts<=latest and suspect_candle(bar)]
+    targets = sorted(set(missing + suspect))
+    if len(targets) > 24:
+        raise ResearchError('gate_history_too_many_unverified_bars')
+    for ts in targets:
+        start = max(first, ts-3*step)
+        # A right-hand buffer prevents page-end artificial final bars.
+        end = min((int(time.time()*1000)//step)*step, ts+3*step)
+        if end <= ts:
+            end = ts+step
+        try:
+            fresh = gate_window(symbol,interval,start,end)
+        except (ResearchError, urllib.error.URLError, TimeoutError) as exc:
+            raise ResearchError('gate_repair_query_failed') from exc
+        bar = fresh.get(ts)
+        if bar is None or suspect_candle(bar):
+            raise ResearchError('gate_unverified_bar_at_'+str(ts))
+        merge_gate_record(records, {ts:bar})
+    if any(ts not in records or suspect_candle(records[ts])
+           for ts in range(first, latest+step, step)):
+        raise ResearchError('gate_unresolved_candle_gap')
+
 def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
     """Full, contiguous OHLCV history from Gate USDT perpetual futures.
 
@@ -279,27 +381,20 @@ def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int 
     step=interval*60_000
     latest=(int(time.time()*1000)//step-1)*step
     cursor=((latest-days*86_400_000-250*step)//step)*step
+    first=cursor
     found={};calls=0
-    contract=symbol[:-4]+'_USDT'
     while cursor<=latest:
-        # The time range is inclusive, max 2000 rows. Keep under that bound.
+        # 1,999 points per page; overlap 3 points to verify artificial
+        # page-end candles independently against the next page.
         end=min(latest,cursor+1998*step)
-        params={"contract":contract,"interval":{5:'5m',15:'15m',60:'1h'}[interval],
-                "from":str(cursor//1000),"to":str(end//1000)}
-        raw=http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params),timeout=25)
-        if not isinstance(raw,list) or not raw:raise ResearchError('gate_futures_empty_or_invalid')
-        for item in raw:
-            if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
-                raise ResearchError('gate_futures_bad_schema')
-            record=(int(item['t'])*1000,float(item['o']),float(item['h']),float(item['l']),
-                    float(item['c']),float(item['v']))
-            ts=record[0]
-            if ts<cursor or ts>end:continue
-            if ts in found and found[ts]!=record:raise ResearchError('conflicting_candle')
-            found[ts]=record
-        cursor=end+step;calls+=1
+        records=gate_window(symbol,interval,cursor,end)
+        merge_gate_record(found,records)
+        calls+=1
         if calls>100:raise ResearchError('too_many_provider_pages')
-        if cursor<=latest:time.sleep(.08)
+        if end>=latest:break
+        cursor=end-2*step
+        time.sleep(.08)
+    repair_gate_range(symbol,interval,found,first,latest)
     if not found:raise ResearchError('no_market_candles')
     ordered=[found[t] for t in sorted(found)]
     if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):
@@ -327,23 +422,18 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
     last=int(old[-1,0]); missing=max(0,(latest-last)//step)
     if missing>900:return fetch_gate_futures_candles(symbol,interval,out)
     if missing>0:
-        params={'contract':symbol[:-4]+'_USDT','interval':{5:'5m',15:'15m',60:'1h'}[interval],
-                'from':str(last//1000),'to':str(latest//1000)}
-        raw=http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params),timeout=25)
-        if not isinstance(raw,list) or not raw:raise ResearchError('gate_incremental_unavailable')
-        points={}
-        for item in raw:
-            if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
-                raise ResearchError('gate_futures_bad_schema')
-            r=(int(item['t'])*1000,float(item['o']),float(item['h']),float(item['l']),
-               float(item['c']),float(item['v']))
-            if r[0]>latest or r[0]<last:continue
-            if r[0] in points and points[r[0]]!=r:raise ResearchError('conflicting_provider_candle')
-            points[r[0]]=r
-        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
-            raise ResearchError('provider_revised_closed_candle')
-        appended=[points[t] for t in sorted(points) if t>last]
-        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+        # Overlap 3 previously closed bars. If provider revises an older good
+        # candle, fail closed; do not mask with an invented zero-volume row.
+        start=max(int(old[0,0]),last-3*step)
+        points=gate_window(symbol,interval,start,latest)
+        for ts in sorted(points):
+            if ts<=last:
+                old_row=old[int((ts-int(old[0,0]))//step)]
+                if suspect_candle(points[ts]) or not np.allclose(old_row,points[ts],rtol=1e-9,atol=1e-8):
+                    raise ResearchError('gate_revised_or_unverified_overlap')
+        repair_gate_range(symbol,interval,points,last+step,latest)
+        appended=[points[ts] for ts in range(last+step,latest+step,step)]
+        if not appended or appended[0][0]!=last+step:
             raise ResearchError('incremental_provider_gap')
         old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
     needed=int(90*1440/interval)+250
@@ -545,7 +635,7 @@ def evaluate(job: dict, data: np.ndarray, common: dict) -> dict:
     delayed=run_sim(data,s,common,signals,split,len(data),1,1)
     return {"id":job["id"],"job_hash":job["job_hash"],"claim_token":job["claim_token"],"train":train,"oos":oos,"double_cost":twice,
         "one_bar_delay":delayed,"oos_days":30,"data_sha256":hashlib.sha256(data.tobytes()).hexdigest(),
-        "last_candle_unix":int(data[-1,0]/1000),"source":"bybit_linear_ohlcv_csv_90d","research_only":True}
+        "last_candle_unix":int(data[-1,0]/1000),"source":"verified_perpetual_ohlcv_csv_90d","research_only":True}
 
 def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     ctx=client.get("context",symbol=symbol)

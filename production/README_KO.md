@@ -1,8 +1,21 @@
-> **1.1.3 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+# 1.1.4 데이터 품질 보호 정책 (2026-11-13)
+
+- 기존 `lumex-ai-research2`/GitHub `main`/빌드 루트 `production` **그대로 사용**. WordPress Core 변경 없음.
+- **운영 확인 사실:** Gate.io에서 BTCUSDT 15분봉/60분봉이 R2에 저장되었으나, 전달된 CSV에 인위적 의심 캔들이 포함돼 있음. 1.1.4가 운영 API에서 이 현상을 해결하는지는 **미검증**.
+- **수집기:** Gate의 `from`/`to`는 공식 2,000개 상한을 지키면서 3개 캔들을 겹쳐 조회. 0거래량+OHLC 완전동일/시간 간격 누락은 소규모 시점 범위로 다시 조회. 복구되지 않으면 `gate_unverified_bar` 또는 `gate_unresolved_candle_gap` 등으로 실패하며 **시세를 지어내거나 저장하지 않음**.
+- **R2:** 새로 검증된 파일만 `customMetadata.schema=ohlcv_v2`, `quality=verified`, `rows`, `source`, `firstCandleMs`, `lastCandleMs` 표시. 이전 `ohlcv_v1` 및 품질 메타데이터 없는 데이터는 시각이 최신이어도 **연구 불가**. Cron은 순차 재수집 시도함. **기존 R2 CSV를 수동 삭제하지 마세요.**
+- **교차검증:** 같은 공급처의 BTC/ETH/SOL/XRP 15분봉과 1시간봉이 모두 `verified`인 경우에만 과거 공통 시간대의 OHLCV를 비교. 큰 불일치 발견 시 새 파일 저장 거부. 다른 거래소의 데이터를 섞어 비교·병합하지 않음.
+- **독립 검사:** `python production/tools/audit_market_csv.py --input BTCUSDT:15=... --input BTCUSDT:60=... --output audit.json` (저장된 CSV 변경 없음).
+- **운영 후 검사:** `/health` 버전 `1.1.4` → 수동 Queue `{"kind":"fetch","symbol":"BTCUSDT","interval_min":60}` → R2 `control/fetch-BTCUSDT-60.json`의 `ok:true`, `quality:verified`, `rows` 확인. 15분봉도 순차 검증. 두 파일의 R2 메타데이터가 `ohlcv_v2/verified`인지 확인.
+- **자동화 토글:** `AUTO_FETCH=true`, `AUTO_RESEARCH=false`, `AUTO_AI=false` 유지. 모든 백테스트는 수집 및 교차 검증이 실제 운영에서 확인될 때까지 켜지 마세요.
+
+---
 
 > **1.1.3 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
 
-# LUMEX AI Research 1.1.3 — Cloudflare/GitHub/WordPress 실제 적용 가이드
+> **1.1.3 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+
+# LUMEX AI Research 1.1.4 — Cloudflare/GitHub/WordPress 실제 적용 가이드
 
 ## 원칙
 - 운영 Worker: **`lumex-ai-research2`** (기존 프로젝트를 그대로 업데이트)

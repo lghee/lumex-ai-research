@@ -7,7 +7,7 @@ const handler=mod.default;
 const now=Date.now();const step=5*60000;
 const latest=Math.floor(now/step)*step-step;
 const csvLines=['timestamp,open,high,low,close,volume'];
-for(let i=1200;i>=0;i--){const n=latest-i*step;csvLines.push(`${n},100,101,99,100,12`);}
+for(let i=Math.ceil(90*1440/5)+250-1;i>=0;i--){const n=latest-i*step;csvLines.push(`${n},100,101,99,100,12`);}
 const validCsv=csvLines.join('\n')+'\n';assert(validCsv.length>20000);
 class Store {
   records=new Map();
@@ -62,6 +62,8 @@ env.AUTO_FETCH='true';await schedule();assert.equal(queued.length,1);assert.equa
 await consume('orchestrate');
 assert.equal(fetchRequests.length,1,'Cold start must be bounded');
 assert(await R2.head('market/BTCUSDT_5.csv'));assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.source,'binance_usdm_perpetual');
+assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.schema,'ohlcv_v2');
+assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.quality,'verified');
 const diagOK=await (await R2.get('control/last-market-fetch.json')).json();assert.equal(diagOK.ok,true);assert.equal(diagOK.market,'BTCUSDT:5');assert.equal((await (await R2.get('control/fetch-BTCUSDT-5.json')).json()).ok,true);
 assert.equal(results.length,0);
 assert.equal(eventHistory.length,1,'Telemetry should be the only WordPress operation for fetch-only');
@@ -84,3 +86,25 @@ assert.equal(diagFail.ok,false);assert.equal(diagFail.market,'XRPUSDT:5');
 assert(diagFail.error.includes('bybit_403_binance_403_gate_403_access_restricted'));assert.equal((await (await R2.get('control/fetch-XRPUSDT-5.json')).json()).ok,false);
 globalThis.fetch=savedFetch;
 console.log('PASS production Worker: disabled default, authenticated status, bounded market fetch, research result, release on failure, AI cadence, no order routes');
+
+// Reject a plausible-length CSV containing a synthetic zero/flat row.
+const oldHead=await R2.head('market/BTCUSDT_5.csv');
+const corruptLines=validCsv.trimEnd().split('\n');
+const badColumns=corruptLines[2000].split(',');
+corruptLines[2000]=`${badColumns[0]},100,100,100,100,0`;
+const corruptCsv=corruptLines.join('\n')+'\n';
+env.RESEARCH_CONTAINER={getByName:()=>({fetch:async()=>new Response(corruptCsv,{headers:{'x-lumex-market-source':'binance_usdm_perpetual'}})})};
+const invalid={body:{kind:'fetch',symbol:'BTCUSDT',interval_min:5},attempts:1,ack(){throw Error('must_not_ack');},retry(){this.retried=true;}};
+await handler.queue({messages:[invalid]},env);
+assert.equal(invalid.retried,true,'zero/flat candle must fail');
+assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.quality,'verified','must retain old verified cache on failed fetch');
+assert.equal((await R2.head('market/BTCUSDT_5.csv')).size,oldHead.size);
+const rejected=await (await R2.get('control/last-market-fetch.json')).json();
+assert.equal(rejected.error,'market_unverified_zero_flat_candle');
+// Pre-v2 CSV cannot qualify as research-ready, even if it is large and fresh.
+const previousObject=R2.records.get('market/BTCUSDT_5.csv');
+R2.records.set('market/BTCUSDT_5.csv',{...previousObject,meta:{...previousObject.meta,schema:'ohlcv_v1',quality:undefined}});
+const infoOld=await (await handler.fetch(new Request('https://worker/status',{headers:{authorization:'Bearer '+env.LUMEX_ADMIN_API_TOKEN}}),env)).json();
+assert.equal(infoOld.markets.find(x=>x.symbol==='BTCUSDT'&&x.interval_min===5).ready,false);
+R2.records.set('market/BTCUSDT_5.csv',previousObject);
+console.log('PASS market quality v2: 90d+warmup, zero/flat quarantine, no overwrite, legacy backtest blocked');

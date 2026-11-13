@@ -1,8 +1,10 @@
+> **1.1.4 (2026-11-13):** 실제 운영에서 `Gate.io` → Cloudflare Container → R2의 BTC 15분봉·1시간봉 CSV 저장 성공을 확인했습니다. 하지만 전달된 두 CSV에서 페이지 경계와 최근 구간의 0거래량·동일 OHLC 캔들이 발견됐습니다. 이번 릴리스는 Gate 페이지 오버랩·의심봉 재조회·빈 구간 재조회·완성봉/90일 검증·같은 공급자의 15분/1시간봉 교차 검증, `ohlcv_v2` 품질 메타데이터를 추가합니다. **검증 이전 R2 파일은 연구 대상에서 자동 제외됩니다.** 운영 환경에서 재조회가 성공했는지는 새 버전 배포 후 확인 필요합니다.
+
 > **1.1.3 (2026-11-13):** 실제 운영 로그에서 Bybit 403, Binance 451, Gate 400 확인. 1.1.2 코드가 Gate의 모든 HTTP 400을 `access_restricted`로 잘못 분류함을 정정. Gate 오류 본문에서 제한된 오류 필드만 읽고, 문제가 발생한 경우 2개 캔들 요청으로 짧게 진단하여 R2 실패 코드에 남깁니다. **이 릴리스는 데이터 접근 복구가 아니라 원인 분류용이며 실제 수집 성공은 확인되지 않았습니다.**
 
 > **1.1.3 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
 
-# LUMEX AI RESEARCH 1.1.3 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
+# LUMEX AI RESEARCH 1.1.4 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
 
 **2026-11-13 업데이트. 현재 사용자의 실 배포 프로젝트는 `lumex-ai-research2`이며 Cloudflare Build의 Root directory는 `production` 입니다.** 기존 Worker를 삭제하거나 이름을 바꾸지 마세요.
 
