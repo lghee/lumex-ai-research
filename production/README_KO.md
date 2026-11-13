@@ -1,3 +1,5 @@
+> **1.2.1:** Cloudflare Durable Object Gate/Bybit 공개 스트림 수집·중복제거·R2 장기 아카이브 연결. 실시간 청산은 Bybit 공개 이벤트만, 체결은 Gate 표본만 포함. WordPress 전면 Cron 제거·온체인 고래 이전은 아직 안 됨.
+
 > **1.2.0:** 공통 Market Hub 시작: R2 확정봉·레이더, 인증된 관측 이벤트 원장 및 WebSocket 전송. 공개 스트림 수집기가 연결되기 전까지 `live_exchange_ingestor: not_activated`임을 명확히 표시합니다.
 
 > **1.1.10:** 레거시 AI Container 403이 남아 있는 경우에만 Worker 직접 호출 1회 복구 재시도. 이후 오류는 실제 WordPress/OpenAI 단계별 오류로 보고합니다. 시세·Cron·주문·고객 신호 미변경.
