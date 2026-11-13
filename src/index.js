@@ -1012,7 +1012,7 @@ export async function backfillOneLegacySource(env,storage,source){
         schema:'lumex_legacy_archive_v1',source,origin:'lumexbot_wordpress_public_market_mysql',
         source_cursor_from:cursor,source_cursor_to:last,record_count:rows.length,
         records:rows,integrity:'sha256_of_utf8_json_document',
-        merged_with_live_observations:false,imported_at_ms:Date.now()
+        merged_with_live_observations:false
       };
       const json=JSON.stringify(payload);
       const digest=hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(json)));
