@@ -48,6 +48,21 @@ const routed=await worker.fetch(authorized,env);
 assert.equal(routed.status,200);const j=await routed.json();
 assert.equal(j.captures.liquidations.events,5);
 assert.equal(j.rollup.up_to_date,true);assert.equal(j.rollup.older_r2_archive_reimported,false);
+// The same WordPress short-lived PRO HMAC ticket used for WebSockets can
+// authorize read-only Cloudflare insights without any WordPress SQL polling.
+const exp=Math.floor(Date.now()/1000)+70,uid='1234',signedText='mh1:'+uid+':BTCUSDT:'+exp;
+const signingKey=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.LUMEX_AI_LAB_WORKER_TOKEN),
+ {name:'HMAC',hash:'SHA-256'},false,['sign']);
+const sig=Array.from(new Uint8Array(await crypto.subtle.sign('HMAC',signingKey,new TextEncoder().encode(signedText))),
+ b=>b.toString(16).padStart(2,'0')).join('');
+const direct=await worker.fetch(new Request('https://market/market-hub/v1/insights?symbol=BTCUSDT&window=24h&uid='+uid+'&exp='+exp+'&sig='+sig),env);
+assert.equal(direct.status,200);
+assert.equal(direct.headers.get('access-control-allow-origin'),'https://lumexbot.com');
+assert.equal((await direct.json()).captures.btc_address_net.net_btc,5.25);
+const wrongSymbol=await worker.fetch(new Request('https://market/market-hub/v1/insights?symbol=ETHUSDT&window=24h&uid='+uid+'&exp='+exp+'&sig='+sig),env);
+assert.equal(wrongSymbol.status,401);
+const oldToken=await worker.fetch(new Request('https://market/market-hub/v1/insights?symbol=BTCUSDT&window=24h&uid='+uid+'&exp='+(exp-3600)+'&sig='+sig),env);
+assert.equal(oldToken.status,401);
 const unsupported=await worker.fetch(new Request('https://market/market-hub/v1/insights?symbol=BTCUSDT&window=365d',
  {headers:{authorization:'Bearer '+env.LUMEX_AI_LAB_WORKER_TOKEN}}),env);
 assert.equal(unsupported.status,400);
