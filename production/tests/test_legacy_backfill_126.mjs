@@ -47,7 +47,7 @@ globalThis.fetch=async (url,opts)=>{
  return new Response(JSON.stringify(page(source,cursor)),{status:200});
 };
 const collector=new BtcReserveCollector({storage},env);
-env.BTC_RESERVE_COLLECTOR={getByName:id=>{assert.equal(id,'reserve-btc');return collector}};
+env.BTC_RESERVE_COLLECTOR={getByName:id=>{assert.equal(id,'reserve-btc');return {fetch:arg=>collector.fetch(arg instanceof Request?arg:new Request(arg))}}};
 const run=async()=>{
  const pending=[];await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil:p=>pending.push(p)});
  await Promise.all(pending);
