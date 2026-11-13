@@ -43,3 +43,8 @@ npm run check
 ## 1.1.5 통합 운영 참고
 - Cloudflare 1분(시장) + 5분(연구) Cron, Core 0.5.05.21과 함께 사용
 - 상세 내용: docs/RELEASE_115_KO.md
+
+## 1.1.6 운영 참고
+- Cloudflare 1분 시장 점검, 5분 연구/AI/포워드 관측 Cron. WordPress Core **0.5.05.22** 선설치 필요.
+- R2 `collecting` 품질 5분봉은 백테스트 금지, Gate 10,000 최근봉 한계와 누적 이력 보호.
+- AI 미호출 원인과 `failed_gate` 탈락 사유는 관리자에서 확인. paper-forward 원장은 체결·손익·고객 시그널이 아닙니다.

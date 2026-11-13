@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.4 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.6 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -15,7 +15,7 @@ const FETCH_DIAGNOSTIC_KEY = 'control/last-market-fetch.json';
 const MAX_CSV_BYTES = 12_000_000;
 const QUALITY_SCHEMA = 'ohlcv_v2';
 const MIN_CANDLES = interval => Math.ceil(90*1440/interval)+250;
-const MIN_INGEST_CANDLES = interval => Math.ceil((interval===5?30:90)*1440/interval)+250;
+const MIN_INGEST_CANDLES = interval => Math.ceil((interval===5?14:90)*1440/interval)+250;
 // Worker-side independent validation. Container output is untrusted input;
 // R2 v1 data is not eligible for research until revalidated/replaced.
 function inspectCsv(text, interval, now=Date.now()){
@@ -237,9 +237,47 @@ async function runJobs(env,readyMarkets){
   }
   return {processed,released};
 }
+// Safe paper-forward bridge: only candidate_review strategies, verified closed bars,
+// authenticated WP observation journal. Never writes the public signal ledger.
+async function runForward(env,readyMarkets){
+  const eligible=readyMarkets.filter(p=>p.interval_min===15||p.interval_min===60);
+  if(!eligible.length)return {candidates:0,recorded:0,reason:'no_verified_forward_market'};
+  const pairs=eligible.map(p=>marketId(p.symbol,p.interval_min)).join(',');
+  const response=await callWP(env,`forward/jobs?markets=${encodeURIComponent(pairs)}`);
+  const jobs=Array.isArray(response.jobs)?response.jobs.slice(0,8):[];
+  if(!jobs.length)return {candidates:0,recorded:0,reason:'no_candidate_review_strategy'};
+  let recorded=0,seen=0;
+  const groups=new Map();
+  const allowed=new Set(eligible.map(p=>marketId(p.symbol,p.interval_min)));
+  for(const job of jobs){
+    const key=marketId(job.symbol,Number(job.interval_min));
+    if(!allowed.has(key))continue;
+    if(!groups.has(key))groups.set(key,[]);
+    groups.get(key).push(job);
+  }
+  for(const [market,group] of groups){
+    const [symbol,frame]=market.split(':');const interval=Number(frame);
+    const csv=await env.MARKET_DATA.get(marketKey(symbol,interval));
+    if(!csv||csv.size>MAX_CSV_BYTES)continue;
+    const rr=await invokeContainer(env,'/observe',{csv:await csv.text(),jobs:group,interval_min:interval,
+      market_source:csv.customMetadata?.source||''});
+    const data=await rr.json();
+    if(!Array.isArray(data.reports))throw Error('invalid_paper_observation_result');
+    const mapped=new Map(data.reports.map(r=>[Number(r.id),r]));
+    for(const job of group){
+      const evidence=mapped.get(Number(job.id));
+      if(!evidence || evidence.error || evidence.job_hash!==job.job_hash)continue;
+      seen++;
+      const result=await callWP(env,'forward/records','POST',evidence);
+      if(result.ok===true && result.state==='paper_observation_recorded')recorded++;
+    }
+  }
+  return {candidates:jobs.length,seen,recorded,mode:'paper_only'};
+}
+
 async function orchestrate(env,fetchOnly=false){
   const now=Date.now();const state=await readScheduler(env);
-  const summary={kind:'orchestrate',market_fetches:[],research:null,ai:null,errors:[],timestamp:new Date(now).toISOString()};
+  const summary={kind:'orchestrate',market_fetches:[],research:null,forward:null,ai:null,errors:[],timestamp:new Date(now).toISOString()};
   const active=enabled(env,'AUTO_FETCH')||(!fetchOnly&&(enabled(env,'AUTO_RESEARCH')||enabled(env,'AUTO_AI')));
   if(!active)return {...summary,skipped:'all_automation_disabled'};
   try{
@@ -279,23 +317,44 @@ async function orchestrate(env,fetchOnly=false){
         }catch(error){summary.errors.push(`research_${safeError(error)}`);console.error('research_orchestration_error',safeError(error));}
       }else summary.research={processed:0,reason:'no_fresh_market_data'};
     }
-    // At most one AI request every six hours (or a 30-minute failure cooldown).
-    if(!fetchOnly && enabled(env,'AUTO_AI') && env.OPENAI_API_KEY && now-Number(state.aiAttempts||0)>=(state.aiLastOk?6*3600000:30*60000)){
-      const symbol=SYMBOLS[(Number(state.aiCursor)||0)%SYMBOLS.length];
-      state.aiAttempts=now;state.aiCursor=(Number(state.aiCursor)||0)+1;
-      try{
-        const res=await invokeContainer(env,'/ai',{symbol,interval_min:15});
-        const data=await res.json();
-        if(!data.ok)throw Error(safeError(data.error||'ai_not_accepted'));
-        summary.ai={symbol,accepted:Number(data.accepted||0),ok:true};state.aiLastOk=true;
-      }catch(error){summary.ai={symbol,ok:false,error:safeError(error)};summary.errors.push(`ai_${safeError(error)}`);state.aiLastOk=false;}
+    if(!fetchOnly && enabled(env,'AUTO_RESEARCH') && ready.length){
+      try{summary.forward=await runForward(env,ready);}
+      catch(error){summary.forward={recorded:0,error:safeError(error)};
+        summary.errors.push(`forward_${safeError(error)}`);console.error('forward_observation_error',safeError(error));}
     }
+    // Never let an AI skip silently. Record explicit, non-secret, bounded states.
+    // Only a verified, recently updated 15-minute R2 market is eligible for AI
+    // research, and AI results are ALWAYS unapproved DSL hypotheses.
+    if(!fetchOnly){
+      if(!enabled(env,'AUTO_AI'))summary.ai={state:'disabled_in_cloudflare',ok:false};
+      else if(!env.OPENAI_API_KEY)summary.ai={state:'openai_key_missing',ok:false};
+      else {
+        const ready15=ready.filter(p=>p.interval_min===15);
+        if(!ready15.length)summary.ai={state:'no_verified_15m_market',ok:false};
+        else if(now-Number(state.aiAttempts||0)<(state.aiLastOk?6*3600000:30*60000)){
+          summary.ai={state:'cooldown',ok:false,nextAttemptAt:Number(state.aiAttempts||0)+(state.aiLastOk?6*3600000:30*60000)};
+        }else{
+          const p=ready15[(Number(state.aiCursor)||0)%ready15.length];
+          const symbol=p.symbol;
+          state.aiAttempts=now;state.aiCursor=(Number(state.aiCursor)||0)+1;
+          try{
+            const res=await invokeContainer(env,'/ai',{symbol,interval_min:15});
+            const data=await res.json();
+            if(!data.ok)throw Error(safeError(data.error||'ai_not_accepted'));
+            summary.ai={symbol,accepted:Number(data.accepted||0),state:'completed',ok:true};state.aiLastOk=true;
+          }catch(error){summary.ai={symbol,state:'failed',ok:false,error:safeError(error)};
+            summary.errors.push(`ai_${safeError(error)}`);state.aiLastOk=false;}
+        }
+      }
+      state.aiLastResult=summary.ai;
+    }
+
   }catch(error){summary.errors.push(`orchestrator_${safeError(error)}`);console.error('orchestrator_error',safeError(error));}
   state.lastRun=now;state.lastSummary=summary;state.errors.push(...summary.errors);
   await writeScheduler(env,state);
   // Optional site-side observability; a failing telemetry request must not lose completed research.
   if(!fetchOnly && env.LUMEX_AI_LAB_WORKER_TOKEN){
-    try{await callWP(env,'telemetry','POST',{timestamp:Math.floor(now/1000),ready_markets:summary.ready_markets||0,summary:summary.research||{},fetches:summary.market_fetches,markets:summary.markets||[],ai:summary.ai,errors:summary.errors});}
+    try{await callWP(env,'telemetry','POST',{timestamp:Math.floor(now/1000),ready_markets:summary.ready_markets||0,summary:summary.research||{},fetches:summary.market_fetches,markets:summary.markets||[],forward:summary.forward,ai:summary.ai,errors:summary.errors});}
     catch(error){console.error('telemetry_failed',safeError(error));}
   }
   console.info('lumex_scheduler',JSON.stringify(summary));
@@ -353,11 +412,11 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
-      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
+      const out={ok:true,version:'1.1.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
     }

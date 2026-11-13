@@ -12,7 +12,7 @@ for(const cron of ['* * * * *','*/5 * * * *']){
 }
 assert.deepEqual(queue.map(x=>x.kind),['market_tick','orchestrate']);
 assert.equal((await handler.fetch(new Request('https://worker/health'),env)).status,200);
-assert.equal((await (await handler.fetch(new Request('https://worker/health'),env)).json()).version,'1.1.5');
+assert.equal((await (await handler.fetch(new Request('https://worker/health'),env)).json()).version,'1.1.6');
 const request=new Request('https://worker/enqueue',{method:'POST',headers:{authorization:'Bearer '+'z'.repeat(40)},body:JSON.stringify({kind:'market_tick'})});
 assert.equal((await handler.fetch(request,env)).status,400,'market_tick must not be external action');
 
@@ -37,4 +37,4 @@ const res=await handler.fetch(new Request('https://worker/status',{headers:{auth
 const info=await res.json();const cand=info.markets.find(x=>x.symbol==='BTCUSDT'&&x.interval_min===5);
 assert.equal(cand.ready,false,'30-day history must never be used as 90-day research data');
 assert.equal(cand.quality,'collecting');
-console.log('PASS Worker 1.1.5: split schedule, 5m collecting-only archive, backtest blocked, no external cron action');
+console.log('PASS Worker 1.1.6: split schedule, 5m collecting-only archive, backtest blocked, no external cron action');

@@ -1,10 +1,10 @@
 """LUMEX Cloudflare Container HTTP interface. Never sends exchange orders."""
 from __future__ import annotations
-import csv, io, json, os, tempfile, hmac, urllib.error
+import csv, io, json, os, tempfile, hmac, urllib.error, hashlib, math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv, refresh_public_perpetual_candles, MARKET_SOURCES,
-                                     indicators, evaluate, Client, ai_ideas, refresh_bybit_candles)
+                                     indicators, evaluate, vector_signals, Client, ai_ideas, refresh_bybit_candles)
 SUPPORTED={'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'}
 FRAMES={5,15,60}
 MAX_PAYLOAD=12_500_000
@@ -62,6 +62,31 @@ class Handler(BaseHTTPRequestHandler):
                         except (ResearchError,ValueError,KeyError,TypeError) as e:
                             reports.append({'id':job.get('id'), 'job_hash':job.get('job_hash'),'claim_token':job.get('claim_token'),'error':True,'error_code':str(e)[:70],'source':'cloudflare_research_validation'})
                     return self.send(200,{'reports':reports})
+            if self.path=='/observe':
+                interval=int(arg.get('interval_min',0));jobs=arg.get('jobs',[]);csv_data=arg.get('csv','')
+                source=arg.get('market_source','')
+                if interval not in (15,60) or source not in MARKET_SOURCES or not isinstance(jobs,list) or len(jobs)>8 or not isinstance(csv_data,str) or len(csv_data)>MAX_PAYLOAD:
+                    raise ResearchError('bad_forward_request')
+                with tempfile.TemporaryDirectory() as tmp:
+                    path=Path(tmp)/'candles.csv';path.write_text(csv_data,encoding='utf-8')
+                    data=load_csv(path,interval,True)
+                    commons=indicators(data)
+                    last=int(data[-1,0]);close=float(data[-1,4]);digest=hashlib.sha256(data.tobytes()).hexdigest()
+                    reports=[]
+                    for job in jobs:
+                        try:
+                            spec=job['spec']
+                            if (not isinstance(spec,dict) or spec.get('family') not in ('breakout','pullback','mean_revert','momentum') or
+                                not 5<=int(spec['fast'])<=40 or not 25<=int(spec['slow'])<=240 or int(spec['fast'])>=int(spec['slow']) or
+                                not 8<=int(spec['lookback'])<=80):
+                                raise ResearchError('invalid_forward_spec')
+                            d=int(vector_signals(data,spec,commons)[-1])
+                            reports.append({'id':job['id'],'job_hash':job['job_hash'],'symbol':job['symbol'],
+                                'interval_min':interval,'candle_open_ms':last,'direction':'long' if d>0 else ('short' if d<0 else 'flat'),
+                                'close_price':close,'data_sha256':digest,'source':source,'paper_only':True})
+                        except (ResearchError,KeyError,TypeError,ValueError,OverflowError):
+                            reports.append({'id':job.get('id'),'job_hash':job.get('job_hash'),'error':True,'error_code':'invalid_forward_spec'})
+                    return self.send(200,{'reports':reports,'mode':'paper_observation_only'})
             if self.path=='/ai':
                 sym=arg.get('symbol');interval=int(arg.get('interval_min',0))
                 if sym not in SUPPORTED or interval not in FRAMES:raise ResearchError('bad_market')

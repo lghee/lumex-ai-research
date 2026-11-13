@@ -22,6 +22,7 @@ globalThis.fetch=async (url,opts)=>{
   const u=new URL(url);assert.equal(u.hostname,'lumexbot.com');
   assert.equal(opts.headers.authorization,'Bearer '+'w'.repeat(64));
   eventHistory.push(u.pathname);
+  if(u.pathname.endsWith('/forward/jobs'))return response({ok:true,jobs:[]});
   if(u.pathname.endsWith('/tick'))return response({ok:true,state:'queued',enqueued:100,cursor:100});
   if(u.pathname.endsWith('/jobs')){
     assert(u.searchParams.get('markets')?.includes('BTCUSDT:5'),'ready-market filter must be supplied');
@@ -74,7 +75,18 @@ assert.equal(released.length,0);
 const status=await handler.fetch(new Request('https://worker/status',{headers:{authorization:'Bearer '+env.LUMEX_ADMIN_API_TOKEN}}),env);
 assert.equal(status.status,200);const info=await status.json();assert.equal(info.markets.filter(m=>m.ready).length,1);assert.equal(info.trading_enabled,false);
 failEvaluate=true;claimed=false;await consume('orchestrate');assert.equal(released.length,1,'Failed evaluation must release its lease');assert.equal(results.length,1,'Failed evaluation must not become success');
-env.AUTO_RESEARCH='false';env.AUTO_AI='true';await consume('orchestrate');assert.equal(aiCalls,1,'AI runs on first scheduled run');
+env.AUTO_RESEARCH='false';env.AUTO_AI='true';await consume('orchestrate');
+assert.equal(aiCalls,0,'AI must require verified 15m history');
+const aiSkip=await (await R2.get('control/research-scheduler-v1.json')).json();
+assert.equal(aiSkip.lastSummary.ai.state,'no_verified_15m_market');
+const step15=15*60000,latest15=Math.floor(Date.now()/step15)*step15-step15;
+const rows15=Math.ceil(90*1440/15)+250;
+const market15=['timestamp,open,high,low,close,volume'];
+for(let i=rows15-1;i>=0;i--)market15.push(`${latest15-i*step15},100,101,99,100,12`);
+await R2.put('market/BTCUSDT_15.csv',market15.join('\n')+'\n',{
+  customMetadata:{schema:'ohlcv_v2',quality:'verified',source:'binance_usdm_perpetual',rows:String(rows15),lastCandleMs:String(latest15),fetchedAtMs:String(Date.now())}
+});
+await consume('orchestrate');assert.equal(aiCalls,1,'AI runs when verified 15m is ready');
 await consume('orchestrate');assert.equal(aiCalls,1,'AI must be rate limited');
 assert.equal((await handler.fetch(new Request('https://worker/admin/order',{headers:{authorization:'Bearer '+env.LUMEX_ADMIN_API_TOKEN}}),env)).status,404);
 env.RESEARCH_CONTAINER={getByName:()=>({fetch:async()=>response({detail:'bybit_403_binance_403_gate_403_access_restricted'},422)})};

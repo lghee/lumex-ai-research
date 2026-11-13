@@ -369,6 +369,18 @@ def repair_gate_range(symbol: str, interval: int, records: dict[int,tuple],
            for ts in range(first, latest+step, step)):
         raise ResearchError('gate_unresolved_candle_gap')
 
+def gate_recent_limit(error: urllib.error.HTTPError) -> bool:
+    """Recognize the reported recent-10,000-bars 400 without hiding other 400 errors."""
+    if error.code != 400:
+        return False
+    try:
+        detail=error.read(1024).decode('utf-8','replace').lower()
+    except (OSError,ValueError):
+        return False
+    return ('candlestick too long' in detail or 'maximum 10000' in detail or
+            ('candlestick' in detail and 'too long ago' in detail))
+
+
 def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
     """Full, contiguous OHLCV history from Gate USDT perpetual futures.
 
@@ -377,40 +389,51 @@ def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int 
     from/to time (not `limit`, which is mutually exclusive per official docs).
     """
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
-    # Gate can return only the most recent ~10,000 bars: 5m needs a 30d
-    # rolling bootstrap (then gradual accumulation) and is NOT 90d research-ready.
-    if interval==5: days=32
+    # Gate currently enforces a rolling recent-10,000-candle server window.
+    # Boundary/clock skew can reject 32d even when page sizes are <2,000.
+    # Bootstrap shorter ranges only for the KNOWN recent-history error; never
+    # assume a random 400/403 means this limit or silently fabricate OHLCV.
     if interval==60: days=180
-    if days < 30 or days > 200:raise ResearchError("invalid_days")
+    if interval!=5 and (days<30 or days>200):raise ResearchError('invalid_days')
     step=interval*60_000
     latest=(int(time.time()*1000)//step-1)*step
-    cursor=((latest-days*86_400_000-250*step)//step)*step
-    first=cursor
-    found={};calls=0
-    while cursor<=latest:
-        # 1,999 points per page; overlap 3 points to verify artificial
-        # page-end candles independently against the next page.
-        end=min(latest,cursor+1998*step)
-        records=gate_window(symbol,interval,cursor,end)
-        merge_gate_record(found,records)
-        calls+=1
-        if calls>100:raise ResearchError('too_many_provider_pages')
-        if end>=latest:break
-        cursor=end-2*step
-        time.sleep(.08)
+    attempts=(32,28,24,21,17) if interval==5 else (days,)
+    for attempt_days in attempts:
+        cursor=((latest-attempt_days*86_400_000-250*step)//step)*step
+        first=cursor
+        found={};calls=0
+        try:
+            while cursor<=latest:
+                # Overlap page edges; request sizes remain < 2000 bars.
+                end=min(latest,cursor+1998*step)
+                records=gate_window(symbol,interval,cursor,end)
+                merge_gate_record(found,records)
+                calls+=1
+                if calls>100:raise ResearchError('too_many_provider_pages')
+                if end>=latest:break
+                cursor=end-2*step
+                time.sleep(.08)
+        except urllib.error.HTTPError as error:
+            if interval!=5 or not gate_recent_limit(error):raise
+            if attempt_days==attempts[-1]:
+                raise ResearchError('gate_5m_recent_history_limit_after_fallback') from error
+            continue
+        break
+    else:
+        raise ResearchError('gate_5m_bootstrap_not_available')
     repair_gate_range(symbol,interval,found,first,latest)
     if not found:raise ResearchError('no_market_candles')
     ordered=[found[t] for t in sorted(found)]
     if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):
         raise ResearchError('provider_gaps')
-    if len(ordered)<(30 if interval==5 else 90)*1440/interval+250:raise ResearchError('insufficient_provider_history')
+    if len(ordered)<(14 if interval==5 else 90)*1440/interval+250:raise ResearchError('insufficient_provider_history')
     if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError('provider_stale')
     out.parent.mkdir(parents=True,exist_ok=True)
     tmp=out.with_suffix(out.suffix+'.tmp')
     with tmp.open('w',encoding='utf-8',newline='') as file:
         writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
         writer.writerows(ordered)
-    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else (180 if interval==60 else 90)))
+    load_csv(tmp,interval,True,min_history_days=(14 if interval==5 else (180 if interval==60 else 90)))
     tmp.replace(out)
     return len(ordered)
 
@@ -419,19 +442,32 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
     """Same-source incremental refresh; full re-backfill if cache isn't usable."""
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError('invalid_selection')
     if previous is None or not previous.is_file():return fetch_gate_futures_candles(symbol,interval,out)
-    try:old=load_csv(previous,interval,require_fresh=False,min_history_days=(30 if interval==5 else 90),keep_all=True)
+    try:old=load_csv(previous,interval,require_fresh=False,min_history_days=(14 if interval==5 else 90),keep_all=True)
     except (ResearchError,ValueError,OSError):return fetch_gate_futures_candles(symbol,interval,out)
     if interval==60 and old.shape[0] < 180*24+250:
         return fetch_gate_futures_candles(symbol,interval,out)
     step=interval*60000
     latest=(int(time.time()*1000)//step-1)*step
     last=int(old[-1,0]); missing=max(0,(latest-last)//step)
-    if missing>900:return fetch_gate_futures_candles(symbol,interval,out)
+    # Preserve an accumulated 5m archive across multi-day outage: a full new
+    # bootstrap would destroy history older than Gate's rolling 10k-bar cap.
+    # Reconcile up to 5000 missing bars by bounded overlapping pages; longer
+    # outages fail CLOSED and retain R2's previous file for manual recovery.
+    if missing>900 and interval!=5:return fetch_gate_futures_candles(symbol,interval,out)
+    if missing>5000:raise ResearchError('gate_5m_outage_exceeds_safe_recovery')
     if missing>0:
         # Overlap 3 previously closed bars. If provider revises an older good
         # candle, fail closed; do not mask with an invented zero-volume row.
         start=max(int(old[0,0]),last-3*step)
-        points=gate_window(symbol,interval,start,latest)
+        if missing>900:
+            points={};cursor=start
+            while cursor<=latest:
+                end=min(latest,cursor+1998*step)
+                merge_gate_record(points,gate_window(symbol,interval,cursor,end))
+                if end>=latest:break
+                cursor=end-2*step
+        else:
+            points=gate_window(symbol,interval,start,latest)
         for ts in sorted(points):
             if ts<=last:
                 old_row=old[int((ts-int(old[0,0]))//step)]
@@ -449,7 +485,7 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
     with tmp.open('w',encoding='utf-8',newline='') as file:
         writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
         for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
-    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else 90),keep_all=True)
+    load_csv(tmp,interval,True,min_history_days=(14 if interval==5 else 90),keep_all=True)
     tmp.replace(out)
     return len(old)
 
@@ -644,11 +680,22 @@ def evaluate(job: dict, data: np.ndarray, common: dict) -> dict:
         "last_candle_unix":int(data[-1,0]/1000),"source":"verified_perpetual_ohlcv_csv_90d","research_only":True}
 
 def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
-    ctx=client.get("context",symbol=symbol)
+    # Do not silently consume a quota when WP market evidence is stale.
+    try:
+        ctx=client.get("context",symbol=symbol)
+    except urllib.error.HTTPError as exc:
+        return {"ok":False,"error":f"wordpress_context_http_{exc.code}"}
+    except (ResearchError,urllib.error.URLError,TimeoutError,ValueError):
+        return {"ok":False,"error":"wordpress_context_unavailable"}
     market=ctx.get("market",{});tech=ctx.get("technical",{})
     if not market.get("fresh") or tech.get("data_quality") not in ("scored","partial"):
         return {"ok":False,"error":"stale_market_context"}
-    reservation=client.post("reserve",{})
+    try:
+        reservation=client.post("reserve",{})
+    except urllib.error.HTTPError as exc:
+        return {"ok":False,"error":f"wordpress_ai_reservation_http_{exc.code}"}
+    except (ResearchError,urllib.error.URLError,TimeoutError):
+        return {"ok":False,"error":"wordpress_ai_reservation_unavailable"}
     if not reservation.get("ok"):return {"ok":False,"error":"reserve_denied"}
     rid=reservation["reservation_id"];input_tokens=output_tokens=0;confirmed=False
     try:
@@ -691,6 +738,8 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
         ideas=json.loads(output).get("ideas",[])
         if not isinstance(ideas,list):raise ResearchError("ai_non_array")
         return client.post("suggestions",{"symbol":symbol,"interval_min":interval,"ideas":ideas[:6]})
+    except urllib.error.HTTPError as exc:
+        return {"ok":False,"error":f"openai_or_wordpress_http_{exc.code}"}
     except (ValueError,KeyError,ResearchError,urllib.error.URLError) as exc:
         return {"ok":False,"error":type(exc).__name__}
     finally:

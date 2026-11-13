@@ -131,3 +131,10 @@ wp option get lumex_ai_lab_worker_token_v1
 - 5분 Gate 30일 시작 보존 후 누적, 90일 이전 연구 금지
 - 1시간 Gate 180일 보관, 시세 품질/기록 기간 WordPress 텔레메트리
 - Core 0.5.05.21 필수. 실시간 체결 WebSocket 기능은 미구현
+
+## 1.1.6 보강 (2026-11-13)
+- Gate 5분봉 초기 400 과거 제한 응답에 한해서 적응형 짧은 이력 재수집; 90일 이전 `collecting` 연구 차단.
+- 5분봉 장기 누적 중 중단되었을 때 페이지 분할 복구 또는 실패 보존, 이전 R2 파일 강제 리셋 방지.
+- AI 자동 호출 상태/사유 Worker → WordPress 관리자 표시.
+- `candidate_review` 전략만 확정봉 paper-only 방향 관측 (실거래·고객 시그널 금지). Core 0.5.05.22 선설치 필수.
+- GitHub 루트 `docs/RELEASE_116_KO.md`에 변경·설치·롤백·미검증 범위 상세 기록.
