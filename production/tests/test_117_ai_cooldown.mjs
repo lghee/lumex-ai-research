@@ -10,7 +10,10 @@ const env={AUTO_AI:'true',AUTO_FETCH:'false',AUTO_RESEARCH:'false',LUMEX_CONTAIN
   async get(key){const v=records.get(key);return v?{json:async()=>JSON.parse(v.bytes),text:async()=>v.bytes}:null},
   async put(key,value,opt){records.set(key,{bytes:String(value),metadata:opt?.customMetadata??null})}
 }};
-records.set('market/BTCUSDT_15.csv',{bytes:'x'.repeat(35000),metadata:{schema:'ohlcv_v2',quality:'verified',rows:String(9000),lastCandleMs:String(latest15),source:'gateio_usdt_perpetual'}});
+const rows=9000;const lines=['timestamp,open,high,low,close,volume'];
+for(let i=rows-1;i>=0;i--){let ts=latest15-i*15*60000;lines.push(`${ts},100,101,99,100,10`);}
+const content=lines.join('\n')+'\n';
+records.set('market/BTCUSDT_15.csv',{bytes:content,metadata:{schema:'ohlcv_v2',quality:'verified',rows:String(rows),lastCandleMs:String(latest15),source:'gateio_usdt_perpetual'}});
 let aiCalls=0;
 const savedFetch=globalThis.fetch;
 let errorMode='context403';
