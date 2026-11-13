@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.7 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.8 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -364,14 +364,14 @@ async function runForward(env,readyMarkets){
   return {candidates:jobs.length,seen,recorded,mode:'paper_only'};
 }
 
-async function orchestrate(env,fetchOnly=false){
+async function orchestrate(env,fetchOnly=false,aiOnly=false){
   const now=Date.now();const state=await readScheduler(env);
   const summary={kind:'orchestrate',market_fetches:[],research:null,forward:null,ai:null,errors:[],timestamp:new Date(now).toISOString()};
   const active=enabled(env,'AUTO_FETCH')||(!fetchOnly&&(enabled(env,'AUTO_RESEARCH')||enabled(env,'AUTO_AI')));
   if(!active)return {...summary,skipped:'all_automation_disabled'};
   try{
     const inventory=await getMarketInventory(env,now);
-    if(enabled(env,'AUTO_FETCH')){
+    if(!aiOnly && enabled(env,'AUTO_FETCH')){
       // Oldest attempt first: repeated API 403 on one pair never starves all other pairs.
       const due=inventory.filter(p=>p.due).sort((a,b)=>(Number(state.fetchAttempts?.[marketId(a.symbol,a.interval_min)]||0)-Number(state.fetchAttempts?.[marketId(b.symbol,b.interval_min)]||0)));
       for(const p of due.slice(0,fetchLimit(env))){
@@ -397,7 +397,7 @@ async function orchestrate(env,fetchOnly=false){
       firstCandleMs:Number(x.head?.customMetadata?.firstCandleMs||0),
       lastCandleMs:Number(x.head?.customMetadata?.lastCandleMs||0),
       fetchedAtMs:Number(x.head?.customMetadata?.fetchedAtMs||0),ready:x.ready}));
-    if(!fetchOnly && enabled(env,'AUTO_RESEARCH')){
+    if(!fetchOnly && !aiOnly && enabled(env,'AUTO_RESEARCH')){
       if(ready.length){
         try{
           const tick=await callWP(env,'tick','POST',{});
@@ -406,7 +406,7 @@ async function orchestrate(env,fetchOnly=false){
         }catch(error){summary.errors.push(`research_${safeError(error)}`);console.error('research_orchestration_error',safeError(error));}
       }else summary.research={processed:0,reason:'no_fresh_market_data'};
     }
-    if(!fetchOnly && enabled(env,'AUTO_RESEARCH') && ready.length){
+    if(!fetchOnly && !aiOnly && enabled(env,'AUTO_RESEARCH') && ready.length){
       try{summary.forward=await runForward(env,ready);}
       catch(error){summary.forward={recorded:0,error:safeError(error)};
         summary.errors.push(`forward_${safeError(error)}`);console.error('forward_observation_error',safeError(error));}
@@ -429,15 +429,14 @@ async function orchestrate(env,fetchOnly=false){
           const symbol=p.symbol;
           state.aiAttempts=now;state.aiCursor=(Number(state.aiCursor)||0)+1;
           try{
-            const res=await invokeContainer(env,'/ai',{symbol,interval_min:15});
-            const data=await res.json();
-            if(!data.ok)throw Error(safeError(data.error||'ai_not_accepted'));
+            const data=await runAiFromWorker(env,symbol,15);
             const accepted=Number(data.accepted||0);
             if(!Number.isSafeInteger(accepted)||accepted<1)throw Error('ai_zero_candidates_accepted');
             summary.ai={symbol,accepted,state:'completed',ok:true};state.aiLastOk=true;
           }catch(error){summary.ai={symbol,state:'failed',ok:false,error:safeError(error)};
             summary.errors.push(`ai_${safeError(error)}`);state.aiLastOk=false;}
           state.aiLastExecution={...summary.ai,attemptedAt:now};
+          console.info('lumex_ai_attempt',JSON.stringify(state.aiLastExecution));
         }
       }
       state.aiLastResult=summary.ai;
@@ -471,8 +470,8 @@ async function processJob(env,job){
   }
   if(job.kind==='ai'){
     if(!enabled(env,'AUTO_AI'))return {skipped:'auto_ai_off'};
-    const res=await invokeContainer(env,'/ai',{symbol:job.symbol||'BTCUSDT',interval_min:Number(job.interval_min||15)});
-    const data=await res.json();if(!data.ok)throw Error(safeError(data.error));return data;
+    // Uses the same reservation and cooldown as scheduled AI; no paid bypass.
+    return orchestrate(env,false,true);
   }
   throw Error('unknown_action');
 }
@@ -506,11 +505,11 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
-      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
+      const out={ok:true,version:'1.1.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
     }
