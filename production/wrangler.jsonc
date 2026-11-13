@@ -28,6 +28,10 @@
       {
         "name": "MARKET_LIVE_COLLECTOR",
         "class_name": "MarketLiveCollector"
+      },
+      {
+        "name": "BTC_RESERVE_COLLECTOR",
+        "class_name": "BtcReserveCollector"
       }
     ]
   },
@@ -41,6 +45,10 @@
       "storage": "sqlite"
     },
     "MarketLiveCollector": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BtcReserveCollector": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -77,7 +85,8 @@
   },
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com",
-    "AUTO_LIVE_STREAM": "true"
+    "AUTO_LIVE_STREAM": "true",
+    "AUTO_WHALE_FETCH": "true"
   },
   "keep_vars": true,
   "observability": {
