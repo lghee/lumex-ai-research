@@ -1,3 +1,4 @@
+
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "lumex-ai-research2",
@@ -60,6 +61,22 @@
   },
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    },
+    "issue_detection": {
+      "enabled": false
+    }
   },
   "keep_vars": true
 }
