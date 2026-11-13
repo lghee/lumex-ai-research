@@ -1,6 +1,8 @@
-> **1.1.2 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+> **1.1.3 (2026-11-13):** 실제 운영 로그에서 Bybit 403, Binance 451, Gate 400 확인. 1.1.2 코드가 Gate의 모든 HTTP 400을 `access_restricted`로 잘못 분류함을 정정. Gate 오류 본문에서 제한된 오류 필드만 읽고, 문제가 발생한 경우 2개 캔들 요청으로 짧게 진단하여 R2 실패 코드에 남깁니다. **이 릴리스는 데이터 접근 복구가 아니라 원인 분류용이며 실제 수집 성공은 확인되지 않았습니다.**
 
-# LUMEX AI RESEARCH 1.1.2 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
+> **1.1.3 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+
+# LUMEX AI RESEARCH 1.1.3 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
 
 **2026-11-13 업데이트. 현재 사용자의 실 배포 프로젝트는 `lumex-ai-research2`이며 Cloudflare Build의 Root directory는 `production` 입니다.** 기존 Worker를 삭제하거나 이름을 바꾸지 마세요.
 

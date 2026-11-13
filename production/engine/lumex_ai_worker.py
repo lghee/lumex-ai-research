@@ -358,6 +358,48 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
     return len(old)
 
 
+def gate_error_reason(error: urllib.error.HTTPError, symbol: str, interval: int) -> str:
+    """Diagnose Gate 400 without assuming it denotes a geographic restriction.
+
+    Gate reports both request-parameter failures and access controls as HTTP 400
+    in some cases. A minimal, unauthenticated 2-bar request helps distinguish a
+    historical query failure from an endpoint-wide rejection. Only whitelisted
+    error labels/messages (never URLs, headers, secrets) reach the diagnostic.
+    """
+    def detail(exc: urllib.error.HTTPError) -> str:
+        try:
+            raw = exc.read(1600).decode('utf-8', 'replace')
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                bits = [str(parsed[k]) for k in ('label', 'code', 'message')
+                        if k in parsed and isinstance(parsed[k], (str, int))]
+                msg = '_'.join(bits)
+            else:
+                msg = ''
+        except (OSError, ValueError, TypeError):
+            msg = ''
+        return ''.join(ch if ch.isalnum() or ch in '_-' else '_'
+                       for ch in msg)[:38] or 'unexplained'
+    first=detail(error)
+    if error.code != 400:
+        return f'gate_{error.code}_access_restricted' if error.code in (403,451) else f'gate_{error.code}_{first}'
+    # Lightweight endpoint probe: if this succeeds, the problem is with the
+    # historical range/parameters, not a blanket ban for this endpoint.
+    params={'contract':symbol[:-4]+'_USDT',
+            'interval':{5:'5m',15:'15m',60:'1h'}[interval], 'limit':'2'}
+    url=GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params)
+    try:
+        answer=http_json(url,timeout=12)
+        if isinstance(answer, list) and answer:
+            return 'gate_history_400_probe_ok_'+first
+        return 'gate_history_400_probe_invalid_response_'+first
+    except urllib.error.HTTPError as probe:
+        probe_detail=detail(probe)
+        return f'gate_history_400_probe_{probe.code}_{probe_detail}'
+    except (urllib.error.URLError, TimeoutError, ResearchError, ValueError) as probe:
+        return 'gate_history_400_probe_unavailable_'+type(probe).__name__
+
+
 def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
                                       previous: Path | None = None,
                                       previous_source: str = "") -> tuple[int,str]:
@@ -368,14 +410,16 @@ def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
     """
     if previous_source not in ('', *MARKET_SOURCES):raise ResearchError('unknown_previous_market_source')
     if previous_source=='gateio_usdt_perpetual':
-        return refresh_gate_futures_candles(symbol,interval,out,previous),'gateio_usdt_perpetual'
+        try:return refresh_gate_futures_candles(symbol,interval,out,previous),'gateio_usdt_perpetual'
+        except urllib.error.HTTPError as gate:
+            raise ResearchError(gate_error_reason(gate,symbol,interval)) from gate
     if previous_source=='binance_usdm_perpetual':
         try:return refresh_binance_futures_candles(symbol,interval,out,previous),'binance_usdm_perpetual'
         except urllib.error.HTTPError as exc:
             if exc.code not in (403,451):raise
             try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
             except urllib.error.HTTPError as gate:
-                raise ResearchError(f'binance_{exc.code}_gate_{gate.code}_access_restricted') from gate
+                raise ResearchError(f'binance_{exc.code}_{gate_error_reason(gate,symbol,interval)}') from gate
     try:
         return refresh_bybit_candles(symbol,interval,out,previous),'bybit_public_linear'
     except urllib.error.HTTPError as exc:
@@ -387,7 +431,7 @@ def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
             if secondary.code not in (403,451):raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}') from secondary
             try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
             except urllib.error.HTTPError as gate:
-                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_gate_{gate.code}_access_restricted') from gate
+                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_{gate_error_reason(gate,symbol,interval)}') from gate
             except ResearchError as gate:
                 raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_gate_{str(gate)[:60]}') from gate
         except ResearchError as secondary:

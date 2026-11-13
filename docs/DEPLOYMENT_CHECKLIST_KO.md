@@ -1,9 +1,11 @@
-# LUMEX AI Research 1.1.2 배포·복구 체크리스트
+**1.1.3 진단 전용 업데이트**: Gate HTTP 400을 차단으로 오분류했던 문제를 수정했습니다. 배포 후 먼저 `/health`가 1.1.3인지 확인하고 Queue에 `{"kind":"fetch","symbol":"BTCUSDT","interval_min":5}` 단 1회 전송, `control/last-market-fetch.json`의 오류 코드 확인. 시장 데이터가 저장되지 않으면 연구·AI는 켜지 마세요.
+
+# LUMEX AI Research 1.1.3 배포·복구 체크리스트
 
 1. Cloudflare → Workers & Pages → lumex-ai-research2 → Settings → Builds: main / root=production.
 2. GitHub ZIP **안쪽 파일** 전체를 저장소 루트에 올려 기존 파일을 교체; ZIP 자체를 GitHub에 업로드하지 말 것.
 3. Deployments에서 새 배포 성공. Container 설정 반영 실패 시 동일 커밋의 Retry build 1회만.
-4. `https://lumex-ai-research2.kpiplus195.workers.dev/health`에서 version=1.1.2인지 확인.
+4. `https://lumex-ai-research2.kpiplus195.workers.dev/health`에서 version=1.1.3인지 확인.
 5. Settings → Runtime variables and secrets: AUTO_FETCH=true, AUTO_RESEARCH=false, AUTO_AI=false. Secret 이름은 LUMEX_CONTAINER_KEY / LUMEX_ADMIN_API_TOKEN / LUMEX_AI_LAB_WORKER_TOKEN으로 정확히 입력. Secret 값 공유 금지.
 6. Queue `lumex-research-jobs` → Messages → Send → JSON: `{ "kind": "fetch", "symbol": "BTCUSDT", "interval_min": 5 }`. 직접 fetch는 scheduler state counters를 갱신하지 않음.
 7. R2 `lumex-ai-data` → Objects → `control/last-market-fetch.json`: timestamp가 최신인지 확인. `ok:false`이면 error 확인.

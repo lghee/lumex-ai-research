@@ -150,6 +150,38 @@ class ResearchEngineTests(unittest.TestCase):
         self.assertFalse(self.result.exists())
         self.assertTrue(self.previous.exists())
 
+    def test_gate_400_short_probe_success_identifies_history_request(self):
+        from urllib.error import HTTPError
+        from urllib.parse import parse_qs,urlparse
+        import io,json
+        def fake(url,**kwargs):
+            if url.startswith(m.BASE):raise HTTPError(url,403,'Forbidden',None,None)
+            if url.startswith(m.BINANCE_FUTURES_BASE):raise HTTPError(url,451,'Unavailable',None,None)
+            q=parse_qs(urlparse(url).query)
+            if q.get('limit')==['2']:
+                self.assertNotIn('from',q)
+                return [{'t':1794500000,'o':'100','h':'101','l':'99','c':'100','v':'5'}]
+            raise HTTPError(url,400,'Bad Request',None,io.BytesIO(json.dumps({'label':'INVALID_ARGUMENT','message':'invalid window'}).encode()))
+        with patch.object(m,'http_json',side_effect=fake):
+            with self.assertRaisesRegex(m.ResearchError,'bybit_403_binance_451_gate_history_400_probe_ok_INVALID_ARGUMENT'):
+                m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,None,'')
+        self.assertFalse(self.result.exists())
+
+    def test_gate_400_short_probe_rejected_reports_provider_label(self):
+        from urllib.error import HTTPError
+        from urllib.parse import parse_qs,urlparse
+        import io,json
+        def fake(url,**kwargs):
+            if url.startswith(m.BASE):raise HTTPError(url,403,'Forbidden',None,None)
+            if url.startswith(m.BINANCE_FUTURES_BASE):raise HTTPError(url,451,'Unavailable',None,None)
+            q=parse_qs(urlparse(url).query)
+            label='GEO_BLOCK' if q.get('limit')==['2'] else 'BAD_RANGE'
+            raise HTTPError(url,400,'Bad Request',None,io.BytesIO(json.dumps({'label':label}).encode()))
+        with patch.object(m,'http_json',side_effect=fake):
+            with self.assertRaisesRegex(m.ResearchError,'bybit_403_binance_451_gate_history_400_probe_400_GEO_BLOCK'):
+                m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,None,'')
+        self.assertFalse(self.result.exists())
+
     def test_ai_feedback_is_structured_and_billed_once(self):
         history=[{'spec':{'family':'momentum','lookback':12},'gate':'failed_gate','oos':{'profit_factor':0.8}}]
         class StubClient:
