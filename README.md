@@ -1,3 +1,5 @@
+> **1.2.1:** Gate USDT futures public trades/tickers (sampled) + Bybit V5 public allLiquidation observed data collector in Cloudflare Durable Object; reconnect/heartbeat/lag status, typed observed events → existing MarketEventHub → R2. No exchange API keys, orders or fictitious liquidation fills. See `docs/RELEASE_121_KO.md`.
+
 > **1.2.0 (2026-11-13):** Cloudflare Market Hub 기반 기능 도입. 검증된 R2 캔들·코인 레이더 읽기, 서명된 PRO WebSocket 연결, 청산·고래 공개 관측 데이터용 Durable Object 중복방지·R2 원본 누적 아카이브. 거래소 상시 스트리밍 수집은 아직 별도 연결이 필요하며 자동매매 주문은 변경하지 않습니다. 상세: `docs/RELEASE_120_KO.md`.
 
 > **1.1.10 (2026-11-13):** 오래된 Container AI HTTP 403 실패가 새 Worker의 쿨다운과 관리자에 남는 문제를 수정. 레거시 오류에 한해 Worker 직접 경로 1회 복구 재시도를 수행하며 버전·경로·결과를 기록합니다. 사용료/예약 제한·기타 재시도 제한과 시세 검증은 유지. 상세: `docs/RELEASE_1110_KO.md`.
