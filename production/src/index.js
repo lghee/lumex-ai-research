@@ -761,6 +761,11 @@ async function hubRoute(request,env){
     version:'1.2.0',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:'not_activated',
     order_execution:false});
+  if(path==='/market-hub/v1/radar'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await hubRadar(env))}
+    catch(e){return hubReply({ok:false,error:safeError(e)},503)}
+  }
   const symbol=hubName(u.searchParams.get('symbol'));
   if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
   if(path==='/market-hub/v1/ws'&&method==='GET'){
@@ -785,10 +790,6 @@ async function hubRoute(request,env){
     if(!interval)return hubReply({ok:false,error:'unsupported_interval'},400);
     try{return hubReply(await hubGetCandles(env,symbol,interval,500))}
     catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
-  }
-  if(path==='/market-hub/v1/radar'&&method==='GET'){
-    try{return hubReply(await hubRadar(env))}
-    catch(e){return hubReply({ok:false,error:safeError(e)},503)}
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
