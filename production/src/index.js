@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.4 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.5 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -628,6 +628,149 @@ function hubTrend(bars){
   return {status:'ok',trend,atr_pct:Number((atr/14/c*100).toFixed(3)),
     last_completed_open_ms:last.at(-1).t};
 }
+
+// Cloudflare derivatives snapshot collector. Gate public REST only; never
+// customer exchange credentials, orders, or inferred market-wide numbers.
+const DERIV_PREFIX='market-hub/derivatives/v1/';
+const DERIV_SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
+const DERIV_WINDOWS={'24h':86400000,'7d':604800000};
+const derivNum=(value,min=-Infinity,max=Infinity)=>{
+  if(value===null||value===undefined||value===''||typeof value==='boolean')return null;
+  const n=Number(value);return Number.isFinite(n)&&n>=min&&n<=max?n:null;
+};
+const derivContract=s=>s.replace('USDT','_USDT');
+const derivDay=t=>new Date(t).toISOString().slice(0,10).replaceAll('-','');
+const derivLatestKey=s=>DERIV_PREFIX+'latest/'+s+'.json';
+const derivDailyKey=(s,t)=>DERIV_PREFIX+'daily/'+s+'/'+derivDay(t)+'.json';
+export function parseGateTicker(body,symbol){
+  const item=(Array.isArray(body)?body:[body]).find(x=>x?.contract===derivContract(symbol));
+  if(!item)return null;
+  const last=derivNum(item.last,1e-9),mark=derivNum(item.mark_price,1e-9),
+    index=derivNum(item.index_price,1e-9);
+  if(last===null||mark===null||index===null)return null;
+  const funding=derivNum(item.funding_rate,-1,1);
+  return {last_price:last,mark_price:mark,index_price:index,
+    funding_rate:funding,funding_rate_pct:funding===null?null:Number((funding*100).toFixed(8)),
+    indicative_funding_rate:derivNum(item.funding_rate_indicative,-1,1),
+    change_24h_pct:derivNum(item.change_percentage,-100,100000),
+    turnover_24h_usdt:derivNum(item.volume_24h_quote,0),
+    premium_pct:Number(((mark/index-1)*100).toFixed(6)),
+    quote_currency:'USDT',price_source:'gate_usdt_futures_ticker'};
+}
+export function parseGateOpenInterest(body,now=Date.now()){
+  if(!Array.isArray(body))return null;
+  const sorted=body.filter(x=>x&&typeof x==='object').sort((a,b)=>Number(b.time||0)-Number(a.time||0));
+  for(const item of sorted){
+    const time=Number(item.time)*1000,oi=derivNum(item.open_interest_usd,0),
+      contracts=derivNum(item.open_interest,0);
+    if(!Number.isSafeInteger(time)||time<now-20*60000||time>now+120000||
+      oi===null||contracts===null)continue;
+    return {open_interest_usdt:oi,contracts,as_of_ms:time,source:'gate_contract_stats'};
+  }
+  return null;
+}
+function derivMeta(body,symbol,now=Date.now()){
+  if(body?.name!==derivContract(symbol))return null;
+  const interval=derivNum(body.funding_interval,60,86400),
+    next=derivNum(body.funding_next_apply,0);
+  return {interval_seconds:interval,next_funding_ms:next!==null&&next*1000>now&&next*1000<now+172800000?next*1000:null};
+}
+async function gateDerivativesGet(path){
+  if(!/^\/futures\/usdt\/(tickers|contract_stats|contracts\/(BTC|ETH|SOL|XRP)_USDT)(\?|$)/.test(path))
+    throw Error('gate_derivatives_path_denied');
+  for(const host of ['https://api.gateio.ws/api/v4','https://fx-api.gateio.ws/api/v4']){
+    try{
+      const r=await fetch(host+path,{headers:{accept:'application/json'},signal:AbortSignal.timeout(9000)});
+      if(!r.ok)throw Error('gate_http_'+r.status);
+      const body=await r.text();
+      if(body.length<2||body.length>200000)throw Error('gate_invalid_body');
+      return JSON.parse(body);
+    }catch(error){
+      if(host.includes('fx-api.'))throw Error('gate_derivatives_unavailable');
+    }
+  }
+  throw Error('gate_derivatives_unavailable');
+}
+async function derivDaily(env,symbol,ms){
+  const obj=await env.MARKET_DATA.get(derivDailyKey(symbol,ms));
+  if(!obj)return [];
+  const rows=await obj.json();
+  return Array.isArray(rows)&&rows.length<=300?
+    rows.filter(x=>x?.symbol===symbol&&Number.isSafeInteger(x.snapshot_ms)):[];
+}
+async function saveDerivatives(env,record){
+  const old=await derivDaily(env,record.symbol,record.snapshot_ms),bucket=Math.floor(record.snapshot_ms/300000);
+  const records=[...old.filter(x=>Math.floor(x.snapshot_ms/300000)!==bucket),record]
+    .sort((a,b)=>a.snapshot_ms-b.snapshot_ms).slice(-300);
+  await env.MARKET_DATA.put(derivDailyKey(record.symbol,record.snapshot_ms),JSON.stringify(records),
+    {httpMetadata:{contentType:'application/json'}});
+  await env.MARKET_DATA.put(derivLatestKey(record.symbol),JSON.stringify(record),
+    {httpMetadata:{contentType:'application/json'}});
+}
+async function collectGateDerivatives(env){
+  if(env.AUTO_DERIVATIVES_FETCH!=='true')return {ok:false,disabled:true};
+  const items=[];
+  for(const symbol of DERIV_SYMBOLS){
+    try{
+      const now=Date.now(),contract=derivContract(symbol);
+      const ticker=parseGateTicker(await gateDerivativesGet('/futures/usdt/tickers?contract='+contract),symbol);
+      if(!ticker)throw Error('ticker_unusable');
+      const [stat,meta]=await Promise.allSettled([
+        gateDerivativesGet('/futures/usdt/contract_stats?contract='+contract+'&interval=5m&limit=3'),
+        gateDerivativesGet('/futures/usdt/contracts/'+contract)
+      ]);
+      const oi=stat.status==='fulfilled'?parseGateOpenInterest(stat.value,now):null,
+        schedule=meta.status==='fulfilled'?derivMeta(meta.value,symbol,now):null;
+      const old=await derivDaily(env,symbol,now);
+      const previous=old.filter(x=>x.snapshot_ms>=now-75*60000&&x.snapshot_ms<=now-55*60000&&
+        x.open_interest?.open_interest_usdt>0).at(-1);
+      const oiDelta=oi&&previous?
+        Number(((oi.open_interest_usdt/previous.open_interest.open_interest_usdt-1)*100).toFixed(4)):null;
+      const record={
+        schema:'lumex_derivatives_v1',symbol,exchange:'gateio',market:'USDT perpetual',
+        scope:'single_public_exchange_not_global',snapshot_ms:now,
+        price:ticker,open_interest:oi,oi_change_1h_pct:oiDelta,funding_schedule:schedule,
+        quality:'observed_public_snapshot',
+        unavailable:[...(oi?[]:['open_interest']),...(schedule?[]:['funding_schedule'])],
+        source_note:'Public Gate futures statistics, not customer positions or investment signals.',
+        order_execution:false
+      };
+      await saveDerivatives(env,record);
+      items.push({symbol,ok:true,open_interest_available:!!oi,funding_schedule_available:!!schedule});
+    }catch(error){items.push({symbol,ok:false,error:String(error?.message||'error').slice(0,80)})}
+  }
+  const report={ok:items.some(x=>x.ok),collected_ms:Date.now(),items,cadence_seconds:300,
+    scope:'gateio_usdt_perpetual_only'};
+  await env.MARKET_DATA.put(DERIV_PREFIX+'status.json',JSON.stringify(report),{
+    httpMetadata:{contentType:'application/json'}});
+  return report;
+}
+async function readDerivatives(env,symbol){
+  const obj=await env.MARKET_DATA.get(derivLatestKey(symbol));
+  if(!obj)return null;
+  const snap=await obj.json();
+  if(snap?.schema!=='lumex_derivatives_v1'||snap?.symbol!==symbol)return null;
+  const age=Math.max(0,Date.now()-snap.snapshot_ms);
+  return {...snap,stale:age>15*60000,age_seconds:Math.round(age/1000),
+    source_status:age>15*60000?'stale':'current'};
+}
+async function derivativesHistory(env,symbol,period){
+  const span=DERIV_WINDOWS[period];
+  if(!span)throw Error('invalid_window');
+  const now=Date.now(),start=now-span,days=[];
+  for(let day=Math.floor(start/86400000)*86400000;day<=now;day+=86400000)days.push(day);
+  const chunks=await Promise.all(days.map(day=>derivDaily(env,symbol,day)));
+  const all=chunks.flat().filter(x=>x.snapshot_ms>=start&&x.snapshot_ms<=now)
+    .sort((a,b)=>a.snapshot_ms-b.snapshot_ms);
+  const stride=Math.max(1,Math.ceil(all.length/168));
+  return {ok:true,symbol,window:period,scope:'gateio_public_perpetual_observations',
+    collected_points:all.length,source:'cloudflare_r2_daily_observations',
+    points:all.filter((_,i)=>i%stride===0||i===all.length-1).map(x=>({
+      t:x.snapshot_ms,mark:x.price?.mark_price??null,funding_rate_pct:x.price?.funding_rate_pct??null,
+      open_interest_usdt:x.open_interest?.open_interest_usdt??null})),
+    missing_intervals_not_filled:true,generated_at_ms:now,orders_enabled:false};
+}
+
 async function hubRadar(env){
   const items=await Promise.all(HUB_SYMBOLS.map(async symbol=>{
     const r={symbol,change_24h_pct:null,turnover_24h_usdt:null,
@@ -1322,9 +1465,32 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.4',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights'],
+    version:'1.2.5',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
+  if(path==='/market-hub/v1/derivatives-health'&&method==='GET'){
+    try{
+      const record=await env.MARKET_DATA.get(DERIV_PREFIX+'status.json');
+      const report=record?await record.json():null;
+      return hubReply({ok:true,enabled:env.AUTO_DERIVATIVES_FETCH==='true',
+        report,scope:'gateio_public_derivatives',orders_enabled:false});
+    }catch{return hubReply({ok:false,error:'derivatives_health_unavailable'},503)}
+  }
+  if((path==='/market-hub/v1/derivatives'||path==='/market-hub/v1/derivatives-history')&&method==='GET'){
+    const symbol=hubName(u.searchParams.get('symbol'));
+    if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
+    if(!hubAuthorized(request,env)&&!(await hubCheckTicket(request,env,symbol)))
+      return hubReply({ok:false,error:'unauthorized'},401);
+    const period=u.searchParams.get('window')||'24h';
+    if(path.endsWith('-history')&&!DERIV_WINDOWS[period])return hubReply({ok:false,error:'invalid_window'},400);
+    try{
+      const value=path.endsWith('-history')?await derivativesHistory(env,symbol,period):await readDerivatives(env,symbol);
+      if(!value)return hubReply({ok:false,error:'snapshot_unavailable'},503);
+      return new Response(JSON.stringify(value),{status:200,headers:{
+        'content-type':'application/json','cache-control':'no-store',
+        'access-control-allow-origin':'https://lumexbot.com','vary':'Origin'}});
+    }catch{return hubReply({ok:false,error:'derivatives_read_unavailable'},503)}
+  }
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
     if(!LIVE_ENABLED(env))return hubReply({ok:true,enabled:false,reason:'collector_disabled',order_execution:false});
     if(!env.MARKET_LIVE_COLLECTOR)return hubReply({ok:false,error:'live_collector_binding_missing'},503);
@@ -1432,10 +1598,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -1452,6 +1618,8 @@ export default{
   },
   async scheduled(controller,env,ctx){
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_DERIVATIVES_FETCH==='true')
+      ctx.waitUntil(collectGateDerivatives(env).catch(()=>console.error('derivatives_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
         .fetch('https://whales/poll').catch(()=>console.error('btc_whale_poll_failed')));

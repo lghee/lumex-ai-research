@@ -89,7 +89,8 @@
     "AUTO_FETCH": "false",
     "AUTO_AI": "false",
     "AUTO_LIVE_STREAM": "true",
-    "AUTO_WHALE_FETCH": "true"
+    "AUTO_WHALE_FETCH": "true",
+    "AUTO_DERIVATIVES_FETCH": "true"
   },
   "observability": {
     "logs": {
