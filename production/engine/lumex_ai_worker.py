@@ -74,7 +74,7 @@ class Client:
     def post(self, name: str, body: dict):
         return http_json(self.base + name, "POST", body, self.token)
 
-def load_csv(path: Path, interval: int, require_fresh: bool = True) -> np.ndarray:
+def load_csv(path: Path, interval: int, require_fresh: bool = True, min_history_days: int = 90, keep_all: bool = False) -> np.ndarray:
     if not path.is_file(): raise ResearchError("file_missing")
     step = interval * 60_000
     expected = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -97,9 +97,9 @@ def load_csv(path: Path, interval: int, require_fresh: bool = True) -> np.ndarra
     current_open = (int(time.time()*1000)//step)*step
     if last >= current_open:raise ResearchError("unfinished_candle")
     if require_fresh and time.time()*1000-last>max(3*step,3_600_000):raise ResearchError("stale_candles")
-    needed=int(90*1440/interval)+250
-    if len(rows)<needed:raise ResearchError("less_than_90_days_and_warmup")
-    return np.array(rows[-needed:], dtype=np.float64)
+    needed=int(min_history_days*1440/interval)+250
+    if len(rows)<needed:raise ResearchError("less_than_required_days_and_warmup")
+    return np.array(rows if keep_all else rows[-needed:], dtype=np.float64)
 
 def fetch_bybit_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
@@ -377,7 +377,11 @@ def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int 
     from/to time (not `limit`, which is mutually exclusive per official docs).
     """
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
-    if days < 90 or days > 120:raise ResearchError("invalid_days")
+    # Gate can return only the most recent ~10,000 bars: 5m needs a 30d
+    # rolling bootstrap (then gradual accumulation) and is NOT 90d research-ready.
+    if interval==5: days=32
+    if interval==60: days=180
+    if days < 30 or days > 200:raise ResearchError("invalid_days")
     step=interval*60_000
     latest=(int(time.time()*1000)//step-1)*step
     cursor=((latest-days*86_400_000-250*step)//step)*step
@@ -399,14 +403,14 @@ def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int 
     ordered=[found[t] for t in sorted(found)]
     if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):
         raise ResearchError('provider_gaps')
-    if len(ordered)<90*1440/interval+250:raise ResearchError('insufficient_provider_history')
+    if len(ordered)<(30 if interval==5 else 90)*1440/interval+250:raise ResearchError('insufficient_provider_history')
     if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError('provider_stale')
     out.parent.mkdir(parents=True,exist_ok=True)
     tmp=out.with_suffix(out.suffix+'.tmp')
     with tmp.open('w',encoding='utf-8',newline='') as file:
         writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
         writer.writerows(ordered)
-    load_csv(tmp,interval,True)
+    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else (180 if interval==60 else 90)))
     tmp.replace(out)
     return len(ordered)
 
@@ -415,8 +419,10 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
     """Same-source incremental refresh; full re-backfill if cache isn't usable."""
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError('invalid_selection')
     if previous is None or not previous.is_file():return fetch_gate_futures_candles(symbol,interval,out)
-    try:old=load_csv(previous,interval,require_fresh=False)
+    try:old=load_csv(previous,interval,require_fresh=False,min_history_days=(30 if interval==5 else 90),keep_all=True)
     except (ResearchError,ValueError,OSError):return fetch_gate_futures_candles(symbol,interval,out)
+    if interval==60 and old.shape[0] < 180*24+250:
+        return fetch_gate_futures_candles(symbol,interval,out)
     step=interval*60000
     latest=(int(time.time()*1000)//step-1)*step
     last=int(old[-1,0]); missing=max(0,(latest-last)//step)
@@ -436,14 +442,14 @@ def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous
         if not appended or appended[0][0]!=last+step:
             raise ResearchError('incremental_provider_gap')
         old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
-    needed=int(90*1440/interval)+250
+    needed=int((180 if interval==60 else 90)*1440/interval)+250
     old=old[-needed:]
     out.parent.mkdir(parents=True,exist_ok=True)
     tmp=out.with_suffix(out.suffix+'.tmp')
     with tmp.open('w',encoding='utf-8',newline='') as file:
         writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
         for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
-    load_csv(tmp,interval,True)
+    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else 90),keep_all=True)
     tmp.replace(out)
     return len(old)
 
@@ -665,6 +671,8 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
         evidence={"symbol":symbol,"interval_min":interval,"research_history":ctx.get("research_history",[])[:6],
                   "market":ctx.get("market",{}),"technical":tech,
                   "chart_timeframes":ctx.get("chart_timeframes",{}),
+                  "signals":ctx.get("signal_observations",{}),
+                  "indicator_observations":ctx.get("indicator_observations",{}),
                   "whales":ctx.get("whales",{}),"liquidations":ctx.get("liquidations",{})}
         data={"model":reservation["model"],"instructions":instructions,
               "input":json.dumps(evidence,ensure_ascii=False,separators=(',',':'))[:9500],

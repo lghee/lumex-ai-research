@@ -54,12 +54,31 @@
     ]
   },
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": [
+      "* * * * *",
+      "*/5 * * * *"
+    ]
   },
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com",
     "AUTO_RESEARCH": "false",
     "AUTO_FETCH": "false",
     "AUTO_AI": "false"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    },
+    "issue_detection": {
+      "enabled": false
+    }
   }
 }

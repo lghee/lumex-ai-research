@@ -124,3 +124,10 @@ wp option get lumex_ai_lab_worker_token_v1
 - Binance 측도 403/451인 경우 오류를 `bybit_403_binance_403_access_restricted`로 명시, 실패를 숨기지 않음. 같은 접근 IP의 외부 API 미허용 시 승인된 데이터 제공처/해당 지역 사용 가능한 데이터 인프라 별도 검토.
 - WordPress Core 0.5.05.20에는 변경 없음. Cron/Queue/R2 이름, Secret 값과 `AUTO_FETCH=true`, 다른 토글 false 유지. **기존 market CSV는 검증 실패시 덮어쓰지 않음.**
 - Cloudflare 실제 외부 API 접근 성공은 재배포 후 R2 `market/` CSV 및 로그 확인 필요. 오프라인 모의 테스트 성공 ≠ 실데이터 수집 확인.
+
+
+## 1.1.5 주요 변경
+- 1분 확정봉 갱신 체크 (`market_tick`), 5분 연구 (`orchestrate`)
+- 5분 Gate 30일 시작 보존 후 누적, 90일 이전 연구 금지
+- 1시간 Gate 180일 보관, 시세 품질/기록 기간 WordPress 텔레메트리
+- Core 0.5.05.21 필수. 실시간 체결 WebSocket 기능은 미구현

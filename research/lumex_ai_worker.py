@@ -24,11 +24,32 @@ from typing import Any
 import numpy as np
 
 BASE = "https://api.bybit.com/v5/market/kline"
+BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1/klines"
+GATE_FUTURES_BASE = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
+MARKET_SOURCES = {"bybit_public_linear", "binance_usdm_perpetual", "gateio_usdt_perpetual"}
 SUPPORTED = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
 FRAMES = {5, 15, 60}
 USER_AGENT = "LUMEX-AI-Research-Worker/1.0 (read-only; no trading)"
 
 class ResearchError(Exception): pass
+
+# Gate history at page boundaries has produced zero-volume, flat-price
+# rows in live BTC data. A time-contiguous CSV is therefore NOT enough.
+# These rows are quarantined and independently re-queried, never invented.
+def suspect_candle(record) -> bool:
+    return (float(record[5]) == 0.0 and
+            float(record[1]) == float(record[2]) == float(record[3]) == float(record[4]))
+
+
+def validate_bar(record, interval: int) -> None:
+    step = interval * 60_000
+    ts = int(record[0]); o,h,l,c,v = map(float, record[1:6])
+    if (not all(math.isfinite(float(x)) for x in record) or
+        ts % step or o <= 0 or c <= 0 or l <= 0 or v < 0 or
+        h < max(o,c,l) or l > min(o,c)):
+        raise ResearchError('invalid_ohlcv')
+    if suspect_candle(record):
+        raise ResearchError('unverified_zero_flat_candle')
 
 def http_json(url: str, method: str = "GET", data: Any = None, bearer: str = "", timeout: int = 25) -> Any:
     body = json.dumps(data, separators=(",", ":")).encode() if data is not None else None
@@ -53,7 +74,7 @@ class Client:
     def post(self, name: str, body: dict):
         return http_json(self.base + name, "POST", body, self.token)
 
-def load_csv(path: Path, interval: int, require_fresh: bool = True) -> np.ndarray:
+def load_csv(path: Path, interval: int, require_fresh: bool = True, min_history_days: int = 90, keep_all: bool = False) -> np.ndarray:
     if not path.is_file(): raise ResearchError("file_missing")
     step = interval * 60_000
     expected = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -69,15 +90,16 @@ def load_csv(path: Path, interval: int, require_fresh: bool = True) -> np.ndarra
             if not all(math.isfinite(x) for x in record):raise ResearchError("nonfinite")
             ts=int(record[0]);o,h,l,c,v=record[1:]
             if ts%step or (prior and ts-prior!=step): raise ResearchError("gap_or_duplicate")
-            if o<=0 or c<=0 or l<=0 or v<0 or h<max(o,c,l) or l>min(o,c):raise ResearchError("invalid_ohlcv")
+            validate_bar(record, interval)
             prior=ts; rows.append(record)
     if not rows:raise ResearchError("empty_file")
     last=rows[-1][0]
-    if last>time.time()*1000:raise ResearchError("future_candle")
+    current_open = (int(time.time()*1000)//step)*step
+    if last >= current_open:raise ResearchError("unfinished_candle")
     if require_fresh and time.time()*1000-last>max(3*step,3_600_000):raise ResearchError("stale_candles")
-    needed=int(90*1440/interval)+250
-    if len(rows)<needed:raise ResearchError("less_than_90_days_and_warmup")
-    return np.array(rows[-needed:], dtype=np.float64)
+    needed=int(min_history_days*1440/interval)+250
+    if len(rows)<needed:raise ResearchError("less_than_required_days_and_warmup")
+    return np.array(rows if keep_all else rows[-needed:], dtype=np.float64)
 
 def fetch_bybit_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
     if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
@@ -125,6 +147,392 @@ def fetch_bybit_candles(symbol: str, interval: int, out: Path, days: int = 92) -
     load_csv(tmp,interval,True)
     tmp.replace(out)
     return len(ordered)
+
+def refresh_bybit_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Refresh a complete historical cache with only recent *closed* bars when possible.
+
+    The old R2 CSV is never modified. Validation and atomic replacement of the
+    local temporary file happen before the response can replace an R2 object.
+    A missing, corrupt or very old cache is rebuilt from the full provider API.
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    if previous is None or not previous.is_file():return fetch_bybit_candles(symbol,interval,out)
+    try:
+        old=load_csv(previous,interval,require_fresh=False)
+    except (ResearchError,ValueError,OSError):
+        return fetch_bybit_candles(symbol,interval,out)
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0])
+    missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_bybit_candles(symbol,interval,out)
+    if missing>0:
+        params={"category":"linear","symbol":symbol,"interval":str(interval),"end":str(latest+step-1),"limit":str(min(1000,missing+6))}
+        raw=http_json(BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if raw.get("retCode")!=0 or not isinstance(raw.get("result",{}).get("list"),list):
+            raise ResearchError("bybit_incremental_unavailable")
+        points={}
+        for row in raw["result"]["list"]:
+            if len(row)<6:raise ResearchError("bybit_bad_schema")
+            r=(int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            if r[0]>latest or r[0]<last:continue
+            if r[0] in points and points[r[0]]!=r:raise ResearchError("conflicting_provider_candle")
+            points[r[0]]=r
+        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
+            raise ResearchError("provider_revised_closed_candle")
+        appended=[points[ts] for ts in sorted(points) if ts>last]
+        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+            raise ResearchError("incremental_provider_gap")
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int(90*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",encoding="utf-8",newline="") as f:
+        writer=csv.writer(f);writer.writerow(["timestamp","open","high","low","close","volume"])
+        for row in old:
+            writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,require_fresh=True)
+    tmp.replace(out)
+    return len(old)
+
+def fetch_binance_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
+    """Backfill authorized public Binance USD-M perpetual trades, not Binance spot.
+
+    This is a **full** coherent history: never concatenate exchange candles.
+    The same 90-day + warm-up validation used for Bybit remains mandatory.
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES: raise ResearchError("invalid_selection")
+    if days < 90 or days > 120: raise ResearchError("invalid_days")
+    step = interval * 60_000
+    latest = (int(time.time()*1000)//step - 1)*step
+    cursor = ((latest - days*86_400_000 - 250*step)//step)*step
+    found = {}
+    calls = 0
+    unit = {5:"5m", 15:"15m", 60:"1h"}[interval]
+    while cursor <= latest:
+        params = {"symbol":symbol,"interval":unit,"startTime":str(cursor),
+                  "endTime":str(latest+step-1),"limit":"1500"}
+        raw = http_json(BINANCE_FUTURES_BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list) or not raw: raise ResearchError("binance_futures_empty_or_invalid")
+        last_ts = None
+        for row in raw:
+            if not isinstance(row,list) or len(row)<6:raise ResearchError("binance_futures_bad_schema")
+            record = (int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            ts = record[0]
+            if last_ts is not None and ts<=last_ts:raise ResearchError("binance_futures_order_invalid")
+            last_ts = ts
+            if ts<cursor or ts>latest:continue
+            if ts in found and found[ts]!=record:raise ResearchError("conflicting_candle")
+            found[ts]=record
+        if last_ts is None or last_ts<cursor:raise ResearchError("binance_futures_pagination_stuck")
+        cursor = last_ts+step
+        calls += 1
+        if calls>180:raise ResearchError("too_many_provider_pages")
+        if cursor<=latest:time.sleep(0.08)
+    if not found:raise ResearchError("no_market_candles")
+    ordered=[found[k] for k in sorted(found)]
+    if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):raise ResearchError("provider_gaps")
+    if len(ordered)<90*1440/interval+250:raise ResearchError("insufficient_provider_history")
+    if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError("provider_stale")
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",newline="",encoding="utf-8") as file:
+        writer=csv.writer(file);writer.writerow(["timestamp","open","high","low","close","volume"])
+        writer.writerows(ordered)
+    load_csv(tmp,interval,True)
+    tmp.replace(out)
+    return len(ordered)
+
+
+def refresh_binance_futures_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Incrementally update a Binance-only candle history with closed bars."""
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    if previous is None or not previous.is_file():return fetch_binance_futures_candles(symbol,interval,out)
+    try:old=load_csv(previous,interval,require_fresh=False)
+    except (ResearchError,ValueError,OSError):return fetch_binance_futures_candles(symbol,interval,out)
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0]); missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_binance_futures_candles(symbol,interval,out)
+    if missing>0:
+        params={"symbol":symbol,"interval":{5:"5m",15:"15m",60:"1h"}[interval],
+                "startTime":str(last),"endTime":str(latest+step-1),"limit":str(min(1500,missing+2))}
+        raw=http_json(BINANCE_FUTURES_BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list):raise ResearchError("binance_incremental_unavailable")
+        points={}
+        for row in raw:
+            if not isinstance(row,list) or len(row)<6:raise ResearchError("binance_futures_bad_schema")
+            r=(int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            if r[0]>latest or r[0]<last:continue
+            if r[0] in points and points[r[0]]!=r:raise ResearchError("conflicting_provider_candle")
+            points[r[0]]=r
+        # Overlap is optional. If the exchange supplies it, validate it exactly.
+        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
+            raise ResearchError("provider_revised_closed_candle")
+        appended=[points[t] for t in sorted(points) if t>last]
+        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+            raise ResearchError("incremental_provider_gap")
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int(90*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",newline="",encoding="utf-8") as file:
+        writer=csv.writer(file);writer.writerow(["timestamp","open","high","low","close","volume"])
+        for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,require_fresh=True)
+    tmp.replace(out)
+    return len(old)
+
+
+def gate_window(symbol: str, interval: int, first: int, last: int) -> dict[int, tuple]:
+    """Ask Gate for a bounded range, rejecting any malformed OHLCV payload.
+
+    Never use 'limit' with from/to (officially mutually exclusive).
+    Overlap/rescue probes use the same public, read-only endpoint.
+    """
+    step = interval * 60_000
+    if last < first or (last-first)//step >= 2000:
+        raise ResearchError('gate_invalid_request_window')
+    params = {'contract': symbol[:-4]+'_USDT',
+              'interval': {5:'5m',15:'15m',60:'1h'}[interval],
+              'from': str(first//1000), 'to': str(last//1000)}
+    raw = http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params), timeout=25)
+    if not isinstance(raw, list) or not raw:
+        raise ResearchError('gate_futures_empty_or_invalid')
+    records = {}
+    for item in raw:
+        if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
+            raise ResearchError('gate_futures_bad_schema')
+        try:
+            record = (int(item['t'])*1000,float(item['o']),float(item['h']),
+                      float(item['l']),float(item['c']),float(item['v']))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ResearchError('gate_futures_bad_numeric') from exc
+        ts = record[0]
+        if ts < first or ts > last:
+            continue
+        if (not all(math.isfinite(v) for v in record) or ts%step or
+            record[1]<=0 or record[4]<=0 or record[3]<=0 or record[5]<0 or
+            record[2]<max(record[1],record[3],record[4]) or record[3]>min(record[1],record[4])):
+            raise ResearchError('gate_futures_invalid_ohlcv')
+        if ts in records and records[ts] != record:
+            raise ResearchError('gate_conflicting_provider_candle')
+        records[ts] = record
+    return records
+
+
+def merge_gate_record(target: dict[int,tuple], incoming: dict[int,tuple]) -> None:
+    """Allow an independently fetched real bar to replace a flat-zero placeholder."""
+    for ts, bar in incoming.items():
+        old = target.get(ts)
+        if old is None or old == bar:
+            target[ts] = bar
+        elif suspect_candle(old) and not suspect_candle(bar):
+            target[ts] = bar
+        elif suspect_candle(bar) and not suspect_candle(old):
+            pass
+        else:
+            # A provider must not silently rewrite already closed good bars.
+            raise ResearchError('gate_conflicting_provider_candle')
+
+
+def repair_gate_range(symbol: str, interval: int, records: dict[int,tuple],
+                      first: int, latest: int) -> None:
+    """Retry suspected placeholders/missing bars with shorter, overlapping windows.
+
+    Do not synthesize prices, use a second exchange, or silently retain gaps.
+    Limit probes to protect the provider and bound Container execution.
+    """
+    step = interval * 60_000
+    missing = [ts for ts in range(first, latest+step, step) if ts not in records]
+    suspect = [ts for ts,bar in records.items() if first<=ts<=latest and suspect_candle(bar)]
+    targets = sorted(set(missing + suspect))
+    if len(targets) > 24:
+        raise ResearchError('gate_history_too_many_unverified_bars')
+    for ts in targets:
+        start = max(first, ts-3*step)
+        # A right-hand buffer prevents page-end artificial final bars.
+        end = min((int(time.time()*1000)//step)*step, ts+3*step)
+        if end <= ts:
+            end = ts+step
+        try:
+            fresh = gate_window(symbol,interval,start,end)
+        except (ResearchError, urllib.error.URLError, TimeoutError) as exc:
+            raise ResearchError('gate_repair_query_failed') from exc
+        bar = fresh.get(ts)
+        if bar is None or suspect_candle(bar):
+            raise ResearchError('gate_unverified_bar_at_'+str(ts))
+        merge_gate_record(records, {ts:bar})
+    if any(ts not in records or suspect_candle(records[ts])
+           for ts in range(first, latest+step, step)):
+        raise ResearchError('gate_unresolved_candle_gap')
+
+def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
+    """Full, contiguous OHLCV history from Gate USDT perpetual futures.
+
+    Gate responds with UTC **seconds** and volume in contract units; those volumes
+    must never be joined with Binance or Bybit base-asset quantities. Page by
+    from/to time (not `limit`, which is mutually exclusive per official docs).
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    # Gate can return only the most recent ~10,000 bars: 5m needs a 30d
+    # rolling bootstrap (then gradual accumulation) and is NOT 90d research-ready.
+    if interval==5: days=32
+    if interval==60: days=180
+    if days < 30 or days > 200:raise ResearchError("invalid_days")
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    cursor=((latest-days*86_400_000-250*step)//step)*step
+    first=cursor
+    found={};calls=0
+    while cursor<=latest:
+        # 1,999 points per page; overlap 3 points to verify artificial
+        # page-end candles independently against the next page.
+        end=min(latest,cursor+1998*step)
+        records=gate_window(symbol,interval,cursor,end)
+        merge_gate_record(found,records)
+        calls+=1
+        if calls>100:raise ResearchError('too_many_provider_pages')
+        if end>=latest:break
+        cursor=end-2*step
+        time.sleep(.08)
+    repair_gate_range(symbol,interval,found,first,latest)
+    if not found:raise ResearchError('no_market_candles')
+    ordered=[found[t] for t in sorted(found)]
+    if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):
+        raise ResearchError('provider_gaps')
+    if len(ordered)<(30 if interval==5 else 90)*1440/interval+250:raise ResearchError('insufficient_provider_history')
+    if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError('provider_stale')
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+'.tmp')
+    with tmp.open('w',encoding='utf-8',newline='') as file:
+        writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
+        writer.writerows(ordered)
+    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else (180 if interval==60 else 90)))
+    tmp.replace(out)
+    return len(ordered)
+
+
+def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Same-source incremental refresh; full re-backfill if cache isn't usable."""
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError('invalid_selection')
+    if previous is None or not previous.is_file():return fetch_gate_futures_candles(symbol,interval,out)
+    try:old=load_csv(previous,interval,require_fresh=False,min_history_days=(30 if interval==5 else 90),keep_all=True)
+    except (ResearchError,ValueError,OSError):return fetch_gate_futures_candles(symbol,interval,out)
+    if interval==60 and old.shape[0] < 180*24+250:
+        return fetch_gate_futures_candles(symbol,interval,out)
+    step=interval*60000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0]); missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_gate_futures_candles(symbol,interval,out)
+    if missing>0:
+        # Overlap 3 previously closed bars. If provider revises an older good
+        # candle, fail closed; do not mask with an invented zero-volume row.
+        start=max(int(old[0,0]),last-3*step)
+        points=gate_window(symbol,interval,start,latest)
+        for ts in sorted(points):
+            if ts<=last:
+                old_row=old[int((ts-int(old[0,0]))//step)]
+                if suspect_candle(points[ts]) or not np.allclose(old_row,points[ts],rtol=1e-9,atol=1e-8):
+                    raise ResearchError('gate_revised_or_unverified_overlap')
+        repair_gate_range(symbol,interval,points,last+step,latest)
+        appended=[points[ts] for ts in range(last+step,latest+step,step)]
+        if not appended or appended[0][0]!=last+step:
+            raise ResearchError('incremental_provider_gap')
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int((180 if interval==60 else 90)*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+'.tmp')
+    with tmp.open('w',encoding='utf-8',newline='') as file:
+        writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
+        for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,True,min_history_days=(30 if interval==5 else 90),keep_all=True)
+    tmp.replace(out)
+    return len(old)
+
+
+def gate_error_reason(error: urllib.error.HTTPError, symbol: str, interval: int) -> str:
+    """Diagnose Gate 400 without assuming it denotes a geographic restriction.
+
+    Gate reports both request-parameter failures and access controls as HTTP 400
+    in some cases. A minimal, unauthenticated 2-bar request helps distinguish a
+    historical query failure from an endpoint-wide rejection. Only whitelisted
+    error labels/messages (never URLs, headers, secrets) reach the diagnostic.
+    """
+    def detail(exc: urllib.error.HTTPError) -> str:
+        try:
+            raw = exc.read(1600).decode('utf-8', 'replace')
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                bits = [str(parsed[k]) for k in ('label', 'code', 'message')
+                        if k in parsed and isinstance(parsed[k], (str, int))]
+                msg = '_'.join(bits)
+            else:
+                msg = ''
+        except (OSError, ValueError, TypeError):
+            msg = ''
+        return ''.join(ch if ch.isalnum() or ch in '_-' else '_'
+                       for ch in msg)[:38] or 'unexplained'
+    first=detail(error)
+    if error.code != 400:
+        return f'gate_{error.code}_access_restricted' if error.code in (403,451) else f'gate_{error.code}_{first}'
+    # Lightweight endpoint probe: if this succeeds, the problem is with the
+    # historical range/parameters, not a blanket ban for this endpoint.
+    params={'contract':symbol[:-4]+'_USDT',
+            'interval':{5:'5m',15:'15m',60:'1h'}[interval], 'limit':'2'}
+    url=GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params)
+    try:
+        answer=http_json(url,timeout=12)
+        if isinstance(answer, list) and answer:
+            return 'gate_history_400_probe_ok_'+first
+        return 'gate_history_400_probe_invalid_response_'+first
+    except urllib.error.HTTPError as probe:
+        probe_detail=detail(probe)
+        return f'gate_history_400_probe_{probe.code}_{probe_detail}'
+    except (urllib.error.URLError, TimeoutError, ResearchError, ValueError) as probe:
+        return 'gate_history_400_probe_unavailable_'+type(probe).__name__
+
+
+def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
+                                      previous: Path | None = None,
+                                      previous_source: str = "") -> tuple[int,str]:
+    """Use same-source incremental cache; 403/451 fail over with a FULL fresh history.
+
+    Bybit -> Binance -> Gate. Do not bypass API rate limits. Never cross-join
+    exchange OHLCV (volumes are measured in different units).
+    """
+    if previous_source not in ('', *MARKET_SOURCES):raise ResearchError('unknown_previous_market_source')
+    if previous_source=='gateio_usdt_perpetual':
+        try:return refresh_gate_futures_candles(symbol,interval,out,previous),'gateio_usdt_perpetual'
+        except urllib.error.HTTPError as gate:
+            raise ResearchError(gate_error_reason(gate,symbol,interval)) from gate
+    if previous_source=='binance_usdm_perpetual':
+        try:return refresh_binance_futures_candles(symbol,interval,out,previous),'binance_usdm_perpetual'
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403,451):raise
+            try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
+            except urllib.error.HTTPError as gate:
+                raise ResearchError(f'binance_{exc.code}_{gate_error_reason(gate,symbol,interval)}') from gate
+    try:
+        return refresh_bybit_candles(symbol,interval,out,previous),'bybit_public_linear'
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403,451):raise
+        try:
+            # A provider switch intentionally DISCARDS old market history.
+            return fetch_binance_futures_candles(symbol,interval,out),'binance_usdm_perpetual'
+        except urllib.error.HTTPError as secondary:
+            if secondary.code not in (403,451):raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}') from secondary
+            try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
+            except urllib.error.HTTPError as gate:
+                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_{gate_error_reason(gate,symbol,interval)}') from gate
+            except ResearchError as gate:
+                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_gate_{str(gate)[:60]}') from gate
+        except ResearchError as secondary:
+            raise ResearchError(f'bybit_{exc.code}_binance_{str(secondary)[:60]}') from secondary
+
 
 def ema(v: np.ndarray, n: int) -> np.ndarray:
     a=2.0/(n+1);out=np.empty_like(v);out[0]=v[0]
@@ -233,7 +641,7 @@ def evaluate(job: dict, data: np.ndarray, common: dict) -> dict:
     delayed=run_sim(data,s,common,signals,split,len(data),1,1)
     return {"id":job["id"],"job_hash":job["job_hash"],"claim_token":job["claim_token"],"train":train,"oos":oos,"double_cost":twice,
         "one_bar_delay":delayed,"oos_days":30,"data_sha256":hashlib.sha256(data.tobytes()).hexdigest(),
-        "last_candle_unix":int(data[-1,0]/1000),"source":"bybit_linear_ohlcv_csv_90d","research_only":True}
+        "last_candle_unix":int(data[-1,0]/1000),"source":"verified_perpetual_ohlcv_csv_90d","research_only":True}
 
 def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     ctx=client.get("context",symbol=symbol)
@@ -245,17 +653,36 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     rid=reservation["reservation_id"];input_tokens=output_tokens=0;confirmed=False
     try:
         instructions=(
-            "You are a research hypothesis generator, not a trader. No live orders or financial assurances. "
-            "Use only observed fresh supplied indicators, whale/liquidation metadata are coverage-limited. "
-            "Propose up to 6 diverse testable hypotheses ONLY as a JSON object with key ideas, each spec has "
-            "family: breakout|pullback|mean_revert|momentum; integer lookback 8..80, fast 5..40, slow 25..240 "
-            "with slow>fast, rsi 20..80, volume_mult 0.5..3, stop_atr 0.6..4, take_atr 0.7..7, "
-            "max_hold 3..48 and boolean trend_filter. Do not output code, raw orders, or commentary. "
-            "Avoid fabricated values and do not infer market impact causation from whale transfers."
+            "You are an evidence-limited, research-only hypothesis generator. Never place orders, claim real-market "
+            "profitability, or extrapolate observed public whale/liquidation data into confirmed causality. "
+            "Use research_history to examine previously failed or sensitive OOS tests, cost-doubling and "
+            "one-bar delay; avoid exact duplicate parameter sets. Propose up to 6 DIFFERENT testable "
+            "hypotheses for validation, rather than treating a prior backtest as successful trading. "
+            "family: breakout|pullback|mean_revert|momentum; lookback 8..80, fast 5..40, slow 25..240 "
+            "(slow>fast), rsi 20..80, volume_mult 0.5..3, stop_atr 0.6..4, take_atr 0.7..7, "
+            "max_hold 3..48, boolean trend_filter. Respond with schema only."
         )
-        data={"model":reservation["model"],"instructions":instructions,"input":json.dumps({"symbol":symbol,"interval_min":interval,"context":ctx},ensure_ascii=False)[:9500],
-              "max_output_tokens":reservation["max_output_tokens"],"store":False}
+        fields={"family":{"type":"string","enum":["breakout","pullback","mean_revert","momentum"]},
+                **{name:{"type":"integer"} for name in ("lookback","fast","slow","rsi","max_hold")},
+                **{name:{"type":"number"} for name in ("volume_mult","stop_atr","take_atr")},
+                "trend_filter":{"type":"boolean"}}
+        # History is placed BEFORE potentially verbose technical context so it never falls
+        # outside the bounded prompt after truncation.
+        evidence={"symbol":symbol,"interval_min":interval,"research_history":ctx.get("research_history",[])[:6],
+                  "market":ctx.get("market",{}),"technical":tech,
+                  "chart_timeframes":ctx.get("chart_timeframes",{}),
+                  "signals":ctx.get("signal_observations",{}),
+                  "indicator_observations":ctx.get("indicator_observations",{}),
+                  "whales":ctx.get("whales",{}),"liquidations":ctx.get("liquidations",{})}
+        data={"model":reservation["model"],"instructions":instructions,
+              "input":json.dumps(evidence,ensure_ascii=False,separators=(',',':'))[:9500],
+              "reasoning":{"effort":"none"},"max_output_tokens":reservation["max_output_tokens"],
+              "text":{"format":{"type":"json_schema","name":"lumex_research_ideas","strict":True,
+                       "schema":{"type":"object","properties":{"ideas":{"type":"array","items":{
+                           "type":"object","properties":fields,"required":list(fields),"additionalProperties":False}}},
+                           "required":["ideas"],"additionalProperties":False}}},"store":False}
         result=http_json("https://api.openai.com/v1/responses","POST",data,api_key,timeout=40)
+        if result.get("status")!="completed":raise ResearchError("ai_response_not_completed")
         usage=result.get("usage",{})
         input_tokens=int(usage.get("input_tokens",0));output_tokens=int(usage.get("output_tokens",0));confirmed=bool(usage)
         output="".join(chunk.get("text","") for item in result.get("output",[]) if item.get("type")=="message"

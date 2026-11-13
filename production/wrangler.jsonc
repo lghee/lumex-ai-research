@@ -1,4 +1,3 @@
-
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "lumex-ai-research2",
@@ -56,12 +55,14 @@
   },
   "triggers": {
     "crons": [
+      "* * * * *",
       "*/5 * * * *"
     ]
   },
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com"
   },
+  "keep_vars": true,
   "observability": {
     "logs": {
       "enabled": true,
@@ -77,6 +78,5 @@
     "issue_detection": {
       "enabled": false
     }
-  },
-  "keep_vars": true
+  }
 }

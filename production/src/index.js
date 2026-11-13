@@ -15,12 +15,13 @@ const FETCH_DIAGNOSTIC_KEY = 'control/last-market-fetch.json';
 const MAX_CSV_BYTES = 12_000_000;
 const QUALITY_SCHEMA = 'ohlcv_v2';
 const MIN_CANDLES = interval => Math.ceil(90*1440/interval)+250;
+const MIN_INGEST_CANDLES = interval => Math.ceil((interval===5?30:90)*1440/interval)+250;
 // Worker-side independent validation. Container output is untrusted input;
 // R2 v1 data is not eligible for research until revalidated/replaced.
 function inspectCsv(text, interval, now=Date.now()){
   const lines=text.trimEnd().split(/\r?\n/);
   if(lines[0]!=='timestamp,open,high,low,close,volume')throw Error('market_csv_header_invalid');
-  if(lines.length-1<MIN_CANDLES(interval))throw Error('market_insufficient_history');
+  if(lines.length-1<MIN_INGEST_CANDLES(interval))throw Error('market_insufficient_history');
   const step=interval*60000;const currentOpen=Math.floor(now/step)*step;
   let prior=-1,first=0,last=0;
   for(let i=1;i<lines.length;i++){
@@ -37,7 +38,7 @@ function inspectCsv(text, interval, now=Date.now()){
     last=ts;prior=ts;
   }
   if(last>now||now-last>Math.max(3600000,interval*180000))throw Error('market_stale');
-  return {rows:lines.length-1,firstCandleMs:first,lastCandleMs:last};
+  return {rows:lines.length-1,firstCandleMs:first,lastCandleMs:last,quality:(lines.length-1>=MIN_CANDLES(interval)?'verified':'collecting')};
 }
 function auditCrossFrame(newCsv,otherCsv,newInterval,otherInterval){
   // Only compare Gate/Binance/Bybit candles WITHIN the SAME named provider.
@@ -84,9 +85,14 @@ const isFresh = (head,interval,now) => {
     head.size>=20000 && last>0 && last<=now && now-last<=Math.max(3600000,interval*180000));
 };
 const dueForFetch = (head,interval,now) => {
-  if (!head || !isFresh(head,interval,now)) return true;
+  if (!head) return true;
   const fetched = Number(head.customMetadata?.fetchedAtMs || 0);
-  return !fetched || now-fetched >= interval*60000*(interval===5 ? 2 : 1);
+  // A 5m collecting-only cache is refreshed once a closed candle can exist;
+  // never mark it research-ready until the full 90d plus warm-up is available.
+  if (interval===5 && head.customMetadata?.quality==='collecting')
+    return !fetched || now-fetched >= 5*60000;
+  if (!isFresh(head,interval,now)) return !fetched || now-fetched >= 5*60000;
+  return !fetched || now-fetched >= interval*60000;
 };
 
 async function callWP(env,endpoint,method='GET',body){
@@ -147,10 +153,10 @@ async function fetchPair(env,sym,interval){
   // Only validated and (when possible) cross-checked data may replace R2.
   await env.MARKET_DATA.put(key,bytes,{httpMetadata:{contentType:'text/csv'},customMetadata:{source,
     lastCandleMs:String(audit.lastCandleMs),firstCandleMs:String(audit.firstCandleMs),
-    rows:String(audit.rows),quality:'verified',fetchedAtMs:String(now),schema:QUALITY_SCHEMA}});
+    rows:String(audit.rows),quality:audit.quality,fetchedAtMs:String(now),schema:QUALITY_SCHEMA}});
   await writeFetchDiagnostic(env,sym,interval,{ok:true,source,bytes:bytes.byteLength,
-    lastCandleMs:audit.lastCandleMs,firstCandleMs:audit.firstCandleMs,rows:audit.rows,quality:'verified'});
-  return {market:marketId(sym,interval),source,bytes:bytes.byteLength,lastCandleMs:audit.lastCandleMs,rows:audit.rows,quality:'verified'};
+    lastCandleMs:audit.lastCandleMs,firstCandleMs:audit.firstCandleMs,rows:audit.rows,quality:audit.quality});
+  return {market:marketId(sym,interval),source,bytes:bytes.byteLength,lastCandleMs:audit.lastCandleMs,rows:audit.rows,quality:audit.quality};
   }catch(error){
     await writeFetchDiagnostic(env,sym,interval,{ok:false,error:safeError(error)});
     throw error;
@@ -231,10 +237,10 @@ async function runJobs(env,readyMarkets){
   }
   return {processed,released};
 }
-async function orchestrate(env){
+async function orchestrate(env,fetchOnly=false){
   const now=Date.now();const state=await readScheduler(env);
   const summary={kind:'orchestrate',market_fetches:[],research:null,ai:null,errors:[],timestamp:new Date(now).toISOString()};
-  const active=enabled(env,'AUTO_FETCH')||enabled(env,'AUTO_RESEARCH')||enabled(env,'AUTO_AI');
+  const active=enabled(env,'AUTO_FETCH')||(!fetchOnly&&(enabled(env,'AUTO_RESEARCH')||enabled(env,'AUTO_AI')));
   if(!active)return {...summary,skipped:'all_automation_disabled'};
   try{
     const inventory=await getMarketInventory(env,now);
@@ -255,10 +261,16 @@ async function orchestrate(env){
         }
       }
     }
-    if(enabled(env,'AUTO_RESEARCH')){
-      const fresh=await getMarketInventory(env,Date.now());
-      const ready=fresh.filter(x=>x.ready);
-      summary.ready_markets=ready.length;
+    const fresh=await getMarketInventory(env,Date.now());
+    const ready=fresh.filter(x=>x.ready);
+    summary.ready_markets=ready.length;
+    if(!fetchOnly)summary.markets=fresh.map(x=>({symbol:x.symbol,interval_min:x.interval_min,
+      quality:x.head?.customMetadata?.quality||'absent',source:x.head?.customMetadata?.source||'',
+      rows:Number(x.head?.customMetadata?.rows||0),
+      firstCandleMs:Number(x.head?.customMetadata?.firstCandleMs||0),
+      lastCandleMs:Number(x.head?.customMetadata?.lastCandleMs||0),
+      fetchedAtMs:Number(x.head?.customMetadata?.fetchedAtMs||0),ready:x.ready}));
+    if(!fetchOnly && enabled(env,'AUTO_RESEARCH')){
       if(ready.length){
         try{
           const tick=await callWP(env,'tick','POST',{});
@@ -268,7 +280,7 @@ async function orchestrate(env){
       }else summary.research={processed:0,reason:'no_fresh_market_data'};
     }
     // At most one AI request every six hours (or a 30-minute failure cooldown).
-    if(enabled(env,'AUTO_AI') && env.OPENAI_API_KEY && now-Number(state.aiAttempts||0)>=(state.aiLastOk?6*3600000:30*60000)){
+    if(!fetchOnly && enabled(env,'AUTO_AI') && env.OPENAI_API_KEY && now-Number(state.aiAttempts||0)>=(state.aiLastOk?6*3600000:30*60000)){
       const symbol=SYMBOLS[(Number(state.aiCursor)||0)%SYMBOLS.length];
       state.aiAttempts=now;state.aiCursor=(Number(state.aiCursor)||0)+1;
       try{
@@ -282,8 +294,8 @@ async function orchestrate(env){
   state.lastRun=now;state.lastSummary=summary;state.errors.push(...summary.errors);
   await writeScheduler(env,state);
   // Optional site-side observability; a failing telemetry request must not lose completed research.
-  if(env.LUMEX_AI_LAB_WORKER_TOKEN){
-    try{await callWP(env,'telemetry','POST',{timestamp:Math.floor(now/1000),ready_markets:summary.ready_markets||0,summary:summary.research||{},fetches:summary.market_fetches,ai:summary.ai,errors:summary.errors});}
+  if(!fetchOnly && env.LUMEX_AI_LAB_WORKER_TOKEN){
+    try{await callWP(env,'telemetry','POST',{timestamp:Math.floor(now/1000),ready_markets:summary.ready_markets||0,summary:summary.research||{},fetches:summary.market_fetches,markets:summary.markets||[],ai:summary.ai,errors:summary.errors});}
     catch(error){console.error('telemetry_failed',safeError(error));}
   }
   console.info('lumex_scheduler',JSON.stringify(summary));
@@ -292,6 +304,7 @@ async function orchestrate(env){
 async function processJob(env,job){
   if(!job || typeof job!=='object')throw Error('invalid_queue_message');
   if(job.kind==='orchestrate')return orchestrate(env);
+  if(job.kind==='market_tick')return enabled(env,'AUTO_FETCH')?orchestrate(env,true):{skipped:'auto_fetch_off'};
   if(job.kind==='fetch'){
     if(!enabled(env,'AUTO_FETCH'))return {skipped:'auto_fetch_off'};
     return fetchPair(env,job.symbol,Number(job.interval_min));
@@ -340,10 +353,10 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.1.5',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -362,7 +375,10 @@ export default{
     if(!enabled(env,'AUTO_RESEARCH') && !enabled(env,'AUTO_FETCH') && !enabled(env,'AUTO_AI')){
       console.info('lumex_scheduler_disabled');return;
     }
-    ctx.waitUntil(env.RESEARCH_QUEUE.send({kind:'orchestrate'}));
+    // Every-minute: market freshness only; every five minutes: bounded research + AI.
+    // At overlapping minutes, the single queue consumer serializes the jobs.
+    const kind=controller.cron==='* * * * *'?'market_tick':'orchestrate';
+    ctx.waitUntil(env.RESEARCH_QUEUE.send({kind}));
   },
   async queue(batch,env){
     for(const message of batch.messages){

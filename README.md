@@ -38,3 +38,8 @@ npm run check
 `npm run check`는 Node Worker 가짜 R2/Queue/WordPress 테스트 + Python 실계산 합성 OHLCV 백테스트/시세 증분 테스트입니다. 실제 Cloudflare/Bybit/OpenAI/WordPress 통합 성공을 의미하지 않습니다.
 
 **주의:** 활성화되어도 연구는 주문 실행과 무관하며 전략 후보는 실거래 가능 판정이 아닙니다. CPU/요금과 가용성은 실제 계정 테스트가 필요합니다.
+
+
+## 1.1.5 통합 운영 참고
+- Cloudflare 1분(시장) + 5분(연구) Cron, Core 0.5.05.21과 함께 사용
+- 상세 내용: docs/RELEASE_115_KO.md

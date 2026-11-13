@@ -108,6 +108,8 @@ class ResearchEngineTests(unittest.TestCase):
         self.assertEqual(float(data[0,5]),42.)
 
     def test_existing_gate_uses_gate_only_for_incremental(self):
+        # Gate 1h target expanded from 90d to 180d. Seed a complete cache.
+        self.write_candles(self.previous,self.current-(180*24+251)*self.step,180*24+250)
         old=m.load_csv(self.previous,60,False)
         def provider(url,**kwargs):
             from urllib.parse import parse_qs,urlparse
