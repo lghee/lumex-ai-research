@@ -51,5 +51,32 @@ market.delete('control/research-scheduler-v1.json');mode='wp_stale';
 s=await run();assert.equal(s.aiLastExecution.state,'completed');assert.equal(openaiCalls,3);
 market.delete('control/research-scheduler-v1.json');market.delete('market/BTCUSDT_15.csv');
 s=await run();assert.equal(s.aiLastExecution.error,'ai_r2_market_missing');assert.equal(openaiCalls,3);
+// Old 1.1.7 Container failure must not remain pinned as today's AI failure.
+market.set('market/BTCUSDT_15.csv',content);
+mode='wp403';
+const oldAt=Date.now()-60*1000;
+const prior={state:'failed',error:'container_ai_422_HTTP_Error_403__Forbidden',attemptedAt:oldAt};
+market.set('control/research-scheduler-v1.json',JSON.stringify({
+  lastRun:oldAt,fetchAttempts:{},aiAttempts:oldAt,aiCursor:0,successes:0,failures:0,errors:[],
+  aiLastOk:false,aiLastExecution:prior,aiLastResult:{state:'cooldown',error:prior.error,lastAttempt:prior}
+}));
+s=await run();
+assert.equal(s.aiLastExecution.route,'worker_direct');
+assert.equal(s.aiLastExecution.workerVersion,'1.1.10');
+assert.equal(s.aiLastExecution.recoveredLegacyError,true);
+assert.equal(s.aiLastExecution.error,'ai_context_wordpress_context_403');
+assert.equal(s.aiLegacyRecoveryVersion,'1.1.10');
+assert.equal((await run()).aiLastResult.state,'cooldown');
+assert.equal(openaiCalls,3,'WP 403 must not burn OpenAI API budget');
+// Non-legacy failures retain cooldown instead of bypassing rate limits.
+const currentAt=Date.now()-60*1000;
+market.set('control/research-scheduler-v1.json',JSON.stringify({
+  lastRun:currentAt,fetchAttempts:{},aiAttempts:currentAt,aiCursor:0,successes:0,failures:0,errors:[],
+  aiLastOk:false,aiLastExecution:{state:'failed',error:'ai_openai_http_403',attemptedAt:currentAt},
+  aiLastResult:{state:'cooldown',error:'ai_openai_http_403'}
+}));
+s=await run();
+assert.equal(s.aiLastResult.state,'cooldown');
+assert.equal(s.aiLastExecution.error,'ai_openai_http_403');
 console.info=oldlog;globalThis.fetch=original;
 console.log('PASS Worker-native AI: WP 403, OpenAI 403 reason, budget settlement, successful hypothesis, cooldown');
