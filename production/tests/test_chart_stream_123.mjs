@@ -1,3 +1,5 @@
+process.on('uncaughtException',error=>{console.error('CHART_TEST_DIAGNOSTIC',error.name,String(error.message),String(error.stack||'').slice(-600));process.exit(1)});
+process.on('unhandledRejection',error=>{console.error('CHART_TEST_REJECTION',String(error?.message||error));process.exit(1)});
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
