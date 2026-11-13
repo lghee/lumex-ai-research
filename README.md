@@ -1,62 +1,34 @@
-# LUMEX AI RESEARCH — Cloudflare GitHub Auto Deploy
+# LUMEX AI RESEARCH 1.1.0 — 실행 자동화 + 기존 GitHub/Cloudflare 유지
 
-**Version:** github-cloudflare-1.0.0 · 2026-11-13
+**2026-11-13 업데이트. 현재 사용자의 실 배포 프로젝트는 `lumex-ai-research2`이며 Cloudflare Build의 Root directory는 `production` 입니다.** 기존 Worker를 삭제하거나 이름을 바꾸지 마세요.
 
-This repository can be imported **now** into Cloudflare Workers Builds from a private GitHub repository.
+## 저장소 구조
 
-## Step 1: GitHub -> Cloudflare (immediately deployable)
+- `production/src/index.js` — **현재 배포되는** Cloudflare Cron / Queue / R2 / Container 자동 실행 코드
+- `production/engine/lumex_ai_worker.py` — 시장 데이터 검증, 증분 갱신, 전략 백테스트, OpenAI 가설 생성
+- `production/server.py` + `production/Dockerfile` — Container 웹 API
+- `production/wrangler.jsonc` — 실제 `lumex-ai-research2` 배포 설정 및 `keep_vars=true`
+- `production/tests` — 실제 운영 계정을 호출하지 않는 테스트
+- `src/`, `research/`, 루트 `wrangler.jsonc` — 최초 연결 검증을 위한 **과거 bootstrap 보존 소스**. 현재 배포에는 사용되지 않음.
 
-1. Create a **Private** GitHub repository named `lumex-ai-research`.
-2. **Extract** `LUMEX_GITHUB_UPLOAD_READY.zip` on your computer. Upload its **contents**, not the ZIP itself, to the repo root. Commit to `main`.
-3. In Cloudflare **Workers & Pages → Create → Import a repository** select this repository.
-4. Configure:
-   - **Worker name** `lumex-ai-research`
-   - **Branch** `main`
-   - **Root directory** `/`
-   - **Build command** blank (optional). If the UI requires one: `npm install --no-audit --no-fund`
-   - **Deploy command** `npx wrangler deploy`
-5. Save and deploy. For an existing Worker use **Settings → Build → Connect Git** instead of creating a duplicate Worker.
-6. Open `https://lumex-ai-research.<your-workers-subdomain>.workers.dev/health`. The response should include `"deployed":true` and `"research_enabled":false`.
+## 안전한 적용 순서
 
-**This is the *safe deployment/connection stage*.** It intentionally has no queue, data writes, AI charges, exchange orders, or Python container. It proves GitHub automatic deployment and the LUMEX management API can be connected securely.
+1. **먼저** `LUMEX_AI_CORE_0520.zip`을 WordPress의 기존 LUMEX Core에 덮어 설치합니다. 플러그인 추가 설치가 아닙니다.
+2. 이 ZIP의 **최상위 파일/폴더 내용 전체**를 기존 GitHub `lumex-ai-research` 저장소의 `main`에 반영합니다. ZIP 파일을 GitHub에 그대로 올리지 마세요.
+3. Cloudflare → Workers & Pages → `lumex-ai-research2` → Settings → Builds 에서 **Root directory `production`**, Production branch `main`, 기존 Deploy command가 `wrangler deploy ...`인지 확인합니다. 현재 연결은 그대로 유지합니다.
+4. GitHub 변경 후 Cloudflare → Deployments에 새 버전이 성공했는지 확인합니다. 비활성화된 자동 실행 환경변수는 기본적으로 계속 `false`입니다.
+5. Cloudflare → Settings → Variables and Secrets 에 필요한 비밀키를 등록하고, **시세 갱신만 먼저 활성화**합니다. Worker의 연구/AI 토글은 단계적으로 활성화합니다.
+6. `/health`는 인증 없이 버전·토글만 표시하며 `/status`는 별도 관리자 Bearer로만 읽을 수 있습니다. `LUMEX_ADMIN_API_TOKEN`을 URL에 넣지 마세요.
 
-## Step 2: Connect WordPress for status (optional)
+**전체 메뉴 경로, 상태 기준, 장애 시 복구 절차, 비용 통제:** `production/README_KO.md` 및 배포 패키지에 포함된 인수인계서를 참고하세요.
 
-Cloudflare Worker → **Settings → Variables & Secrets**. Add Secrets:
-
-- `LUMEX_ADMIN_API_TOKEN` – generate a new long random secret (minimum 32 characters), used **only** to authenticate administrator status requests to this Cloudflare Worker.
-- `LUMEX_AI_LAB_WORKER_TOKEN` – LUMEX Core's research-only Bearer token from the site's server-side settings; DO NOT put this secret in GitHub.
-
-Test from a trusted terminal:
+## 검증 (실계정 호출 없음)
 
 ```bash
-curl -fsS -H 'Authorization: Bearer <LUMEX_ADMIN_API_TOKEN>' \
-  'https://lumex-ai-research.<your-workers-subdomain>.workers.dev/status'
+cd production
+npm run check
 ```
 
-WordPress's research API must exist and be enabled. `401` means missing/invalid Cloudflare admin Bearer, `503` means research token is missing, and `502` means WordPress API unreachable or not ready. **No actual research jobs are run** in this stage.
+`npm run check`는 Node Worker 가짜 R2/Queue/WordPress 테스트 + Python 실계산 합성 OHLCV 백테스트/시세 증분 테스트입니다. 실제 Cloudflare/Bybit/OpenAI/WordPress 통합 성공을 의미하지 않습니다.
 
-## Step 3: Enable the optional full Containers stack (later)
-
-`production/` contains an implementation of the next stage, but **it is NOT connected to the bootstrap Worker by default**. Do not set the Cloudflare project Root Directory to `production/` until your Cloudflare paid plan, R2/Queues and runtime secrets are configured and the code is tested on your account.
-
-- Required resources: Workers Paid (Containers), R2 bucket `lumex-ai-data`, Queues `lumex-research-jobs` and `lumex-research-dead`.
-- Secrets: `LUMEX_ADMIN_API_TOKEN`, `LUMEX_AI_LAB_WORKER_TOKEN`, `LUMEX_CONTAINER_KEY`, optional `OPENAI_API_KEY`.
-- Research never executes orders; all execution controls default to OFF.
-- Read [production/README_KO.md](production/README_KO.md) for details.
-
-## Critical safety and correctness
-
-- Do not put secrets in Git commits, `.env`, console screenshots, URLs, or public R2 buckets.
-- Do not assume Bybit public Kline API is accessible from every Cloudflare region; earlier tests returned HTTP 403 from some regions.
-- Past backtest wins are never live-trading approvals. Live order integration is not included.
-- The included `research/lumex_ai_worker.py` is the existing VPS research logic for reference; production Cloudflare support requires Container deployment and market-data persistence via R2.
-
-## QA
-
-```bash
-node tests/test-worker.mjs
-python3 -m py_compile research/lumex_ai_worker.py
-```
-
-See `docs/DEPLOYMENT_CHECKLIST_KO.md` and `docs/RELEASE_NOTES_KO.md`.
+**주의:** 활성화되어도 연구는 주문 실행과 무관하며 전략 후보는 실거래 가능 판정이 아닙니다. CPU/요금과 가용성은 실제 계정 테스트가 필요합니다.

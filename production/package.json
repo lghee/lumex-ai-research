@@ -1,8 +1,15 @@
 {
-  "name":"lumex-ai-research-production",
-  "version":"1.0.0",
-  "type":"module",
-  "private":true,
-  "scripts":{"deploy":"wrangler deploy","check":"node --check src/index.js && python3 -m py_compile server.py engine/lumex_ai_worker.py"},
-  "devDependencies":{"wrangler":"^4.0.0"}
+  "name": "lumex-ai-research-production",
+  "version": "1.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "check:js": "node --check src/index.js && node tests/test-production.mjs",
+    "check:python": "python3 -m py_compile server.py engine/lumex_ai_worker.py && python3 -m unittest discover -s tests -p \"test_*.py\" -v",
+    "check": "npm run check:js && npm run check:python"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
 }

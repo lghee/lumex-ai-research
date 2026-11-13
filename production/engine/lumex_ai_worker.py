@@ -126,6 +126,54 @@ def fetch_bybit_candles(symbol: str, interval: int, out: Path, days: int = 92) -
     tmp.replace(out)
     return len(ordered)
 
+def refresh_bybit_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Refresh a complete historical cache with only recent *closed* bars when possible.
+
+    The old R2 CSV is never modified. Validation and atomic replacement of the
+    local temporary file happen before the response can replace an R2 object.
+    A missing, corrupt or very old cache is rebuilt from the full provider API.
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    if previous is None or not previous.is_file():return fetch_bybit_candles(symbol,interval,out)
+    try:
+        old=load_csv(previous,interval,require_fresh=False)
+    except (ResearchError,ValueError,OSError):
+        return fetch_bybit_candles(symbol,interval,out)
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0])
+    missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_bybit_candles(symbol,interval,out)
+    if missing>0:
+        params={"category":"linear","symbol":symbol,"interval":str(interval),"end":str(latest+step-1),"limit":str(min(1000,missing+6))}
+        raw=http_json(BASE+"?"+urllib.parse.urlencode(params),timeout=25)
+        if raw.get("retCode")!=0 or not isinstance(raw.get("result",{}).get("list"),list):
+            raise ResearchError("bybit_incremental_unavailable")
+        points={}
+        for row in raw["result"]["list"]:
+            if len(row)<6:raise ResearchError("bybit_bad_schema")
+            r=(int(row[0]),float(row[1]),float(row[2]),float(row[3]),float(row[4]),float(row[5]))
+            if r[0]>latest or r[0]<last:continue
+            if r[0] in points and points[r[0]]!=r:raise ResearchError("conflicting_provider_candle")
+            points[r[0]]=r
+        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
+            raise ResearchError("provider_revised_closed_candle")
+        appended=[points[ts] for ts in sorted(points) if ts>last]
+        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+            raise ResearchError("incremental_provider_gap")
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int(90*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+".tmp")
+    with tmp.open("w",encoding="utf-8",newline="") as f:
+        writer=csv.writer(f);writer.writerow(["timestamp","open","high","low","close","volume"])
+        for row in old:
+            writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,require_fresh=True)
+    tmp.replace(out)
+    return len(old)
+
 def ema(v: np.ndarray, n: int) -> np.ndarray:
     a=2.0/(n+1);out=np.empty_like(v);out[0]=v[0]
     for i in range(1,len(v)):out[i]=a*v[i]+(1-a)*out[i-1]
@@ -245,17 +293,34 @@ def ai_ideas(client: Client, api_key: str, symbol: str, interval: int) -> dict:
     rid=reservation["reservation_id"];input_tokens=output_tokens=0;confirmed=False
     try:
         instructions=(
-            "You are a research hypothesis generator, not a trader. No live orders or financial assurances. "
-            "Use only observed fresh supplied indicators, whale/liquidation metadata are coverage-limited. "
-            "Propose up to 6 diverse testable hypotheses ONLY as a JSON object with key ideas, each spec has "
-            "family: breakout|pullback|mean_revert|momentum; integer lookback 8..80, fast 5..40, slow 25..240 "
-            "with slow>fast, rsi 20..80, volume_mult 0.5..3, stop_atr 0.6..4, take_atr 0.7..7, "
-            "max_hold 3..48 and boolean trend_filter. Do not output code, raw orders, or commentary. "
-            "Avoid fabricated values and do not infer market impact causation from whale transfers."
+            "You are an evidence-limited, research-only hypothesis generator. Never place orders, claim real-market "
+            "profitability, or extrapolate observed public whale/liquidation data into confirmed causality. "
+            "Use research_history to examine previously failed or sensitive OOS tests, cost-doubling and "
+            "one-bar delay; avoid exact duplicate parameter sets. Propose up to 6 DIFFERENT testable "
+            "hypotheses for validation, rather than treating a prior backtest as successful trading. "
+            "family: breakout|pullback|mean_revert|momentum; lookback 8..80, fast 5..40, slow 25..240 "
+            "(slow>fast), rsi 20..80, volume_mult 0.5..3, stop_atr 0.6..4, take_atr 0.7..7, "
+            "max_hold 3..48, boolean trend_filter. Respond with schema only."
         )
-        data={"model":reservation["model"],"instructions":instructions,"input":json.dumps({"symbol":symbol,"interval_min":interval,"context":ctx},ensure_ascii=False)[:9500],
-              "max_output_tokens":reservation["max_output_tokens"],"store":False}
+        fields={"family":{"type":"string","enum":["breakout","pullback","mean_revert","momentum"]},
+                **{name:{"type":"integer"} for name in ("lookback","fast","slow","rsi","max_hold")},
+                **{name:{"type":"number"} for name in ("volume_mult","stop_atr","take_atr")},
+                "trend_filter":{"type":"boolean"}}
+        # History is placed BEFORE potentially verbose technical context so it never falls
+        # outside the bounded prompt after truncation.
+        evidence={"symbol":symbol,"interval_min":interval,"research_history":ctx.get("research_history",[])[:6],
+                  "market":ctx.get("market",{}),"technical":tech,
+                  "chart_timeframes":ctx.get("chart_timeframes",{}),
+                  "whales":ctx.get("whales",{}),"liquidations":ctx.get("liquidations",{})}
+        data={"model":reservation["model"],"instructions":instructions,
+              "input":json.dumps(evidence,ensure_ascii=False,separators=(',',':'))[:9500],
+              "reasoning":{"effort":"none"},"max_output_tokens":reservation["max_output_tokens"],
+              "text":{"format":{"type":"json_schema","name":"lumex_research_ideas","strict":True,
+                       "schema":{"type":"object","properties":{"ideas":{"type":"array","items":{
+                           "type":"object","properties":fields,"required":list(fields),"additionalProperties":False}}},
+                           "required":["ideas"],"additionalProperties":False}}},"store":False}
         result=http_json("https://api.openai.com/v1/responses","POST",data,api_key,timeout=40)
+        if result.get("status")!="completed":raise ResearchError("ai_response_not_completed")
         usage=result.get("usage",{})
         input_tokens=int(usage.get("input_tokens",0));output_tokens=int(usage.get("output_tokens",0));confirmed=bool(usage)
         output="".join(chunk.get("text","") for item in result.get("output",[]) if item.get("type")=="message"

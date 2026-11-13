@@ -4,7 +4,7 @@ import csv, io, json, os, tempfile, hmac, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv,
-                                     indicators, evaluate, Client, ai_ideas)
+                                     indicators, evaluate, Client, ai_ideas, refresh_bybit_candles)
 SUPPORTED={'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'}
 FRAMES={5,15,60}
 MAX_PAYLOAD=12_500_000
@@ -35,12 +35,16 @@ class Handler(BaseHTTPRequestHandler):
                 if sym not in SUPPORTED or interval not in FRAMES:raise ResearchError('bad_market')
                 with tempfile.TemporaryDirectory() as tmp:
                     filename=Path(tmp)/'candles.csv'
-                    fetch_bybit_candles(sym,interval,filename)
+                    existing=arg.get('existing_csv','')
+                    if not isinstance(existing,str) or len(existing)>12_000_000:raise ResearchError('bad_previous_csv')
+                    previous=Path(tmp)/'previous.csv'
+                    if existing:previous.write_text(existing,encoding='utf-8')
+                    refresh_bybit_candles(sym,interval,filename,previous if existing else None)
                     data=filename.read_bytes()
                     return self.send(200,data,'text/csv')
             if self.path=='/evaluate':
                 interval=int(arg.get('interval_min',0));jobs=arg.get('jobs',[]);csv_data=arg.get('csv','')
-                if interval not in FRAMES or not isinstance(jobs,list) or len(jobs)>12 or len(csv_data)>MAX_PAYLOAD:raise ResearchError('bad_job_batch')
+                if interval not in FRAMES or not isinstance(jobs,list) or len(jobs)>24 or len(csv_data)>MAX_PAYLOAD:raise ResearchError('bad_job_batch')
                 with tempfile.TemporaryDirectory() as tmp:
                     filename=Path(tmp)/'candles.csv';filename.write_text(csv_data,encoding='utf-8')
                     data=load_csv(filename,interval,True);common=indicators(data)
