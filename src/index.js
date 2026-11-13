@@ -1358,6 +1358,23 @@ async function hubRoute(request,env){
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ws',{
       headers:{Upgrade:'websocket'}}));
   }
+  // PRO browser reads the hourly rollup directly using the existing 90s
+  // WordPress HMAC ticket. No PHP or MySQL work on each insights refresh.
+  if(path==='/market-hub/v1/insights'&&method==='GET'){
+    if(!hubAuthorized(request,env)&&!(await hubCheckTicket(request,env,symbol)))
+      return hubReply({ok:false,error:'unauthorized'},401);
+    const windowName=u.searchParams.get('window')||'24h';
+    if(!insightWindow(windowName))return hubReply({ok:false,error:'invalid_window'},400);
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    const upstream=await env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+      new Request('https://hub/insights?symbol='+symbol+'&window='+windowName));
+    // Fixed origin and no credentials. Ticket cannot authorize other endpoints.
+    const headers=new Headers(upstream.headers);
+    headers.set('access-control-allow-origin','https://lumexbot.com');
+    headers.set('vary','Origin');
+    headers.set('cache-control','no-store');
+    return new Response(upstream.body,{status:upstream.status,headers});
+  }
   if(path==='/market-hub/v1/ingest'&&method==='POST'){
     if(!hubIngestAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     const body=await request.text();
@@ -1374,13 +1391,6 @@ async function hubRoute(request,env){
     if(!interval)return hubReply({ok:false,error:'unsupported_interval'},400);
     try{return hubReply(await hubGetCandles(env,symbol,interval,500))}
     catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
-  }
-  if(path==='/market-hub/v1/insights'&&method==='GET'){
-    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
-    const windowName=u.searchParams.get('window')||'24h';
-    if(!insightWindow(windowName))return hubReply({ok:false,error:'invalid_window'},400);
-    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/insights?symbol='+symbol+
-      '&window='+encodeURIComponent(windowName)));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
