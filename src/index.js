@@ -1770,7 +1770,7 @@ export default{
       ctx.waitUntil(collectGateDerivatives(env).catch(()=>console.error('derivatives_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_LEGACY_BACKFILL==='true'&&env.BTC_RESERVE_COLLECTOR){
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
-        .fetch('https://whales/backfill').catch(()=>console.error('legacy_backfill_failed')));
+        .fetch('https://whales/backfill').catch(e=>console.error('legacy_backfill_failed',String(e?.message||e||'unknown').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,80))));
     }
     if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
