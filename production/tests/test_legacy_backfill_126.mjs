@@ -54,7 +54,7 @@ const run=async()=>{
  return (await (await collector.fetch(new Request('https://whales/backfill-status'))).json());
 };
 permissionDenied=true;let h=await run();
-assert(h.sources.every(s=>s.cursor===0 && s.last_error==='wordpress_export_http_401'));
+assert(h.sources.every(s=>s.cursor===0 && s.last_error==='wordpress_export_http_401'),JSON.stringify(h.sources));
 assert.equal(objects.size,0,'no archival write on unauthorized source');
 permissionDenied=false;h=await run();
 assert(h.sources.every(s=>s.records_archived===1&&s.last_error===null&&s.caught_up));
