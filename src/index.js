@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.3 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.4 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -1093,12 +1093,74 @@ export class MarketLiveCollector extends DurableObject{
   }
 }
 
+// Durable hourly rollups. Observed-only (NOT complete market activity).
+// Old events still present in the 14-day SQL hot index are backfilled in
+// bounded chunks. Immutable R2 batches older than the hot index require a
+// separate offline import and are not silently counted.
+const HUB_HOUR_MS=3600000;
+const HUB_WINDOWS=Object.freeze({'1h':1,'24h':24,'7d':168,'14d':336,'30d':720});
+function insightWindow(name){return HUB_WINDOWS[name]||null}
+export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.now()){
+  const hours=insightWindow(windowName);
+  if(!hours)throw Error('unsupported_insight_window');
+  const start=Math.floor((now-hours*HUB_HOUR_MS)/HUB_HOUR_MS)*HUB_HOUR_MS;
+  const buckets=new Map(),groups=new Map();
+  let count=0,liquidation=0,trade=0,whale=0,ticker=0,inBtc=0,outBtc=0;
+  let lastObserved=0,firstObserved=Infinity;
+  for(const row of rows){
+    const bucket=Number(row.bucket),n=Number(row.events),qty=Number(row.quantity);
+    if(!Number.isSafeInteger(bucket)||bucket<start||bucket>now||
+      !Number.isSafeInteger(n)||n<0||!Number.isFinite(qty)||qty<0)continue;
+    const kind=String(row.kind),source=String(row.source),side=String(row.side);
+    if(!HUB_KINDS.includes(kind)||!HUB_ORIGINS.includes(source))continue;
+    count+=n;lastObserved=Math.max(lastObserved,Number(row.last_ts)||bucket);
+    firstObserved=Math.min(firstObserved,Number(row.first_ts)||bucket);
+    if(kind==='liquidation')liquidation+=n;
+    if(kind==='trade')trade+=n;
+    if(kind==='whale_transfer'){
+      whale+=n;
+      if(side==='in')inBtc+=qty;
+      if(side==='out')outBtc+=qty;
+    }
+    if(kind==='ticker')ticker+=n;
+    const key=kind+':'+source+':'+side;
+    const g=groups.get(key)||{kind,source,side,events:0,native_quantity:0};
+    g.events+=n;g.native_quantity+=qty;groups.set(key,g);
+    const b=buckets.get(bucket)||{hour_ms:bucket,liquidation:0,whale_transfer:0,trade_sample:0,ticker_sample:0};
+    const k=kind==='trade'?'trade_sample':kind==='ticker'?'ticker_sample':kind;
+    b[k]+=n;buckets.set(bucket,b);
+  }
+  const round=v=>Number(v.toFixed(8));
+  return {
+    ok:true,symbol,window:windowName,scope:'observed_public_events_only',
+    coverage:'partial_public_sources;no_backfill_for_disconnects',
+    market_total_estimate:false,source_filters:['bybit_liquidations','gate_sampled_futures','btc_confirmed_watchlist'],
+    captures:{liquidations:{events:liquidation,source:'bybit_public_allLiquidation',price_type:'bankruptcy_price',order_side_not_position_side:true},
+      trades:{events:trade,sampling:'per_symbol_1s_max',source:'gateio_futures'},
+      tickers:{events:ticker,sampling:'per_symbol_2s_max'},
+      btc_address_net:{events:whale,in_btc:round(inBtc),out_btc:round(outBtc),
+        net_btc:round(inBtc-outBtc),source:'confirmed_public_btc_watchlist_only'}},
+    observed_events:count,first_observed_ms:firstObserved===Infinity?null:firstObserved,
+    last_observed_ms:lastObserved||null,
+    by_source:Array.from(groups.values()).map(v=>({...v,native_quantity:round(v.native_quantity)}))
+      .sort((a,b)=>b.events-a.events),
+    hourly:Array.from(buckets.values()).sort((a,b)=>a.hour_ms-b.hour_ms),
+    generated_at:new Date(now).toISOString(),trading_enabled:false,
+    note:'청산은 Bybit 공개 관측, 가격은 파산가격이며 실체결가가 아닙니다. Gate 체결은 샘플이고 고래는 관측 BTC 주소의 확인 거래 순변화입니다.'
+  };
+}
+
 export class MarketEventHub extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_events(id TEXT PRIMARY KEY,kind TEXT NOT NULL,source TEXT NOT NULL,ts INTEGER NOT NULL,payload TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0)");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_time ON hub_events(ts DESC)");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_kind_time ON hub_events(kind,ts DESC)");
+    const columns=this.ctx.storage.sql.exec("PRAGMA table_info(hub_events)").toArray();
+    if(!columns.some(col=>col.name==='rollup_done'))
+      this.ctx.storage.sql.exec("ALTER TABLE hub_events ADD COLUMN rollup_done INTEGER NOT NULL DEFAULT 0");
+    this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_rollup_pending ON hub_events(rollup_done,ts)");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_hourly(bucket INTEGER NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,side TEXT NOT NULL,events INTEGER NOT NULL,quantity REAL NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,PRIMARY KEY(bucket,kind,source,side))");
   }
   async fetch(request){
     const u=new URL(request.url);
@@ -1163,6 +1225,24 @@ export class MarketEventHub extends DurableObject{
       return hubReply({ok:true,accepted:accepted.length,invalid:invalid.length,
         archive:'pending_r2_flush',observed_at_utc:new Date().toISOString()});
     }
+
+    if(u.pathname==='/insights'&&request.method==='GET'){
+      const windowName=String(u.searchParams.get('window')||'24h');
+      const hours=insightWindow(windowName);
+      if(!hours)return hubReply({ok:false,error:'invalid_window'},400);
+      const now=Date.now(),start=Math.floor((now-hours*HUB_HOUR_MS)/HUB_HOUR_MS)*HUB_HOUR_MS;
+      const rows=this.ctx.storage.sql.exec(
+        'SELECT bucket,kind,source,side,events,quantity,first_ts,last_ts FROM hub_hourly WHERE bucket>=? ORDER BY bucket ASC LIMIT 16000',start).toArray();
+      const remaining=this.ctx.storage.sql.exec('SELECT COUNT(*) AS n FROM hub_events WHERE rollup_done=0').toArray();
+      const pending=Number(remaining[0]?.n||0);
+      const symbol=String(u.searchParams.get('symbol')||'');
+      const out=summarizeObservedRollups(rows,symbol,windowName,now);
+      out.rollup={up_to_date:pending===0,pending_hot_events:pending,
+        source:'durable_object_sqlite_hourly',older_r2_archive_reimported:false};
+      out.history_restriction='only_available_hot_index_backfill_plus_new_events';
+      return hubReply(out);
+    }
+
     if(u.pathname==='/events'){
       const limit=Math.max(1,Math.min(100,Number(u.searchParams.get('limit')||40))),
         kind=String(u.searchParams.get('kind')||'');
@@ -1177,6 +1257,7 @@ export class MarketEventHub extends DurableObject{
     return hubReply({ok:false,error:'not_found'},404);
   }
   async alarm(){
+    const moreRollup=this.rollupPending();
     const rows=this.ctx.storage.sql.exec('SELECT id,kind,source,ts,payload FROM hub_events WHERE archived=0 ORDER BY ts ASC LIMIT 300').toArray();
     if(rows.length){
       const group=new Map();
@@ -1193,12 +1274,47 @@ export class MarketEventHub extends DurableObject{
           for(const r of batch)this.ctx.storage.sql.exec('UPDATE hub_events SET archived=1 WHERE id=?',r.id);
         }
         // Only hot index expires; immutable R2 event batches retain historical evidence.
-        this.ctx.storage.sql.exec('DELETE FROM hub_events WHERE archived=1 AND ts<?',Date.now()-14*86400000);
+        this.ctx.storage.sql.exec('DELETE FROM hub_events WHERE archived=1 AND rollup_done=1 AND ts<?',Date.now()-14*86400000);
       }catch(e){console.error('market_hub_archive_error',safeError(e));}
     }
-    const pending=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE archived=0 LIMIT 1').toArray();
-    if(pending.length)await this.ctx.storage.setAlarm(Date.now()+30000);
+    const pending=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE archived=0 OR rollup_done=0 LIMIT 1').toArray();
+    if(pending.length||moreRollup)await this.ctx.storage.setAlarm(Date.now()+30000);
   }
+
+  rollupPending(){
+    const rows=this.ctx.storage.sql.exec(
+      'SELECT id,ts,kind,source,payload FROM hub_events WHERE rollup_done=0 ORDER BY ts ASC LIMIT 500').toArray();
+    if(!rows.length)return false;
+    const groups=new Map();
+    for(const row of rows){
+      let payload;
+      try{payload=JSON.parse(row.payload)}catch{payload={}}
+      const bucket=Math.floor(Number(row.ts)/HUB_HOUR_MS)*HUB_HOUR_MS;
+      const side=['buy','sell','in','out'].includes(payload.side)?payload.side:'unknown';
+      const key=[bucket,row.kind,row.source,side].join('|');
+      const group=groups.get(key)||{bucket,kind:row.kind,source:row.source,side,
+        count:0,quantity:0,first_ts:Number(row.ts),last_ts:Number(row.ts)};
+      group.count++;
+      const quantity=Number(payload.quantity);
+      if(Number.isFinite(quantity)&&quantity>=0)group.quantity+=quantity;
+      group.first_ts=Math.min(group.first_ts,Number(row.ts));
+      group.last_ts=Math.max(group.last_ts,Number(row.ts));
+      groups.set(key,group);
+    }
+    const persist=()=>{
+      for(const g of groups.values()){
+        this.ctx.storage.sql.exec(
+          'INSERT INTO hub_hourly(bucket,kind,source,side,events,quantity,first_ts,last_ts) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(bucket,kind,source,side) DO UPDATE SET events=events+excluded.events,quantity=quantity+excluded.quantity,first_ts=MIN(first_ts,excluded.first_ts),last_ts=MAX(last_ts,excluded.last_ts)',
+          g.bucket,g.kind,g.source,g.side,g.count,g.quantity,g.first_ts,g.last_ts);
+      }
+      for(const row of rows)this.ctx.storage.sql.exec('UPDATE hub_events SET rollup_done=1 WHERE id=?',row.id);
+    };
+    if(typeof this.ctx.storage.transactionSync==='function')
+      this.ctx.storage.transactionSync(persist);
+    else persist();
+    return rows.length===500;
+  }
+
   webSocketMessage(ws,data){
     if(data==='ping')ws.send('pong');
   }
@@ -1206,7 +1322,7 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.3',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles'],
+    version:'1.2.4',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
@@ -1241,6 +1357,23 @@ async function hubRoute(request,env){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ws',{
       headers:{Upgrade:'websocket'}}));
+  }
+  // PRO browser reads the hourly rollup directly using the existing 90s
+  // WordPress HMAC ticket. No PHP or MySQL work on each insights refresh.
+  if(path==='/market-hub/v1/insights'&&method==='GET'){
+    if(!hubAuthorized(request,env)&&!(await hubCheckTicket(request,env,symbol)))
+      return hubReply({ok:false,error:'unauthorized'},401);
+    const windowName=u.searchParams.get('window')||'24h';
+    if(!insightWindow(windowName))return hubReply({ok:false,error:'invalid_window'},400);
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    const upstream=await env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+      new Request('https://hub/insights?symbol='+symbol+'&window='+windowName));
+    // Fixed origin and no credentials. Ticket cannot authorize other endpoints.
+    const headers=new Headers(upstream.headers);
+    headers.set('access-control-allow-origin','https://lumexbot.com');
+    headers.set('vary','Origin');
+    headers.set('cache-control','no-store');
+    return new Response(upstream.body,{status:upstream.status,headers});
   }
   if(path==='/market-hub/v1/ingest'&&method==='POST'){
     if(!hubIngestAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
@@ -1299,10 +1432,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.3',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.3',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.4',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);

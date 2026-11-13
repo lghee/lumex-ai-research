@@ -1,3 +1,5 @@
+> **1.2.4:** Cloudflare 공개 관측 청산 건수 및 BTC 주소 순유입·순유출의 시간별 누적 통계 API 추가. 실제 전체 시장 거래·청산량으로 표기 금지. R2 과거 원본 장기 이력 재처리는 별도 단계.
+
 > **1.2.2:** Bitcoin 공개 주소별 확인 거래 순이동(BTC)을 Blockstream Esplora에서 관측하여 MarketEventHub→R2에 누적. 전체 거래소 입출금 또는 고래 매수/매도 아님. WordPress 주소 동기화는 Core 0.5.05.24 설치 후 활성.
 
 > **1.2.1:** Cloudflare Durable Object Gate/Bybit 공개 스트림 수집·중복제거·R2 장기 아카이브 연결. 실시간 청산은 Bybit 공개 이벤트만, 체결은 Gate 표본만 포함. WordPress 전면 Cron 제거·온체인 고래 이전은 아직 안 됨.

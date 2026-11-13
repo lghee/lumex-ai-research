@@ -1,3 +1,5 @@
+> **1.2.4 (2026-11-13):** Cloudflare Durable Object 1h/24h/7d/14d/30d observed-only hourly liquidation and BTC watchlist net transfer rollups. Legacy 14-day hot SQL backfill in bounded batches, historical R2 older than that not yet reimported. Added authenticated Market Hub insights endpoint; no exchange orders or unobserved total estimates. See `docs/RELEASE_124_KO.md`.
+
 > **1.2.2:** confirmed BTC reserve-address onchain net transfers via Esplora public API, checkpointed Cloudflare DO polling, WordPress watchlist sync (new Core 0.5.05.24), immutable R2 archive audit. Existing public Gate/Bybit streams and trading safety unchanged. See docs/RELEASE_122_KO.md.
 
 > **1.2.1:** Gate USDT futures public trades/tickers (sampled) + Bybit V5 public allLiquidation observed data collector in Cloudflare Durable Object; reconnect/heartbeat/lag status, typed observed events → existing MarketEventHub → R2. No exchange API keys, orders or fictitious liquidation fills. See `docs/RELEASE_121_KO.md`.
