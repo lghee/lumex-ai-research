@@ -1,3 +1,5 @@
+> **1.1.8:** AI 네트워크 요청을 Worker에서 실행하고 WordPress 연구 예산·정산을 유지. 기존 1분 시세 수집, 5분 연구, 백테스트, 주문 기능 변경 없음. `../docs/RELEASE_118_KO.md` 참고.
+
 # 1.1.4 데이터 품질 보호 정책 (2026-11-13)
 
 - 기존 `lumex-ai-research2`/GitHub `main`/빌드 루트 `production` **그대로 사용**. WordPress Core 변경 없음.

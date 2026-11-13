@@ -19,9 +19,23 @@ let failEvaluate=false;let claimed=false;let released=[];let results=[];let even
 const response=(v,code=200)=>new Response(JSON.stringify(v),{status:code,headers:{'content-type':'application/json'}});
 const savedFetch=globalThis.fetch;
 globalThis.fetch=async (url,opts)=>{
-  const u=new URL(url);assert.equal(u.hostname,'lumexbot.com');
+  const u=new URL(url);
+  if(u.hostname==='api.openai.com'){
+    aiCalls++;
+    assert.equal(u.pathname,'/v1/responses');
+    return response({status:'completed',usage:{input_tokens:250,output_tokens:100},
+      output:[{type:'message',content:[{type:'output_text',text:JSON.stringify({ideas:[{
+        family:'breakout',lookback:20,fast:10,slow:50,rsi:50,max_hold:12,
+        volume_mult:1.3,stop_atr:1.5,take_atr:2.5,trend_filter:true
+      }]})}]}]});
+  }
+  assert.equal(u.hostname,'lumexbot.com');
   assert.equal(opts.headers.authorization,'Bearer '+'w'.repeat(64));
   eventHistory.push(u.pathname);
+  if(u.pathname.endsWith('/context'))return response({ok:true,market:{fresh:true},technical:{data_quality:'scored'}});
+  if(u.pathname.endsWith('/reserve'))return response({ok:true,reservation_id:'a'.repeat(24),model:'gpt-6-luna',max_output_tokens:1200});
+  if(u.pathname.endsWith('/suggestions'))return response({ok:true,accepted:3});
+  if(u.pathname.endsWith('/commit'))return response({ok:true});
   if(u.pathname.endsWith('/forward/jobs'))return response({ok:true,jobs:[]});
   if(u.pathname.endsWith('/tick'))return response({ok:true,state:'queued',enqueued:100,cursor:100});
   if(u.pathname.endsWith('/jobs')){
