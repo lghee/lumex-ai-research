@@ -969,7 +969,7 @@ export function validateLegacyPage(json,source,cursor,limit=100){
     if(source==='liquidations'&&(!/^[a-fA-F0-9]{64}$/.test(row.fingerprint)||
        !['BTC','ETH','SOL','XRP'].includes(row.coin)||!['long','short'].includes(row.position_side.toLowerCase())))return null;
     if(source==='whales'&&(!/^[a-fA-F0-9]{64}$/.test(row.fingerprint)||
-       !['in','out'].includes(row.transfer_direction)||row.asset!=='BTC'))return null;
+       !['in','out'].includes(row.transfer_direction)||!/^[A-Z0-9]{2,12}$/.test(row.asset)))return null;
     if(source==='market_snapshots'&&!['BTC','ETH','SOL','XRP'].includes(row.coin))return null;
     const values=source==='liquidations'?['price','quantity','notional_usd']:
       source==='whales'?['amount_usd','amount_coin']:['price','oi_usd'];
