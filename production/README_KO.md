@@ -1,4 +1,8 @@
-# LUMEX AI Research 1.1.1 — Cloudflare/GitHub/WordPress 실제 적용 가이드
+> **1.1.2 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+
+> **1.1.2 (2026-11-13):** R2 시세가 저장되지 않는 문제를 재점검하여 Bybit/Binance IP 접근 거부 시 Gate.io 공식 USDT 무기한 선물 OHLCV를 추가했습니다. 성공·실패 모두 `control/last-market-fetch.json` 및 종목별 진단 JSON에 기록합니다. **운영 Cloudflare에서 실제 성공 여부는 아직 확인하지 못했습니다.**
+
+# LUMEX AI Research 1.1.2 — Cloudflare/GitHub/WordPress 실제 적용 가이드
 
 ## 원칙
 - 운영 Worker: **`lumex-ai-research2`** (기존 프로젝트를 그대로 업데이트)
@@ -24,7 +28,7 @@
 3. `production/src/index.js`, `production/engine/lumex_ai_worker.py`, `production/server.py`, `production/wrangler.jsonc`, `production/tests`가 모두 반영됐는지 확인.
 4. Cloudflare → Workers & Pages → **`lumex-ai-research2`** → **Deployments**에서 **새 배포 성공** 확인.
 5. Settings → Builds → Git repository/Production branch/Root directory: **기존 GitHub / main / production** 을 유지. 배포 명령도 기존 `npx wrangler deploy --name lumex-ai-research2 --compatibility-date 2026-11-01` 그대로 사용 가능.
-6. `https://lumex-ai-research2.kpiplus195.workers.dev/health` 접속 → `"version":"1.1.1"`, 모든 auto 토글 `false`, `trading_enabled:false` 확인.
+6. `https://lumex-ai-research2.kpiplus195.workers.dev/health` 접속 → `"version":"1.1.2"`, 모든 auto 토글 `false`, `trading_enabled:false` 확인.
 
 ## 3. 환경변수 / 비밀키 등록
 
@@ -99,7 +103,7 @@ wp option get lumex_ai_lab_worker_token_v1
 - **미검증**: 실제 Cloudflare 컨테이너 기동·Bybit 공개 API 수집 성공·운영 WordPress/MySQL REST 왕복·OpenAI 결제 호출·5,000건/일 실제 처리량·실거래 수익성.
 - Auto Research가 실주문/실계정 전략을 활성화하지 않도록 분리 유지.
 
-## 1.1.1 실제 장애 복구 메모 — Bybit HTTP 403
+## 1.1.2 실제 장애 복구 메모 — Bybit HTTP 403
 
 - 2026-11-13 10:30 KST 운영 로그: `container_fetch_422_HTTP_Error_403__Forbidden`, R2 수집 0/8 성공. 기존 설정/인증 문제는 해결됐고 Python Container 내부 공개 Bybit HTTP GET이 거부됨.
 - 교체된 `production/engine/lumex_ai_worker.py`: 공개 Bybit 선물의 HTTP 403/451시에만 Binance USD-M 무기한 선물 공개 API로 **전량 다시** 적재. 이후 Binance 데이터는 Binance API로만 증분 갱신.

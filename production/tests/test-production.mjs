@@ -62,6 +62,7 @@ env.AUTO_FETCH='true';await schedule();assert.equal(queued.length,1);assert.equa
 await consume('orchestrate');
 assert.equal(fetchRequests.length,1,'Cold start must be bounded');
 assert(await R2.head('market/BTCUSDT_5.csv'));assert.equal((await R2.head('market/BTCUSDT_5.csv')).customMetadata.source,'binance_usdm_perpetual');
+const diagOK=await (await R2.get('control/last-market-fetch.json')).json();assert.equal(diagOK.ok,true);assert.equal(diagOK.market,'BTCUSDT:5');assert.equal((await (await R2.get('control/fetch-BTCUSDT-5.json')).json()).ok,true);
 assert.equal(results.length,0);
 assert.equal(eventHistory.length,1,'Telemetry should be the only WordPress operation for fetch-only');
 env.AUTO_FETCH='false';env.AUTO_RESEARCH='true';
@@ -74,5 +75,12 @@ failEvaluate=true;claimed=false;await consume('orchestrate');assert.equal(releas
 env.AUTO_RESEARCH='false';env.AUTO_AI='true';await consume('orchestrate');assert.equal(aiCalls,1,'AI runs on first scheduled run');
 await consume('orchestrate');assert.equal(aiCalls,1,'AI must be rate limited');
 assert.equal((await handler.fetch(new Request('https://worker/admin/order',{headers:{authorization:'Bearer '+env.LUMEX_ADMIN_API_TOKEN}}),env)).status,404);
+env.RESEARCH_CONTAINER={getByName:()=>({fetch:async()=>response({detail:'bybit_403_binance_403_gate_403_access_restricted'},422)})};
+let failing={body:{kind:'fetch',symbol:'XRPUSDT',interval_min:5},attempts:1,ack(){throw Error('must_not_ack');},retry(){this.retried=true;}};
+env.AUTO_FETCH='true';env.AUTO_AI='false';
+await handler.queue({messages:[failing]},env);assert.equal(failing.retried,true);
+const diagFail=await (await R2.get('control/last-market-fetch.json')).json();
+assert.equal(diagFail.ok,false);assert.equal(diagFail.market,'XRPUSDT:5');
+assert(diagFail.error.includes('bybit_403_binance_403_gate_403_access_restricted'));assert.equal((await (await R2.get('control/fetch-XRPUSDT-5.json')).json()).ok,false);
 globalThis.fetch=savedFetch;
 console.log('PASS production Worker: disabled default, authenticated status, bounded market fetch, research result, release on failure, AI cadence, no order routes');

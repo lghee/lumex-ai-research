@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.1.1 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.1.2 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -11,13 +11,14 @@ const INTERVALS = Object.freeze([5, 15, 60]);
 const MARKETS = SYMBOLS.flatMap(symbol => INTERVALS.map(interval_min => ({symbol, interval_min})));
 const HEADERS = {'content-type':'application/json; charset=utf-8', 'cache-control':'no-store', 'x-content-type-options':'nosniff'};
 const CONTROL_KEY = 'control/research-scheduler-v1.json';
+const FETCH_DIAGNOSTIC_KEY = 'control/last-market-fetch.json';
 const MAX_CSV_BYTES = 12_000_000;
 const respond = (value,status=200) => new Response(JSON.stringify(value),{status,headers:HEADERS});
 const enabled = (env,key) => env[key] === 'true';
 const marketId = (sym,interval) => `${sym}:${interval}`;
 const marketKey = (sym,interval) => `market/${sym}_${interval}.csv`;
 const validMarket = (sym,interval) => SYMBOLS.includes(sym) && INTERVALS.includes(Number(interval));
-const safeError = error => String(error?.message || error || 'unknown_error').replace(/[^a-z0-9_\-]/gi,'_').slice(0,96);
+const safeError = error => String(error?.message || error || 'unknown_error').replace(/[^a-z0-9_\-]/gi,'_').slice(0,160);
 const auth = (request,secret) => Boolean(secret && secret.length >= 32 && request.headers.get('authorization') === `Bearer ${secret}`);
 const fetchLimit = env => Math.min(2,Math.max(1,Number(env.MAX_FETCH_PER_TICK)||1));
 const jobLimit = env => Math.min(24,Math.max(1,Number(env.RESEARCH_BATCH_SIZE)||12));
@@ -52,15 +53,26 @@ async function invokeContainer(env,path,payload){
   }
   return res;
 }
+async function writeFetchDiagnostic(env,sym,interval,detail){
+  const info={market:marketId(sym,interval),timestamp:new Date().toISOString(),...detail};
+  // Private R2 control file. No keys, tokens or raw provider payloads.
+  try{
+    const body=JSON.stringify(info);
+    const options={httpMetadata:{contentType:'application/json'}};
+    await env.MARKET_DATA.put(FETCH_DIAGNOSTIC_KEY,body,options);
+    await env.MARKET_DATA.put(`control/fetch-${sym}-${interval}.json`,body,options);
+  }catch(e){console.error('fetch_diagnostic_write_failed',safeError(e));}
+}
 async function fetchPair(env,sym,interval){
   if(!validMarket(sym,interval))throw Error('selection_not_supported');
+  try{
   const key=marketKey(sym,interval);
   const old=await env.MARKET_DATA.get(key);
   const prior=old && old.size<MAX_CSV_BYTES ? await old.text() : '';
   const existingSource=old?.customMetadata?.source || (old?'bybit_public_linear':'');
   const response=await invokeContainer(env,'/fetch',{symbol:sym,interval_min:interval,existing_csv:prior,existing_source:existingSource});
   const source=response.headers.get('X-Lumex-Market-Source');
-  if(!['bybit_public_linear','binance_usdm_perpetual'].includes(source))throw Error('market_source_unverified');
+  if(!['bybit_public_linear','binance_usdm_perpetual','gateio_usdt_perpetual'].includes(source))throw Error('market_source_unverified');
   const bytes=await response.arrayBuffer();
   if(bytes.byteLength<20000 || bytes.byteLength>MAX_CSV_BYTES)throw Error('market_data_size_invalid');
   const csv=new TextDecoder().decode(bytes);
@@ -71,7 +83,12 @@ async function fetchPair(env,sym,interval){
   // The Container validated every candle, chronological continuity and minimum history.
   // Do not overwrite an existing R2 object when this validation fails.
   await env.MARKET_DATA.put(key,bytes,{httpMetadata:{contentType:'text/csv'},customMetadata:{source,lastCandleMs:String(lastCandleMs),fetchedAtMs:String(now),schema:'ohlcv_v1'}});
+  await writeFetchDiagnostic(env,sym,interval,{ok:true,source,bytes:bytes.byteLength,lastCandleMs});
   return {market:marketId(sym,interval),source,bytes:bytes.byteLength,lastCandleMs};
+  }catch(error){
+    await writeFetchDiagnostic(env,sym,interval,{ok:false,error:safeError(error)});
+    throw error;
+  }
 }
 async function getMarketInventory(env,now){
   const result=[];
@@ -257,10 +274,10 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.1.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.1.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.1.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);

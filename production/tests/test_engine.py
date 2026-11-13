@@ -80,6 +80,50 @@ class ResearchEngineTests(unittest.TestCase):
         self.assertEqual(int(validated[-1,0]),latest)
         self.assertEqual(float(validated[0,1]),100.)  # old Bybit history was discarded
 
+    def test_bybit_and_binance_403_rebuilds_gate_futures_only(self):
+        from urllib.parse import parse_qs,urlparse
+        from urllib.error import HTTPError
+        seen=[]
+        def provider(url,**kwargs):
+            if url.startswith(m.BASE) or url.startswith(m.BINANCE_FUTURES_BASE):
+                raise HTTPError(url,403,'Forbidden',None,None)
+            self.assertTrue(url.startswith(m.GATE_FUTURES_BASE))
+            q=parse_qs(urlparse(url).query)
+            self.assertEqual(q['contract'],['BTC_USDT'])
+            self.assertEqual(q['interval'],['1h'])
+            self.assertNotIn('limit',q)
+            first=int(q['from'][0])*1000
+            last=int(q['to'][0])*1000
+            self.assertTrue(last-first<2000*self.step)
+            seen.append(first)
+            return [{'t':ts//1000,'o':'100','h':'101','l':'99','c':'100','v':'42'}
+                    for ts in range(first,last+1,self.step)]
+        with patch.object(m,'http_json',side_effect=provider):
+            count,source=m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'bybit_public_linear')
+        self.assertEqual(source,'gateio_usdt_perpetual')
+        self.assertGreaterEqual(len(seen),2)
+        self.assertTrue(count>=self.needed)
+        data=m.load_csv(self.result,60,True)
+        self.assertEqual(int(data[-1,0]),self.current)
+        self.assertEqual(float(data[0,5]),42.)
+
+    def test_existing_gate_uses_gate_only_for_incremental(self):
+        old=m.load_csv(self.previous,60,False)
+        def provider(url,**kwargs):
+            from urllib.parse import parse_qs,urlparse
+            self.assertTrue(url.startswith(m.GATE_FUTURES_BASE))
+            q=parse_qs(urlparse(url).query)
+            self.assertEqual(q['contract'],['BTC_USDT'])
+            return [{'t':int(old[-1,0])//1000,'o':str(old[-1,1]),'h':str(old[-1,2]),
+                     'l':str(old[-1,3]),'c':str(old[-1,4]),'v':str(old[-1,5])},
+                    {'t':(self.current-self.step)//1000,'o':'100','h':'101','l':'99','c':'100','v':'14'},
+                    {'t':self.current//1000,'o':'100','h':'101','l':'99','c':'100','v':'15'}]
+        with patch.object(m,'http_json',side_effect=provider):
+            count,source=m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'gateio_usdt_perpetual')
+        self.assertEqual(source,'gateio_usdt_perpetual')
+        self.assertGreater(count,2000)
+        self.assertEqual(int(m.load_csv(self.result,60,True)[-1,0]),self.current)
+
     def test_existing_binance_never_mixes_bybit_when_updating(self):
         old=m.load_csv(self.previous,60,False)
         endpoints=[]
@@ -101,7 +145,7 @@ class ResearchEngineTests(unittest.TestCase):
         from urllib.error import HTTPError
         def blocked(url,**kwargs):raise HTTPError(url,403,'Forbidden',None,None)
         with patch.object(m,'http_json',side_effect=blocked):
-            with self.assertRaisesRegex(m.ResearchError,'bybit_403_binance_403_access_restricted'):
+            with self.assertRaisesRegex(m.ResearchError,'bybit_403_binance_403_gate_403_access_restricted'):
                 m.refresh_public_perpetual_candles('BTCUSDT',60,self.result,self.previous,'bybit_public_linear')
         self.assertFalse(self.result.exists())
         self.assertTrue(self.previous.exists())

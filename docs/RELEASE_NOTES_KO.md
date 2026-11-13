@@ -1,8 +1,34 @@
-# LUMEX AI Research 1.1.1 — Bybit 403 시세 수집 복구
+# LUMEX AI Research v1.1.2 릴리스 노트
 
-- 버그: Bybit 공개 `api.bybit.com/v5/market/kline` GET 에서 HTTP 403이 발생해 Container /fetch 422, R2 시장 CSV 0건.
-- 수정: HTTP 403/451에서 Binance 공식 USD-M 무기한 선물 `/fapi/v1/klines`로 전체 재백필. 이후 Binance 캐시는 동일 공급자 증분 갱신.
-- 무결성: 90일+250봉/완료봉/갭/시각/가격 검증, 실패시 정상 캐시 유지, 공급자 전환 시 기존 Bybit와 데이터 혼합 방지.
-- 추적성: R2 metadata source, Worker `/status` source, WordPress 연구결과 source 기록.
-- 실제 운영 재배포·Bybit/Binance 외부 접근은 아직 검증되지 않음. 403이 양쪽에 발생하면 데이터 공급 경로 재설계 필요.
-- Core 0.5.05.20 유지, Cloudflare Secret 및 토글 유지.
+일시: 2026-11-13 KST
+
+## 사용자 보고
+- Cloudflare Worker 1.1.1 적용 후에도 R2 `market/` 폴더 없음.
+- 1.1.1 적용 이후의 실행 로그나 R2 JSON은 미제공이므로 실패가 Bybit/Binance 동시 차단인지, 다른 오류인지 확인되지 않음.
+
+## 변경
+- Python Container: 공식 Gate.io USDT 무기한 선물 시장 캔들 API 3차 공급자 추가.
+- Bybit HTTP 403/451 → Binance USDM, Binance도 HTTP 403/451 → Gate.io USDT 무기한 선물로 전체 이력 재수집.
+- 기존 Binance 수집분은 Binance API로만 증분 갱신; Binance 403/451 시 Gate로 전체 이력 전환.
+- 기존 Gate 수집분은 Gate API로만 증분 갱신. 각 공급자의 거래량 단위가 다르므로 데이터 혼합 절대 금지.
+- 시장 데이터 검증: 90일 이상+250개 워밍업, 캔들 연속성, 완성봉, 유효 OHLCV, 오래된 데이터 거부.
+- Worker `fetchPair`에 실패·성공 시 사유를 사설 R2 `control/last-market-fetch.json` 및 `control/fetch-<symbol>-<interval>.json` 저장. 이 파일들은 R2에 시장 데이터 저장 성공이 없는 경우에도 원인을 추적하는 용도.
+- `/health` 버전 1.1.2. 기존 Cron/Queue/Secret/WordPress Core/실거래 주문 로직 변경하지 않음.
+
+## 검증
+- Worker Node.js mock R2/Queue 통합 실행 테스트 통과. 실패 시 JSON 진단 생성과 Queue 재시도 확인.
+- Python unittest 9개 통과. Bybit와 Binance가 모두 403일 때 Gate만 전체 히스토리로 전환, Gate 캐시 증분 갱신, 모든 공급자 차단 시 실패 및 기존 데이터 보존 확인.
+- node --check, py_compile 통과.
+- **미검증**: 실제 운영 Cloudflare IP에서 Gate.io API 접근·실제 R2 CSV 생성·90일간 데이터 가용성.
+
+## 사용 지침
+1. GitHub 저장소 `main`의 기존 파일을 같은 상대경로로 교체. Cloudflare Root `production`, Worker `lumex-ai-research2` 유지.
+2. `/health`에서 `version: 1.1.2` 확인. AUTO_FETCH true, AUTO_RESEARCH false, AUTO_AI false 유지.
+3. Cloudflare → Queues → `lumex-research-jobs` → Messages → Send: `{ "kind": "fetch", "symbol": "BTCUSDT", "interval_min": 5 }`
+4. R2 `lumex-ai-data`에서 `control/last-market-fetch.json` 먼저 확인; `ok:true`이면 `market/BTCUSDT_5.csv` 확인. `ok:false`이면 `error`에 Bybit/Binance/Gate 접속 오류 정보가 남음.
+5. Gate까지 403이면 임의 위치 우회가 아니라 해당 실행 환경에서 이용할 수 있는 승인된 시세 공급자/실행 호스트를 별도 선택해야 함.
+
+## 금지
+- 시장 데이터 저장 성공 전 AUTO_RESEARCH/AUTO_AI를 켜지 말 것.
+- 실거래 주문 연결 또는 비밀키를 로그/GitHub에 노출하지 말 것.
+- `control` 상태 파일을 수동 수정하여 성공 처리하지 말 것.

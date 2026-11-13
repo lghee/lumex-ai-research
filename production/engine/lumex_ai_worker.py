@@ -25,7 +25,8 @@ import numpy as np
 
 BASE = "https://api.bybit.com/v5/market/kline"
 BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1/klines"
-MARKET_SOURCES = {"bybit_public_linear", "binance_usdm_perpetual"}
+GATE_FUTURES_BASE = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
+MARKET_SOURCES = {"bybit_public_linear", "binance_usdm_perpetual", "gateio_usdt_perpetual"}
 SUPPORTED = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"}
 FRAMES = {5, 15, 60}
 USER_AGENT = "LUMEX-AI-Research-Worker/1.0 (read-only; no trading)"
@@ -266,28 +267,131 @@ def refresh_binance_futures_candles(symbol: str, interval: int, out: Path, previ
     return len(old)
 
 
+def fetch_gate_futures_candles(symbol: str, interval: int, out: Path, days: int = 92) -> int:
+    """Full, contiguous OHLCV history from Gate USDT perpetual futures.
+
+    Gate responds with UTC **seconds** and volume in contract units; those volumes
+    must never be joined with Binance or Bybit base-asset quantities. Page by
+    from/to time (not `limit`, which is mutually exclusive per official docs).
+    """
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError("invalid_selection")
+    if days < 90 or days > 120:raise ResearchError("invalid_days")
+    step=interval*60_000
+    latest=(int(time.time()*1000)//step-1)*step
+    cursor=((latest-days*86_400_000-250*step)//step)*step
+    found={};calls=0
+    contract=symbol[:-4]+'_USDT'
+    while cursor<=latest:
+        # The time range is inclusive, max 2000 rows. Keep under that bound.
+        end=min(latest,cursor+1998*step)
+        params={"contract":contract,"interval":{5:'5m',15:'15m',60:'1h'}[interval],
+                "from":str(cursor//1000),"to":str(end//1000)}
+        raw=http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list) or not raw:raise ResearchError('gate_futures_empty_or_invalid')
+        for item in raw:
+            if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
+                raise ResearchError('gate_futures_bad_schema')
+            record=(int(item['t'])*1000,float(item['o']),float(item['h']),float(item['l']),
+                    float(item['c']),float(item['v']))
+            ts=record[0]
+            if ts<cursor or ts>end:continue
+            if ts in found and found[ts]!=record:raise ResearchError('conflicting_candle')
+            found[ts]=record
+        cursor=end+step;calls+=1
+        if calls>100:raise ResearchError('too_many_provider_pages')
+        if cursor<=latest:time.sleep(.08)
+    if not found:raise ResearchError('no_market_candles')
+    ordered=[found[t] for t in sorted(found)]
+    if any(b[0]-a[0]!=step for a,b in zip(ordered,ordered[1:])):
+        raise ResearchError('provider_gaps')
+    if len(ordered)<90*1440/interval+250:raise ResearchError('insufficient_provider_history')
+    if time.time()*1000-ordered[-1][0]>max(3*step,3_600_000):raise ResearchError('provider_stale')
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+'.tmp')
+    with tmp.open('w',encoding='utf-8',newline='') as file:
+        writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
+        writer.writerows(ordered)
+    load_csv(tmp,interval,True)
+    tmp.replace(out)
+    return len(ordered)
+
+
+def refresh_gate_futures_candles(symbol: str, interval: int, out: Path, previous: Path | None = None) -> int:
+    """Same-source incremental refresh; full re-backfill if cache isn't usable."""
+    if symbol not in SUPPORTED or interval not in FRAMES:raise ResearchError('invalid_selection')
+    if previous is None or not previous.is_file():return fetch_gate_futures_candles(symbol,interval,out)
+    try:old=load_csv(previous,interval,require_fresh=False)
+    except (ResearchError,ValueError,OSError):return fetch_gate_futures_candles(symbol,interval,out)
+    step=interval*60000
+    latest=(int(time.time()*1000)//step-1)*step
+    last=int(old[-1,0]); missing=max(0,(latest-last)//step)
+    if missing>900:return fetch_gate_futures_candles(symbol,interval,out)
+    if missing>0:
+        params={'contract':symbol[:-4]+'_USDT','interval':{5:'5m',15:'15m',60:'1h'}[interval],
+                'from':str(last//1000),'to':str(latest//1000)}
+        raw=http_json(GATE_FUTURES_BASE+'?'+urllib.parse.urlencode(params),timeout=25)
+        if not isinstance(raw,list) or not raw:raise ResearchError('gate_incremental_unavailable')
+        points={}
+        for item in raw:
+            if not isinstance(item,dict) or not all(k in item for k in ('t','o','h','l','c','v')):
+                raise ResearchError('gate_futures_bad_schema')
+            r=(int(item['t'])*1000,float(item['o']),float(item['h']),float(item['l']),
+               float(item['c']),float(item['v']))
+            if r[0]>latest or r[0]<last:continue
+            if r[0] in points and points[r[0]]!=r:raise ResearchError('conflicting_provider_candle')
+            points[r[0]]=r
+        if last in points and not np.allclose(old[-1],points[last],rtol=1e-9,atol=1e-8):
+            raise ResearchError('provider_revised_closed_candle')
+        appended=[points[t] for t in sorted(points) if t>last]
+        if not appended or appended[0][0]!=last+step or any(b[0]-a[0]!=step for a,b in zip(appended,appended[1:])):
+            raise ResearchError('incremental_provider_gap')
+        old=np.concatenate((old,np.asarray(appended,dtype=np.float64)),axis=0)
+    needed=int(90*1440/interval)+250
+    old=old[-needed:]
+    out.parent.mkdir(parents=True,exist_ok=True)
+    tmp=out.with_suffix(out.suffix+'.tmp')
+    with tmp.open('w',encoding='utf-8',newline='') as file:
+        writer=csv.writer(file);writer.writerow(['timestamp','open','high','low','close','volume'])
+        for row in old:writer.writerow([int(row[0]),*row[1:].tolist()])
+    load_csv(tmp,interval,True)
+    tmp.replace(out)
+    return len(old)
+
+
 def refresh_public_perpetual_candles(symbol: str, interval: int, out: Path,
                                       previous: Path | None = None,
                                       previous_source: str = "") -> tuple[int,str]:
-    """Prefer Bybit; on explicit IP restriction replace with full Binance history.
+    """Use same-source incremental cache; 403/451 fail over with a FULL fresh history.
 
-    Existing Binance data uses only Binance for increments. No cross-exchange
-    continuity, price or volume mixing is allowed even with matching timestamps.
+    Bybit -> Binance -> Gate. Do not bypass API rate limits. Never cross-join
+    exchange OHLCV (volumes are measured in different units).
     """
-    if previous_source not in ("", *MARKET_SOURCES):raise ResearchError("unknown_previous_market_source")
-    if previous_source == "binance_usdm_perpetual":
-        return refresh_binance_futures_candles(symbol,interval,out,previous),"binance_usdm_perpetual"
+    if previous_source not in ('', *MARKET_SOURCES):raise ResearchError('unknown_previous_market_source')
+    if previous_source=='gateio_usdt_perpetual':
+        return refresh_gate_futures_candles(symbol,interval,out,previous),'gateio_usdt_perpetual'
+    if previous_source=='binance_usdm_perpetual':
+        try:return refresh_binance_futures_candles(symbol,interval,out,previous),'binance_usdm_perpetual'
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403,451):raise
+            try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
+            except urllib.error.HTTPError as gate:
+                raise ResearchError(f'binance_{exc.code}_gate_{gate.code}_access_restricted') from gate
     try:
-        return refresh_bybit_candles(symbol,interval,out,previous),"bybit_public_linear"
+        return refresh_bybit_candles(symbol,interval,out,previous),'bybit_public_linear'
     except urllib.error.HTTPError as exc:
         if exc.code not in (403,451):raise
         try:
-            # Always rebuild from scratch when changing exchanges.
-            return fetch_binance_futures_candles(symbol,interval,out),"binance_usdm_perpetual"
+            # A provider switch intentionally DISCARDS old market history.
+            return fetch_binance_futures_candles(symbol,interval,out),'binance_usdm_perpetual'
         except urllib.error.HTTPError as secondary:
-            raise ResearchError(f"bybit_{exc.code}_binance_{secondary.code}_access_restricted") from secondary
+            if secondary.code not in (403,451):raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}') from secondary
+            try:return fetch_gate_futures_candles(symbol,interval,out),'gateio_usdt_perpetual'
+            except urllib.error.HTTPError as gate:
+                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_gate_{gate.code}_access_restricted') from gate
+            except ResearchError as gate:
+                raise ResearchError(f'bybit_{exc.code}_binance_{secondary.code}_gate_{str(gate)[:60]}') from gate
         except ResearchError as secondary:
-            raise ResearchError(f"bybit_{exc.code}_binance_{str(secondary)[:60]}") from secondary
+            raise ResearchError(f'bybit_{exc.code}_binance_{str(secondary)[:60]}') from secondary
 
 
 def ema(v: np.ndarray, n: int) -> np.ndarray:
