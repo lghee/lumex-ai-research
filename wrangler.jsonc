@@ -24,6 +24,10 @@
       {
         "name": "MARKET_EVENT_HUB",
         "class_name": "MarketEventHub"
+      },
+      {
+        "name": "MARKET_LIVE_COLLECTOR",
+        "class_name": "MarketLiveCollector"
       }
     ]
   },
@@ -33,6 +37,10 @@
       "storage": "sqlite"
     },
     "MarketEventHub": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "MarketLiveCollector": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -71,7 +79,8 @@
     "LUMEX_SITE_URL": "https://lumexbot.com",
     "AUTO_RESEARCH": "false",
     "AUTO_FETCH": "false",
-    "AUTO_AI": "false"
+    "AUTO_AI": "false",
+    "AUTO_LIVE_STREAM": "true"
   },
   "observability": {
     "logs": {
