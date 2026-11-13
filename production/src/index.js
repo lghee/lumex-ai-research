@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.0 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.1 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -671,9 +671,207 @@ function hubValidateEvent(ev,symbol,now){
   if((kind==='trade'||kind==='liquidation'||kind==='ticker')&&(price<=0||quantity<=0&&kind!=='ticker'))return null;
   const side=['buy','sell','in','out','unknown'].includes(ev.side)?ev.side:'unknown';
   const txhash=typeof ev.txhash==='string'&&/^[a-fA-F0-9]{64}$/.test(ev.txhash)?ev.txhash:null;
-  return {id,kind,source,symbol,ts,price,quantity,side,txhash,observed:true,
+  const capture=['public_stream','sampled_1s','sampled_2s'].includes(ev.capture)?ev.capture:'public_observation';
+  const price_type=['bankruptcy_price','trade_price','last_trade_price'].includes(ev.price_type)?ev.price_type:'unspecified';
+  const position_side=['long','short'].includes(ev.position_side)?ev.position_side:null;
+  return {id,kind,source,symbol,ts,price,quantity,side,txhash,observed:true,capture,price_type,position_side,
     unit:kind==='whale_transfer'?'BTC':'exchange_native_contract_units'};
 }
+// Live public stream source adapters. These are observed exchange packets only:
+// Bybit's liquidation "p" is BANKRUPTCY price, not an actual filled price.
+// Gate trades are explicitly sampled to cap operational cost and must never
+// be reported as a full tick/trade archive.
+const LIVE_SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
+const LIVE_GATE_CONTRACTS=LIVE_SYMBOLS.map(s=>s.replace('USDT','_USDT'));
+const LIVE_ENABLED=env=>env?.AUTO_LIVE_STREAM==='true';
+const livePair=s=>LIVE_SYMBOLS.includes(s)?s:null;
+const liveSymbolFromGate=s=>livePair(String(s||'').replace('_USDT','USDT'));
+const liveFinite=n=>Number.isFinite(Number(n))?Number(n):NaN;
+export function decodeBybitLiquidations(raw){
+  if(!raw||typeof raw!=='object'||!/^allLiquidation\.(BTCUSDT|ETHUSDT|SOLUSDT|XRPUSDT)$/.test(String(raw.topic||'')))return [];
+  const observations=[];
+  for(const item of Array.isArray(raw.data)?raw.data:[]){
+    const symbol=livePair(item?.s),ts=liveFinite(item?.T),price=liveFinite(item?.p),quantity=liveFinite(item?.v);
+    if(!symbol||!Number.isSafeInteger(ts)||!Number.isFinite(price)||price<=0||
+       !Number.isFinite(quantity)||quantity<=0||!['Buy','Sell'].includes(item.S))continue;
+    observations.push({kind:'liquidation',symbol,source:'bybit',ts,price,quantity,
+      side:item.S==='Buy'?'buy':'sell',position_side:item.S==='Buy'?'long':'short',
+      price_type:'bankruptcy_price',capture:'public_stream'});
+  }
+  return observations.slice(0,200);
+}
+export function decodeGatePublic(raw){
+  const channel=raw?.channel,kind=raw?.event;
+  if(kind!=='update')return [];
+  const output=[];
+  if(channel==='futures.trades'){
+    for(const item of Array.isArray(raw.result)?raw.result:[]){
+      const symbol=liveSymbolFromGate(item?.contract),price=liveFinite(item?.price),
+        amount=liveFinite(item?.size),ts=liveFinite(item?.create_time_ms||Number(item?.create_time)*1000);
+      if(!symbol||item.is_internal===true||!Number.isSafeInteger(ts)||price<=0||!Number.isFinite(amount)||amount===0)continue;
+      if(!/^\d+$/.test(String(item.id??'')))continue;
+      output.push({id:'gateio:trade:'+symbol+':'+String(item.id),kind:'trade',symbol,source:'gateio',
+        ts,price,quantity:Math.abs(amount),side:amount>0?'buy':'sell',capture:'sampled_1s',
+        price_type:'trade_price'});
+    }
+  }else if(channel==='futures.tickers'){
+    for(const item of Array.isArray(raw.result)?raw.result:[raw.result]){
+      const symbol=liveSymbolFromGate(item?.contract),price=liveFinite(item?.last),
+        ts=liveFinite(raw.time_ms||Number(raw.time)*1000);
+      if(!symbol||!Number.isSafeInteger(ts)||price<=0)continue;
+      output.push({id:'gateio:ticker:'+symbol+':'+Math.floor(ts/2000),
+        kind:'ticker',symbol,source:'gateio',ts,price,quantity:0,side:'unknown',
+        capture:'sampled_2s',price_type:'last_trade_price'});
+    }
+  }
+  return output.slice(0,200);
+}
+async function liveLiquidationId(e){
+  const text=[e.symbol,e.ts,e.side,e.quantity,e.price].join(':');
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
+  return 'bybit:liq:'+e.symbol+':'+Array.from(new Uint8Array(bytes).slice(0,16),x=>x.toString(16).padStart(2,'0')).join('');
+}
+export class MarketLiveCollector extends DurableObject{
+  constructor(ctx,env){
+    super(ctx,env);
+    this.ctx=ctx;this.env=env;
+    this.streams=new Map();this.pending=new Map();this.flushRunning=false;
+    this.lastSample=new Map();this.retryAt={gate:0,bybit:0};
+    this.metrics={gate:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
+      bybit:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
+      pending:0,accepted:0,rejected:0,flush_errors:0,last_flush_ms:0,
+      coverage:'only_observed_messages;past_disconnects_not_backfilled'};
+  }
+  safeStatus(){
+    const now=Date.now(),feeds={};
+    for(const kind of ['gate','bybit']){
+      const m=this.metrics[kind];
+      feeds[kind]={state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
+        packets:m.packets,restarts:m.restarts,error:m.error,
+        connected:Boolean(this.streams.get(kind)?.readyState===1)};
+    }
+    return {ok:true,enabled:LIVE_ENABLED(this.env),feeds,buffered:this.metrics.pending,
+      accepted:this.metrics.accepted,rejected:this.metrics.rejected,flush_errors:this.metrics.flush_errors,
+      last_flush_ms:this.metrics.last_flush_ms,coverage:this.metrics.coverage,
+      sink:'MarketEventHub_R2_archive',order_execution:false,ts:new Date(now).toISOString()};
+  }
+  async fetch(request){
+    const path=new URL(request.url).pathname;
+    if(path==='/status')return hubReply(this.safeStatus());
+    if(path==='/ensure'){
+      if(!LIVE_ENABLED(this.env))return hubReply({...this.safeStatus(),reason:'auto_live_stream_disabled'});
+      await this.ensure();
+      return hubReply(this.safeStatus());
+    }
+    if(path==='/stop'){
+      for(const ws of this.streams.values())try{ws.close(1000,'collector disabled')}catch{}
+      this.streams.clear();
+      return hubReply({ok:true,stopped:true});
+    }
+    return hubReply({ok:false,error:'not_found'},404);
+  }
+  async ensure(){
+    if(!LIVE_ENABLED(this.env))return;
+    for(const source of ['gate','bybit']){
+      const sock=this.streams.get(source);
+      if(sock&&(sock.readyState===0||sock.readyState===1))continue;
+      if(Date.now()<this.retryAt[source])continue;
+      this.connect(source);
+    }
+    if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+5000);
+  }
+  connect(source){
+    const url=source==='gate'?'wss://fx-ws.gateio.ws/v4/ws/usdt':'wss://stream.bybit.com/v5/public/linear';
+    this.metrics[source].state='connecting';
+    let ws;
+    try{ws=new WebSocket(url)}catch(error){this.disconnected(source,'connect_failed');return;}
+    this.streams.set(source,ws);
+    ws.addEventListener('open',()=>{
+      if(this.streams.get(source)!==ws)return;
+      this.metrics[source].state='connected';this.metrics[source].error=null;
+      try{
+        if(source==='gate'){
+          const time=Math.floor(Date.now()/1000);
+          for(const channel of ['futures.trades','futures.tickers'])
+            ws.send(JSON.stringify({time,channel,event:'subscribe',payload:LIVE_GATE_CONTRACTS}));
+        }else ws.send(JSON.stringify({op:'subscribe',args:LIVE_SYMBOLS.map(s=>'allLiquidation.'+s)}));
+      }catch(error){this.disconnected(source,'subscribe_failed');}
+    });
+    ws.addEventListener('message',message=>{
+      if(this.streams.get(source)!==ws||typeof message.data!=='string'||message.data.length>250000)return;
+      this.metrics[source].last_received_ms=Date.now();this.metrics[source].packets++;
+      try{
+        const raw=JSON.parse(message.data),items=source==='gate'?decodeGatePublic(raw):decodeBybitLiquidations(raw);
+        if(items.length)this.ctx.waitUntil(this.ingestItems(items));
+      }catch(error){this.metrics[source].error='malformed_exchange_message';}
+    });
+    ws.addEventListener('close',()=>{if(this.streams.get(source)===ws)this.disconnected(source,'exchange_closed')});
+    ws.addEventListener('error',()=>{if(this.streams.get(source)===ws)this.disconnected(source,'exchange_websocket_error')});
+  }
+  disconnected(source,reason){
+    const ws=this.streams.get(source);if(ws){this.streams.delete(source);try{ws.close()}catch{}}
+    const m=this.metrics[source];m.state='reconnecting';m.restarts++;m.error=reason;
+    this.retryAt[source]=Date.now()+Math.min(60000,2000*Math.pow(2,Math.min(m.restarts,5)));
+  }
+  async ingestItems(items){
+    for(const item of items){
+      // No exchange secrets or account metadata; all events publicly observed.
+      if(item.kind==='liquidation')item.id=await liveLiquidationId(item);
+      else{
+        const previous=this.lastSample.get(item.kind+':'+item.symbol)||0;
+        const minDelay=item.kind==='trade'?1000:2000;
+        if(item.ts-previous<minDelay)continue;
+        this.lastSample.set(item.kind+':'+item.symbol,item.ts);
+      }
+      if(!this.pending.has(item.symbol))this.pending.set(item.symbol,[]);
+      const batch=this.pending.get(item.symbol);
+      if(batch.length>=1000){this.metrics.rejected++;continue;}
+      batch.push(item);this.metrics.pending++;
+    }
+    if(this.metrics.pending>=20||items.some(x=>x.kind==='liquidation'))await this.flush();
+  }
+  async flush(){
+    if(this.flushRunning||!this.metrics.pending)return;
+    this.flushRunning=true;
+    try{
+      for(const [symbol,queue] of this.pending){
+        if(!queue.length)continue;
+        const batch=queue.splice(0,Math.min(100,queue.length));
+        try{
+          const reply=await this.env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ingest',{
+            method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol,events:batch})}));
+          if(!reply.ok)throw Error('sink_http_'+reply.status);
+          const result=await reply.json();
+          this.metrics.accepted+=Number(result.accepted||0);this.metrics.rejected+=Number(result.invalid||0);
+          this.metrics.pending-=batch.length;
+        }catch(error){
+          queue.unshift(...batch);this.metrics.flush_errors++;
+          this.metrics.last_error='event_sink_unavailable';
+        }
+      }
+      this.metrics.last_flush_ms=Date.now();
+    }finally{this.flushRunning=false;}
+  }
+  async alarm(){
+    if(!LIVE_ENABLED(this.env))return;
+    const now=Date.now();
+    for(const source of ['gate','bybit']){
+      const m=this.metrics[source],ws=this.streams.get(source);
+      if(ws?.readyState===1){
+        if(m.last_received_ms&&now-m.last_received_ms>90000){
+          this.disconnected(source,'feed_stale_reconnect');continue;
+        }
+        // Explicit source heartbeat. Gate expects futures.ping; Bybit expects op ping.
+        try{ws.send(source==='gate'?JSON.stringify({time:Math.floor(now/1000),channel:'futures.ping'}):'{"op":"ping"}')}
+        catch{this.disconnected(source,'heartbeat_failed')}
+      }
+    }
+    await this.flush();
+    await this.ensure();
+    await this.ctx.storage.setAlarm(Date.now()+10000);
+  }
+}
+
 export class MarketEventHub extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -758,9 +956,15 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.0',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket'],
-    market_data_scope:'verified_closed_candles',live_exchange_ingestor:'not_activated',
-    order_execution:false});
+    version:'1.2.1',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer'],
+    market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
+    trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
+  if(path==='/market-hub/v1/live-health'&&method==='GET'){
+    if(!LIVE_ENABLED(env))return hubReply({ok:true,enabled:false,reason:'collector_disabled',order_execution:false});
+    if(!env.MARKET_LIVE_COLLECTOR)return hubReply({ok:false,error:'live_collector_binding_missing'},503);
+    try{return await env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/status')}
+    catch(error){return hubReply({ok:false,error:'live_collector_status_unavailable'},503)}
+  }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     try{return hubReply(await hubRadar(env))}
@@ -831,10 +1035,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -850,13 +1054,21 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
+    if(live && controller.cron==='* * * * *'){
+      // Independent from market research Queue; a stream outage never blocks orders or research.
+      ctx.waitUntil(env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/ensure')
+        .catch(()=>console.error('live_stream_ensure_failed')));
+    }
     if(!enabled(env,'AUTO_RESEARCH') && !enabled(env,'AUTO_FETCH') && !enabled(env,'AUTO_AI')){
-      console.info('lumex_scheduler_disabled');return;
+      if(!live)console.info('lumex_scheduler_disabled');return;
     }
     // Every-minute: market freshness only; every five minutes: bounded research + AI.
     // At overlapping minutes, the single queue consumer serializes the jobs.
-    const kind=controller.cron==='* * * * *'?'market_tick':'orchestrate';
-    ctx.waitUntil(env.RESEARCH_QUEUE.send({kind}));
+    if(enabled(env,'AUTO_RESEARCH')||enabled(env,'AUTO_FETCH')||enabled(env,'AUTO_AI')){
+      const kind=controller.cron==='* * * * *'?'market_tick':'orchestrate';
+      ctx.waitUntil(env.RESEARCH_QUEUE.send({kind}));
+    }
   },
   async queue(batch,env){
     for(const message of batch.messages){
