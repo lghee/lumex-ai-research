@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.2 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.3 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -728,6 +728,27 @@ export function decodeGatePublic(raw){
   }
   return output.slice(0,200);
 }
+
+const LIVE_CANDLE_INTERVALS=Object.freeze({'5m':5,'15m':15,'1h':60,'4h':240,'1d':1440});
+export function decodeGateCandles(raw){
+  if(raw?.channel!=='futures.candlesticks'||raw?.event!=='update')return [];
+  const output=[],now=Date.now();
+  for(const row of Array.isArray(raw.result)?raw.result:[]){
+    const match=/^(5m|15m|1h|4h|1d)_(BTC|ETH|SOL|XRP)_USDT$/.exec(String(row?.n||''));
+    if(!match)continue;
+    const interval=LIVE_CANDLE_INTERVALS[match[1]],symbol=match[2]+'USDT';
+    const t=Number(row.t)*1000,o=Number(row.o),h=Number(row.h),l=Number(row.l),
+      c=Number(row.c),v=Number(row.v);
+    if(!Number.isSafeInteger(t)||t<1500000000000||t>now+interval*60000||
+       t%(interval*60000)!==0||![o,h,l,c,v].every(Number.isFinite)||
+       o<=0||c<=0||l<=0||h<Math.max(o,c,l)||l>Math.min(o,c)||v<0)continue;
+    output.push({kind:'provisional_kline',source:'gateio',symbol,interval_min:interval,
+      open_ms:t,o,h,l,c,v,ts:Number(raw.time_ms)||now,confirmed:false,
+      price_type:'gateio_futures_candle',capture:'public_stream_provisional'});
+  }
+  return output.slice(0,80);
+}
+
 async function liveLiquidationId(e){
   const text=[e.symbol,e.ts,e.side,e.quantity,e.price].join(':');
   const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));
@@ -891,10 +912,11 @@ export class MarketLiveCollector extends DurableObject{
     super(ctx,env);
     this.ctx=ctx;this.env=env;
     this.streams=new Map();this.pending=new Map();this.flushRunning=false;
-    this.lastSample=new Map();this.retryAt={gate:0,bybit:0};
+    this.lastSample=new Map();this.lastCandleSent=new Map();this.retryAt={gate:0,bybit:0};
     this.metrics={gate:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       bybit:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       pending:0,accepted:0,rejected:0,flush_errors:0,last_flush_ms:0,
+      preview_sent:0,preview_errors:0,last_preview_ms:0,
       coverage:'only_observed_messages;past_disconnects_not_backfilled'};
   }
   safeStatus(){
@@ -907,6 +929,7 @@ export class MarketLiveCollector extends DurableObject{
     }
     return {ok:true,enabled:LIVE_ENABLED(this.env),feeds,buffered:this.metrics.pending,
       accepted:this.metrics.accepted,rejected:this.metrics.rejected,flush_errors:this.metrics.flush_errors,
+      preview_sent:this.metrics.preview_sent,preview_errors:this.metrics.preview_errors,last_preview_ms:this.metrics.last_preview_ms,
       last_flush_ms:this.metrics.last_flush_ms,coverage:this.metrics.coverage,
       sink:'MarketEventHub_R2_archive',order_execution:false,ts:new Date(now).toISOString()};
   }
@@ -949,6 +972,13 @@ export class MarketLiveCollector extends DurableObject{
           const time=Math.floor(Date.now()/1000);
           for(const channel of ['futures.trades','futures.tickers'])
             ws.send(JSON.stringify({time,channel,event:'subscribe',payload:LIVE_GATE_CONTRACTS}));
+          // Gate publishes in-progress futures OHLCV; do not mark these candles confirmed.
+          for(const tf of Object.keys(LIVE_CANDLE_INTERVALS)){
+            for(const contract of LIVE_GATE_CONTRACTS){
+              ws.send(JSON.stringify({time,channel:'futures.candlesticks',
+                event:'subscribe',payload:[tf,contract]}));
+            }
+          }
         }else ws.send(JSON.stringify({op:'subscribe',args:LIVE_SYMBOLS.map(s=>'allLiquidation.'+s)}));
       }catch(error){this.disconnected(source,'subscribe_failed');}
     });
@@ -958,6 +988,10 @@ export class MarketLiveCollector extends DurableObject{
       try{
         const raw=JSON.parse(message.data),items=source==='gate'?decodeGatePublic(raw):decodeBybitLiquidations(raw);
         if(items.length)this.ctx.waitUntil(this.ingestItems(items));
+        if(source==='gate'){
+          const previews=decodeGateCandles(raw);
+          if(previews.length)this.ctx.waitUntil(this.publishCandles(previews));
+        }
       }catch(error){this.metrics[source].error='malformed_exchange_message';}
     });
     ws.addEventListener('close',()=>{if(this.streams.get(source)===ws)this.disconnected(source,'exchange_closed')});
@@ -968,6 +1002,38 @@ export class MarketLiveCollector extends DurableObject{
     const m=this.metrics[source];m.state='reconnecting';m.restarts++;m.error=reason;
     this.retryAt[source]=Date.now()+Math.min(60000,2000*Math.pow(2,Math.min(m.restarts,5)));
   }
+
+  async publishCandles(items){
+    const accepted=[],now=Date.now();
+    for(const candle of items){
+      const id=candle.symbol+':'+candle.interval_min;
+      const prev=this.lastCandleSent.get(id);
+      if(prev&&candle.open_ms<prev.open_ms)continue;
+      // Limit fan-out overhead without pretending to capture every exchange tick.
+      if(prev&&candle.open_ms===prev.open_ms&&now-prev.time<12000)continue;
+      this.lastCandleSent.set(id,{time:now,open_ms:candle.open_ms});
+      accepted.push(candle);
+    }
+    const groups=new Map();
+    for(const item of accepted){
+      if(!groups.has(item.symbol))groups.set(item.symbol,[]);
+      groups.get(item.symbol).push(item);
+    }
+    for(const [symbol,group] of groups){
+      try{
+        const response=await this.env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+          new Request('https://hub/publish',{
+            method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({symbol,previews:group})}));
+        if(!response.ok)throw Error('preview_sink_unavailable');
+        this.metrics.preview_sent+=group.length;
+        this.metrics.last_preview_ms=Date.now();
+      }catch(error){
+        this.metrics.preview_errors++;
+      }
+    }
+  }
+
   async ingestItems(items){
     for(const item of items){
       // No exchange secrets or account metadata; all events publicly observed.
@@ -1041,9 +1107,38 @@ export class MarketEventHub extends DurableObject{
       const pair=new WebSocketPair();const [client,server]=Object.values(pair);
       this.ctx.acceptWebSocket(server);
       server.serializeAttachment({started:Date.now()});
-      server.send(JSON.stringify({type:'hello',scope:'observed_market_events',as_of_utc:new Date().toISOString()}));
+      server.send(JSON.stringify({type:'hello',scope:'observed_market_events_and_provisional_candles',as_of_utc:new Date().toISOString()}));
       return new Response(null,{status:101,webSocket:client});
     }
+
+    // In-progress exchange candles are broadcast to entitled subscribers only.
+    // They MUST NOT enter the research-grade R2 ledger or historical SQL index.
+    if(u.pathname==='/publish'&&request.method==='POST'){
+      let body;try{body=await request.json()}catch{return hubReply({ok:false,error:'bad_json'},400)}
+      const symbol=body?.symbol,previews=body?.previews;
+      if(!HUB_SYMBOLS.includes(symbol)||!Array.isArray(previews)||previews.length>30)
+        return hubReply({ok:false,error:'invalid_preview_batch'},400);
+      const now=Date.now();let sent=0;
+      const peers=this.ctx.getWebSockets();
+      for(const ev of previews){
+        const [t,o,h,l,c,v]=[ev?.open_ms,ev?.o,ev?.h,ev?.l,ev?.c,ev?.v].map(Number);
+        const frame=Number(ev?.interval_min);
+        if(ev?.kind!=='provisional_kline'||ev.symbol!==symbol||
+           ev.source!=='gateio'||ev.confirmed!==false||!HUB_FRAMES.includes(frame)||
+           !Number.isSafeInteger(t)||t<now-3*86400000||t>now+frame*60000||
+           t%(frame*60000)!==0||![o,h,l,c,v].every(Number.isFinite)||
+           o<=0||c<=0||l<=0||h<Math.max(o,c,l)||l>Math.min(o,c)||v<0)continue;
+        const safe={kind:'provisional_kline',symbol,interval_min:frame,open_ms:t,
+          o,h,l,c,v,source:'gateio',confirmed:false,received_ms:now,
+          price_type:'gateio_futures_candle',capture:'public_stream_provisional'};
+        const packet=JSON.stringify({type:'provisional_kline',data:safe});
+        for(const ws of peers){try{ws.send(packet)}catch{}}
+        sent++;
+      }
+      return hubReply({ok:true,broadcast:sent,clients:peers.length,
+        stored:false,scope:'provisional_only'});
+    }
+
     if(u.pathname==='/ingest'&&request.method==='POST'){
       const body=await request.json(),now=Date.now(),accepted=[],invalid=[];
       if(!Array.isArray(body.events)||body.events.length>100||body.events.length<1)return hubReply({ok:false,error:'invalid_batch'},400);
@@ -1111,7 +1206,7 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.2',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows'],
+    version:'1.2.3',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
@@ -1204,10 +1299,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.3',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.3',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
