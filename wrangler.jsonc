@@ -90,7 +90,8 @@
     "AUTO_AI": "false",
     "AUTO_LIVE_STREAM": "true",
     "AUTO_WHALE_FETCH": "true",
-    "AUTO_DERIVATIVES_FETCH": "true"
+    "AUTO_DERIVATIVES_FETCH": "true",
+    "AUTO_LEGACY_BACKFILL": "true"
   },
   "observability": {
     "logs": {
