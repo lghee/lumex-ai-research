@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.1 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.2 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -1111,7 +1111,7 @@ export class MarketEventHub extends DurableObject{
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.1',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer'],
+    version:'1.2.2',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
@@ -1119,6 +1119,20 @@ async function hubRoute(request,env){
     if(!env.MARKET_LIVE_COLLECTOR)return hubReply({ok:false,error:'live_collector_binding_missing'},503);
     try{return await env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/status')}
     catch(error){return hubReply({ok:false,error:'live_collector_status_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/whale-health'&&method==='GET'){
+    if(!env.BTC_RESERVE_COLLECTOR)return hubReply({ok:false,error:'whale_collector_binding_missing'},503);
+    try{return await env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/status')}
+    catch(error){return hubReply({ok:false,error:'whale_collector_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/archive-health'&&method==='GET'){
+    try{
+      const rows=await env.MARKET_DATA.list({prefix:'market-hub/events/',limit:25});
+      const objects=(rows?.objects||[]);
+      return hubReply({ok:true,objects_sampled:objects.length,truncated:!!rows?.truncated,
+        most_recent_modified_ms:objects.reduce((v,x)=>Math.max(v,Date.parse(x.uploaded)||0),0),
+        archive:'immutable_r2_jsonl',sample_not_total:true,order_execution:false});
+    }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
@@ -1190,10 +1204,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.2',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -1210,6 +1224,10 @@ export default{
   },
   async scheduled(controller,env,ctx){
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
+      ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
+        .fetch('https://whales/poll').catch(()=>console.error('btc_whale_poll_failed')));
+    }
     if(live && controller.cron==='* * * * *'){
       // Independent from market research Queue; a stream outage never blocks orders or research.
       ctx.waitUntil(env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/ensure')
