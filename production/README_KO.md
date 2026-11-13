@@ -1,3 +1,5 @@
+> **1.2.2:** Bitcoin 공개 주소별 확인 거래 순이동(BTC)을 Blockstream Esplora에서 관측하여 MarketEventHub→R2에 누적. 전체 거래소 입출금 또는 고래 매수/매도 아님. WordPress 주소 동기화는 Core 0.5.05.24 설치 후 활성.
+
 > **1.2.1:** Cloudflare Durable Object Gate/Bybit 공개 스트림 수집·중복제거·R2 장기 아카이브 연결. 실시간 청산은 Bybit 공개 이벤트만, 체결은 Gate 표본만 포함. WordPress 전면 Cron 제거·온체인 고래 이전은 아직 안 됨.
 
 > **1.2.0:** 공통 Market Hub 시작: R2 확정봉·레이더, 인증된 관측 이벤트 원장 및 WebSocket 전송. 공개 스트림 수집기가 연결되기 전까지 `live_exchange_ingestor: not_activated`임을 명확히 표시합니다.
