@@ -1,3 +1,5 @@
+> **1.2.5 (2026-11-13):** Cloudflare 5분 Cron에서 Gate 공개 선물 펀딩·마크가격·미결제약정(USD 환산) 수집, R2 종목별 일간 시계열 저장 및 PRO 접속권 전용 현재/24h/7d 조회 API. OI 데이터 유실·지연은 null로 처리하고 거래소 전체 수치로 표현하지 않음. 상세 `docs/RELEASE_125_KO.md`.
+
 > **1.2.4 (2026-11-13):** Cloudflare Durable Object 1h/24h/7d/14d/30d observed-only hourly liquidation and BTC watchlist net transfer rollups. Legacy 14-day hot SQL backfill in bounded batches, historical R2 older than that not yet reimported. Added authenticated Market Hub insights endpoint; no exchange orders or unobserved total estimates. See `docs/RELEASE_124_KO.md`.
 
 > **1.2.2:** confirmed BTC reserve-address onchain net transfers via Esplora public API, checkpointed Cloudflare DO polling, WordPress watchlist sync (new Core 0.5.05.24), immutable R2 archive audit. Existing public Gate/Bybit streams and trading safety unchanged. See docs/RELEASE_122_KO.md.
