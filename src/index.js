@@ -2179,7 +2179,10 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       bin=termValidNumber(events.captures?.binance_liquidation_snapshots?.events,0,10000000),
       whale=termValidNumber(events.captures?.btc_address_net?.events,0,10000000);
     const last=termValidNumber(events.last_observed_ms,1500000000000,4102444800000);
-    if(liq!==null&&bin!==null&&whale!==null){
+    const binanceObserved=env.AUTO_BINANCE_LIQUIDATIONS==='true'&&bin!==null;
+    // A missing Binance snapshot or BTC-watchlist rollup must not suppress
+    // valid Bybit observations (and vice versa). Never substitute zero.
+    if(liq!==null||binanceObserved){
       // Section freshness is the rollup generation time, not last trade/event
       // time. Quiet market periods must never be labelled a stream outage.
       const generatedMs=Date.parse(String(events.generated_at||''));
@@ -2187,7 +2190,7 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       sections.observations=termSection('bybit_liquidation_vs_binance_sampled_plus_btc_watchlist',
         Math.floor(generatedMs/1000),300,{
           bybit_liquidation_events_24h:liq,
-          binance_liquidation_snapshots_24h:env.AUTO_BINANCE_LIQUIDATIONS==='true'?bin:null,
+          binance_liquidation_snapshots_24h:binanceObserved?bin:null,
           binance_stream_enabled:env.AUTO_BINANCE_LIQUIDATIONS==='true',
           btc_watchlist_address_flows_24h:symbol==='BTCUSDT'?whale:null,
           observations_partial:true,source_gap_possible:true,
