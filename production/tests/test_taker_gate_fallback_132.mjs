@@ -7,11 +7,16 @@ const now=Math.floor(Date.now()/1000),frame=Math.floor(now/300)*300,token='g'.re
 const gateRows=Array.from({length:6},(_,i)=>({
  time:frame-(5-i)*300,
  long_taker_size:String(100+i*20),short_taker_size:String(200+i*10),
+ long_liq_usd_new:100+i,short_liq_usd_new:20+i,
  lsr_taker:0.7,lsr_account:1.4
 }));
 const computed=pulseGateTaker(gateRows,'BTC',now);
 assert(computed.sample_unix<=now&&now-computed.sample_unix<900);
 assert.equal(computed.exchange,'Gate');
+assert.equal(computed.liquidation.exchange,'Gate');
+assert.equal(computed.liquidation.source,'gateio_public_contract_stats_liquidation_aggregates');
+assert(computed.liquidation.long_usdt>0);
+assert(computed.liquidation.short_usdt>0);
 assert.equal(computed.volume_unit,'gate_futures_contracts');
 assert(computed.buy_pct>0&&computed.buy_pct<100);
 assert.equal(computed.buy_pct+computed.sell_pct,100);
