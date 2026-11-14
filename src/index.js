@@ -1932,9 +1932,15 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     const ratioOk=rAt!==null&&ratio?.symbol===symbol&&
       ratio?.source==='bybit_v5_account_ratio'&&long!==null&&short!==null&&
       Math.abs(long+short-100)<=2;
-    const takerOk=tAt!==null&&taker?.symbol===symbol&&
-      taker?.source==='binance_futures_taker_volume'&&buy!==null&&sell!==null&&
+    const takerBaseOk=tAt!==null&&taker?.symbol===symbol&&buy!==null&&sell!==null&&
       Math.abs(buy+sell-100)<=2;
+    const binanceTakerOk=takerBaseOk&&taker?.source==='binance_futures_taker_volume';
+    const gateTakerOk=takerBaseOk&&
+      taker?.source==='gateio_futures_contract_stats_taker_size'&&
+      taker?.data?.exchange==='Gate'&&
+      taker?.data?.scope==='gateio_futures_contract_stats_closed_5m'&&
+      taker?.data?.volume_unit==='gate_futures_contracts';
+    const takerOk=binanceTakerOk||gateTakerOk;
     const sourceTimes=[tickerOk?qAt:null,ratioOk?rAt:null,takerOk?tAt:null]
       .filter(x=>x!==null);
     if(sourceTimes.length){
@@ -1944,11 +1950,17 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           change_24h_pct:tickerOk?change:null,
           bybit_accounts_long_pct:ratioOk?long:null,
           bybit_accounts_short_pct:ratioOk?short:null,
-          binance_taker_buy_pct:takerOk?buy:null,
-          binance_taker_sell_pct:takerOk?sell:null,
+          binance_taker_buy_pct:binanceTakerOk?buy:null,
+          binance_taker_sell_pct:binanceTakerOk?sell:null,
+          gate_taker_buy_pct:gateTakerOk?buy:null,
+          gate_taker_sell_pct:gateTakerOk?sell:null,
+          taker_exchange:binanceTakerOk?'Binance':gateTakerOk?'Gate':null,
+          taker_source_window_minutes:takerOk?
+            termValidNumber(taker?.data?.period_minutes,5,60):null,
           source_status:{bybit_ticker:tickerOk?'available':'unavailable',
             bybit_account_ratio:ratioOk?'available':'unavailable',
-            binance_taker:takerOk?'available':'unavailable'},
+            binance_taker:binanceTakerOk?'available':'unavailable',
+            gate_taker:gateTakerOk?'available':'unavailable'},
           fng_value:(usableTime(pulse.feeds?.sentiment?.sampled_unix,86400)!==null&&
             pulse.feeds?.sentiment?.source==='alternative_me_fng')
             ?termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100):null,
