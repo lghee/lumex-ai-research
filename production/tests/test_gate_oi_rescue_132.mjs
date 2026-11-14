@@ -17,7 +17,7 @@ const fixture=(days,missing=false)=>{
 };
 for(const days of [7,30]){
  const h=oiGateHistory(fixture(days),'ETH',days,ms);
- assert.equal(h.exchange,'Gate');assert.equal(h.history.length,199);
+ assert.equal(h.exchange,'Gate');assert.equal(h.history.length,200);
  assert.equal(h.sources.length,1);assert(h.sources[0].startsWith('Gate '));
  assert.equal(h.history.at(-1).price>0,true);
  assert.equal(h.history.at(-1).oi_usd>0,true);
@@ -67,7 +67,7 @@ assert.equal(record.sources.length,1);
 assert.equal(record.merged_with_gate,false,'even when source is Gate it is not blended');
 assert.equal(record.source_scope,'single_exchange_public_oi_only');
 assert.equal(record.fallback_used,true);
-assert.equal(record.history.length,199);
+assert.equal(record.history.length,200);
 const url='https://worker/market-hub/v1/oi-history?symbol='+record.pair+'&days='+record.days;
 assert.equal((await worker.fetch(new Request(url),env)).status,401);
 const authorized=await (await worker.fetch(new Request(url,{headers:{Authorization:'Bearer '+st}}),env)).json();
