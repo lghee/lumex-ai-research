@@ -21,7 +21,7 @@ jobs:
           for path in paths:
               code="UNREACHABLE";ok="unknown";version="unknown";err=""
               try:
-                  req=urllib.request.Request(base+path,headers={"Accept":"application/json","Cache-Control":"no-cache"},method="GET")
+                  req=urllib.request.Request(base+path,headers={"Accept":"application/json","Cache-Control":"no-cache","User-Agent":"LUMEX-Cloudflare-Market/0.6.01"},method="GET")
                   with urllib.request.urlopen(req,timeout=12) as r:
                       code=str(r.status);data=json.loads(r.read(220000))
                   if isinstance(data,dict):
