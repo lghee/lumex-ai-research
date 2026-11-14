@@ -28,7 +28,14 @@ jobs:
                       ok=str(data.get("ok","missing"))
                       version=str(data.get("version","missing"))[:40]
                       if path in ["/health","/market-hub/v1/health"] and data.get("ok") is True and data.get("version")=="1.3.1":matches+=1
-              except urllib.error.HTTPError as e: code=str(e.code);err="HTTP_ERROR"
+              except urllib.error.HTTPError as e:
+                  code=str(e.code)
+                  server=str(e.headers.get("Server","missing"))[:60]
+                  ray=str(e.headers.get("cf-ray","missing"))[:60]
+                  typ=str(e.headers.get("content-type","missing"))[:60]
+                  body=e.read(500).decode("utf-8","replace").replace("\\n"," ").replace("\\r"," ")
+                  body="".join(c for c in body if ord(c)>=32)[:180]
+                  err="HTTP_ERROR server="+server+" ray="+ray+" mime="+typ+" body="+body
               except Exception as e: err=type(e).__name__
               print("PUBLIC_PROBE",path,"http",code,"ok",ok,"version",version,"error",err,flush=True)
               rows.append("| `"+path+"` | "+code+" | "+ok+" | "+version+" |")
