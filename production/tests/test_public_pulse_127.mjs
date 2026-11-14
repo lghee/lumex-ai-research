@@ -75,6 +75,6 @@ assert.equal(storage.get('market-hub/public-pulse/v1/latest.json'),before,'outag
 const status=(await (await worker.fetch(new Request('https://worker/market-hub/v1/public-pulse-health'),env)).json());
 assert.equal(status.report.updated,0);
 const version=await worker.fetch(new Request('https://worker/market-hub/v1/health'),env);
-assert.equal((await version.json()).version,'1.2.11');
+assert.equal((await version.json()).version,'1.2.12');
 globalThis.fetch=original;
-console.log('PASS 1.2.11 pulse: 10 bounded public feeds, strict provenance, independent R2 archive, Bearer gate, no hidden fallback');
+console.log('PASS 1.2.12 pulse: 10 bounded public feeds, strict provenance, independent R2 archive, Bearer gate, no hidden fallback');
