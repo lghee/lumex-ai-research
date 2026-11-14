@@ -11,7 +11,7 @@ const r2={
 };
 const token='x'.repeat(64);
 const env={MARKET_DATA:r2,LUMEX_AI_LAB_WORKER_TOKEN:token,
- AUTO_PUBLIC_PULSE_FETCH:'true',AUTO_LEGACY_BACKFILL:'false',AUTO_RESEARCH:'false',
+ AUTO_PUBLIC_PULSE_FETCH:'true',AUTO_BINANCE_TAKER_FETCH:'true',AUTO_LEGACY_BACKFILL:'false',AUTO_RESEARCH:'false',
  AUTO_FETCH:'false',AUTO_AI:'false',AUTO_DERIVATIVES_FETCH:'false',
  AUTO_WHALE_FETCH:'false',AUTO_LIVE_STREAM:'false'};
 const now=Math.floor(Date.now()/1000);

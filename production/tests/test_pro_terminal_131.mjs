@@ -81,6 +81,19 @@ assert.equal(withoutBinance.sections.pulse.values.bybit_accounts_long_pct,54);
 assert.equal(withoutBinance.sections.pulse.values.binance_taker_buy_pct,null);
 assert.equal(withoutBinance.sections.pulse.values.source_status.binance_taker,'unavailable');
 pulseSnapshot.feeds.takers.BTC=takerSnapshot;
+const gateTaker={...takerSnapshot,source:'gateio_futures_contract_stats_taker_size',
+  data:{status:'ok',buy_pct:57.4,sell_pct:42.6,exchange:'Gate',
+    scope:'gateio_futures_contract_stats_closed_5m',volume_unit:'gate_futures_contracts',
+    period_minutes:15,bars:3,sample_unix:Math.floor(now/1000)-200}};
+pulseSnapshot.feeds.takers.BTC=gateTaker;
+const sourced=await marketTerminalSummary(env,symbol,now);
+assert.equal(sourced.sections.pulse.values.gate_taker_buy_pct,57.4);
+assert.equal(sourced.sections.pulse.values.binance_taker_buy_pct,null,
+  'Never label Gate figures as Binance');
+assert.equal(sourced.sections.pulse.values.taker_exchange,'Gate');
+assert.equal(sourced.sections.pulse.values.source_status.binance_taker,'unavailable');
+assert.equal(sourced.sections.pulse.values.source_status.gate_taker,'available');
+pulseSnapshot.feeds.takers.BTC=takerSnapshot;
 assert.equal(body.sections.pulse.values.binance_taker_buy_pct,62);
 assert.equal(body.sections.oi.values.exchange,'Bybit');
 assert.equal(body.sections.gate.values.funding_rate_pct,0.01);

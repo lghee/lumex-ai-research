@@ -75,6 +75,62 @@ function pulseTaker(src,coin,now){
   return {status:'ok',buy_pct:pct,sell_pct:Number((100-pct).toFixed(2)),
     sample_unix:bars.at(-1)[0]+300,period_minutes:5,bars:bars.length,collected_unix:now};
 }
+
+/** Explicit Gate futures taker-volume alternative for Binance 403.
+ * Gate's long_taker_size and short_taker_size are independent Gate contract
+ * statistics, NEVER Binance order flow. Prefer only closed 5-minute intervals.
+ */
+export function pulseGateTaker(rows,coin,now){
+  if(!Array.isArray(rows)||rows.length<1||rows.length>100)throw Error('gate_taker_schema');
+  const unique=new Map();
+  for(const r of rows){
+    const ts=pulseN(r?.time,1500000000,4102444800),
+      buy=pulseN(r?.long_taker_size,0,1e18),
+      sell=pulseN(r?.short_taker_size,0,1e18);
+    if(ts===null||buy===null||sell===null||!Number.isSafeInteger(ts)||
+       ts%300!==0||ts+300>now-5||ts+300<now-1800||buy+sell<=0)continue;
+    unique.set(ts,{buy,sell});
+  }
+  const bars=[...unique].sort((a,b)=>a[0]-b[0]).slice(-3);
+  if(!bars.length||now-(bars.at(-1)[0]+300)>900)throw Error('gate_taker_stale');
+  const buy=bars.reduce((n,b)=>n+b[1].buy,0),
+    sell=bars.reduce((n,b)=>n+b[1].sell,0);
+  if(!Number.isFinite(buy+sell)||buy+sell<=0)throw Error('gate_taker_invalid');
+  const buyPct=Number((100*buy/(buy+sell)).toFixed(2));
+  return {status:'ok',buy_pct:buyPct,sell_pct:Number((100-buyPct).toFixed(2)),
+    sample_unix:bars.at(-1)[0]+300,period_minutes:bars.length*5,
+    bars:bars.length,collected_unix:now,contract:coin+'_USDT',
+    scope:'gateio_futures_contract_stats_closed_5m',
+    volume_unit:'gate_futures_contracts',exchange:'Gate'};
+}
+async function pulseGateTakerFetch(coin,now){
+  const path='/api/v4/futures/usdt/contract_stats?contract='+coin+'_USDT&interval=5m&limit=6';
+  const errors=[];
+  for(const origin of ['https://api.gateio.ws','https://fx-api.gateio.ws']){
+    try{return pulseGateTaker(await pulseJson(origin+path,180000),coin,now)}
+    catch(e){errors.push(String(e?.message||e).replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,48))}
+  }
+  throw Error('gate_taker_unavailable_'+errors.join('_').slice(0,110));
+}
+async function pulseTakerByAllowedSource(coin,now,env){
+  let binance_error=null;
+  // Binance 403 from current Cloudflare region: OFF by default until lawful
+  // access is restored. An explicit setting can re-enable probing later.
+  if(env.AUTO_BINANCE_TAKER_FETCH==='true'){
+    try{
+      const raw=await pulseJson('https://fapi.binance.com/futures/data/takerlongshortRatio?symbol='+
+        coin+'USDT&period=5m&limit=9',10000);
+      return {data:pulseTaker(raw,coin,now),source:'binance_futures_taker_volume',
+        fallback_reason:null};
+    }catch(e){
+      binance_error=String(e?.message||e).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);
+    }
+  }
+  const gate=await pulseGateTakerFetch(coin,now);
+  return {data:gate,source:'gateio_futures_contract_stats_taker_size',
+    fallback_reason:binance_error||'binance_disabled_due_to_http_403'};
+}
+
 function pulseSentiment(src,now){
   const x=src?.data?.[0],v=pulseN(x?.value,0,100),ts=pulseN(x?.timestamp,1500000000,4102444800);
   if(!x||v===null||ts===null||!Number.isInteger(v)||!Number.isInteger(ts)||
@@ -97,29 +153,31 @@ async function collectPublicPulse(env){
     ...PUBLIC_PULSE_COINS.map(c=>['ratio_'+c,'bybit_v5_account_ratio',
       'https://api.bybit.com/v5/market/account-ratio?category=linear&symbol='+c+'USDT&period=5min&limit=2',
       x=>pulseRatio(x,c,now),70000]),
-    ...PUBLIC_PULSE_COINS.map(c=>['taker_'+c,'binance_futures_taker_volume',
-      'https://fapi.binance.com/futures/data/takerlongshortRatio?symbol='+c+'USDT&period=5m&limit=9',
-      x=>pulseTaker(x,c,now),10000]),
+    ...PUBLIC_PULSE_COINS.map(c=>['taker_'+c,'source_separated_taker_volume',
+      null,()=>pulseTakerByAllowedSource(c,now,env),0]),
     ['sentiment','alternative_me_fng','https://api.alternative.me/fng/?limit=1',
       x=>pulseSentiment(x,now),50000]
   ];
-  const results=await Promise.allSettled(jobs.map(async j=>j[3](await pulseJson(j[2],j[4]))));
+  const results=await Promise.allSettled(jobs.map(async j=>j[0].startsWith('taker_')?j[3]():j[3](await pulseJson(j[2],j[4]))));
   for(let i=0;i<jobs.length;i++){
     const [key,source]=jobs[i],r=results[i];
     if(r.status==='rejected'){
       const error=String(r.reason?.message||'provider_error').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);
       reports[key]={ok:false,error};continue;
     }
-    const data=r.value,sampled_unix=key==='sentiment'||key.startsWith('ratio_')||key.startsWith('taker_')
+    const resolvedSource=key.startsWith('taker_')?r.value.source:source;
+    const data=key.startsWith('taker_')?r.value.data:r.value;
+    const sampled_unix=key==='sentiment'||key.startsWith('ratio_')||key.startsWith('taker_')
       ?data.sample_unix:now;
-    const record={source,sampled_unix,data};
+    const record={source:resolvedSource,sampled_unix,data};
     if(key.startsWith('ratio_')||key.startsWith('taker_'))
       record.symbol=key.slice(key.indexOf('_')+1)+'USDT';
     if(key==='ratio_BTC')feeds.ratio=record;
     if(key==='tickers'||key==='sentiment')feeds[key]=record;
     else if(key.startsWith('ratio_'))(feeds.ratios??={})[key.slice(6)]=record;
     else if(key.startsWith('taker_'))(feeds.takers??={})[key.slice(6)]=record;
-    updated++;reports[key]={ok:true,sampled_unix};
+    updated++;reports[key]={ok:true,sampled_unix,source:resolvedSource,
+      ...(key.startsWith('taker_')?{fallback_reason:r.value.fallback_reason}: {})};
   }
   const summary={ok:updated>0,enabled:true,checked_unix:now,updated,total:jobs.length,
     sources:reports,scope:'source-attributed public market observations',order_execution:false};
@@ -1874,9 +1932,15 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     const ratioOk=rAt!==null&&ratio?.symbol===symbol&&
       ratio?.source==='bybit_v5_account_ratio'&&long!==null&&short!==null&&
       Math.abs(long+short-100)<=2;
-    const takerOk=tAt!==null&&taker?.symbol===symbol&&
-      taker?.source==='binance_futures_taker_volume'&&buy!==null&&sell!==null&&
+    const takerBaseOk=tAt!==null&&taker?.symbol===symbol&&buy!==null&&sell!==null&&
       Math.abs(buy+sell-100)<=2;
+    const binanceTakerOk=takerBaseOk&&taker?.source==='binance_futures_taker_volume';
+    const gateTakerOk=takerBaseOk&&
+      taker?.source==='gateio_futures_contract_stats_taker_size'&&
+      taker?.data?.exchange==='Gate'&&
+      taker?.data?.scope==='gateio_futures_contract_stats_closed_5m'&&
+      taker?.data?.volume_unit==='gate_futures_contracts';
+    const takerOk=binanceTakerOk||gateTakerOk;
     const sourceTimes=[tickerOk?qAt:null,ratioOk?rAt:null,takerOk?tAt:null]
       .filter(x=>x!==null);
     if(sourceTimes.length){
@@ -1886,11 +1950,17 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           change_24h_pct:tickerOk?change:null,
           bybit_accounts_long_pct:ratioOk?long:null,
           bybit_accounts_short_pct:ratioOk?short:null,
-          binance_taker_buy_pct:takerOk?buy:null,
-          binance_taker_sell_pct:takerOk?sell:null,
+          binance_taker_buy_pct:binanceTakerOk?buy:null,
+          binance_taker_sell_pct:binanceTakerOk?sell:null,
+          gate_taker_buy_pct:gateTakerOk?buy:null,
+          gate_taker_sell_pct:gateTakerOk?sell:null,
+          taker_exchange:binanceTakerOk?'Binance':gateTakerOk?'Gate':null,
+          taker_source_window_minutes:takerOk?
+            termValidNumber(taker?.data?.period_minutes,5,60):null,
           source_status:{bybit_ticker:tickerOk?'available':'unavailable',
             bybit_account_ratio:ratioOk?'available':'unavailable',
-            binance_taker:takerOk?'available':'unavailable'},
+            binance_taker:binanceTakerOk?'available':'unavailable',
+            gate_taker:gateTakerOk?'available':'unavailable'},
           fng_value:(usableTime(pulse.feeds?.sentiment?.sampled_unix,86400)!==null&&
             pulse.feeds?.sentiment?.source==='alternative_me_fng')
             ?termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100):null,
