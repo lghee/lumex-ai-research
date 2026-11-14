@@ -78,7 +78,15 @@ assert.equal(health.sources.taker_BTC.fallback_reason,'binance_disabled_due_to_h
 const before=storage.get('market-hub/public-pulse/v1/latest.json');
 gateOutage=true;
 await scheduled();
-assert.equal(storage.get('market-hub/public-pulse/v1/latest.json'),before,'same-second healthy provider response can be byte-identical');
+const resampled=JSON.parse(storage.get('market-hub/public-pulse/v1/latest.json'));
+assert.equal(resampled.feeds.tickers.data.quotes.BTCUSDT.last,50000,
+  'Bybit valid quote persists after independent Gate outage');
+assert.equal(resampled.feeds.ratios.BTC.data.long_pct,53,
+  'Bybit valid account ratio persists after independent Gate outage');
+assert.equal(resampled.feeds.takers.BTC.source,'gateio_futures_contract_stats_taker_size',
+  'the last validated Gate source remains source-labelled');
+assert(resampled.collected_at_unix>=JSON.parse(before).collected_at_unix,
+  'snapshot time can advance over a one-second boundary');
 const health2=JSON.parse(storage.get('market-hub/public-pulse/v1/health.json'));
 assert.equal(health2.updated,6,'only non-Gate providers succeeded after Gate outage');
 assert.equal(health2.sources.taker_BTC.ok,false);
