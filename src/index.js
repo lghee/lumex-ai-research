@@ -1821,7 +1821,7 @@ export async function marketOpsReadiness(env,now=Date.now()){
       .then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null);
   const candlesJob=Promise.all(OPS_COINS.map(async coin=>{
     try{
-      const payload=await hubGetCandles(env,coin+'USDT','15',50);
+      const payload=await hubGetCandles(env,coin+'USDT',15,50);
       return {coin,ok:payload?.data_quality==='verified'&&payload?.stale===false};
     }catch{return {coin,ok:false};}
   }));
@@ -1837,7 +1837,8 @@ export async function marketOpsReadiness(env,now=Date.now()){
     opsReadR2(env,'market-hub/public-pulse/v1/latest.json'),
     opsReadR2(env,'market-hub/derivatives/v1/status.json'),
     liveJob,whalesJob,oiJob,candlesJob,continuityR2Proof(env,now)]);
-  const pulseAt=Number(pulse?.collected_at_unix),derAt=Number(derivative?.collected_ms);
+  const pulseAt=pulse?.collected_at_unix===undefined?null:Number(pulse.collected_at_unix),
+    derAt=derivative?.collected_ms===undefined?null:Number(derivative.collected_ms);
   const enabled={
     candles:true,
     pulse:env.AUTO_PUBLIC_PULSE_FETCH==='true',
@@ -1901,7 +1902,7 @@ export async function marketOpsReadiness(env,now=Date.now()){
     safe_to_disable_wordpress_crons:false,
     manual_rollout_required:true};
 }
-async function marketOpsDaily(env,now=Date.now()){
+export async function marketOpsDaily(env,now=Date.now()){
   if(env.AUTO_MARKET_QA_DAILY!=='true'||!env.MARKET_DATA)
     return {ok:false,disabled:true};
   const date=new Date(now).toISOString().slice(0,10);
@@ -1926,7 +1927,7 @@ async function marketOpsDaily(env,now=Date.now()){
     {httpMetadata:{contentType:'application/json'}});
   return {ok:true,saved:true,date};
 }
-async function marketOpsHistory(env,now=Date.now()){
+export async function marketOpsHistory(env,now=Date.now()){
   const dates=Array.from({length:7},(_,i)=>{
     const d=new Date(now-(6-i)*86400000);
     return d.toISOString().slice(0,10);
@@ -2586,7 +2587,7 @@ export default{
   async scheduled(controller,env,ctx){
     // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
     if(controller.cron==='*/5 * * * *'&&env.AUTO_MARKET_QA_DAILY==='true'){
-      const utc=new Date();if(utc.getUTCHours()===0&&utc.getUTCMinutes()===15)
+      const utc=new Date(controller.scheduledTime||Date.now());if(utc.getUTCHours()===0&&utc.getUTCMinutes()===15)
         ctx.waitUntil(marketOpsDaily(env).catch(()=>console.error('market_ops_daily_failed')));
     }
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
