@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.12 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.3.0 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -7,7 +7,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 
 
-/** Market Hub 1.2.12: independent, public-only Bybit/Binance/FNG collector.
+/** Market Hub 1.3.0: independent, public-only Bybit/Binance/FNG collector.
  * R2 is authoritative in CF mode. Historical MySQL and live liquidation ledgers
  * are not read or combined here; no user/order/credentials are accessed.
  */
@@ -143,7 +143,7 @@ async function collectPublicPulse(env){
 }
 
 
-/** 1.2.12: source-matched Bybit/Binance public OI and price history.
+/** 1.3.0: source-matched Bybit/Binance public OI and price history.
  * Never substitute Gate OI for Bybit/Binance, never merge two exchanges.
  */
 const OI_PREFIX='market-hub/oi/v1/';
@@ -1707,7 +1707,7 @@ export class MarketLiveCollector extends DurableObject{
 // separate offline import and are not silently counted.
 
 /**
- * Cloudflare Market Hub v1.2.12: read-only bounded 6-hour continuity evidence.
+ * Cloudflare Market Hub v1.3.0: read-only bounded 6-hour continuity evidence.
  * Source observations are sparse and never represent 100% exchange coverage.
  * R2 proofs read actual JSONL objects, rather than inferring successful writes
  * from list metadata, WordPress counters or the 14-day hot index.
@@ -1792,6 +1792,158 @@ function continuityFeedSummary(name,feed,enabled){
     age_seconds:Number.isSafeInteger(age)&&age>=0?age:null,
     packets:Number.isSafeInteger(packets)&&packets>=0?packets:0,
     note:'No packets can be normal for sparse liquidation sources'};
+}
+
+
+/** LUMEX Market Hub 1.3.0: one bounded operational readiness assessment.
+ * Completeness is never inferred from silent market periods. No side effects.
+ */
+const OPS_PREFIX='market-hub/ops/v1/';
+const OPS_COINS=['BTC','ETH','SOL','XRP'];
+function opsVerdict(id,enabled,healthy,ageSeconds=null,detail=''){
+  return {id,enabled:enabled===true,healthy:healthy===true,
+    age_seconds:Number.isSafeInteger(ageSeconds)&&ageSeconds>=0?ageSeconds:null,
+    reason:String(detail).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,70)};
+}
+async function opsReadR2(env,key){
+  if(!env.MARKET_DATA)return null;
+  try{const object=await env.MARKET_DATA.get(key);
+      if(!object)return null;
+      return await object.json();}catch{return null}
+}
+export async function marketOpsReadiness(env,now=Date.now()){
+  const seconds=Math.floor(now/1000);
+  const liveJob=env.MARKET_LIVE_COLLECTOR?
+    env.MARKET_LIVE_COLLECTOR.getByName('public-linear').fetch('https://collector/status')
+      .then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null);
+  const whalesJob=env.BTC_RESERVE_COLLECTOR?
+    env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/status')
+      .then(r=>r.ok?r.json():null).catch(()=>null):Promise.resolve(null);
+  const candlesJob=Promise.all(OPS_COINS.map(async coin=>{
+    try{
+      const payload=await hubGetCandles(env,coin+'USDT','15',50);
+      return {coin,ok:payload?.data_quality==='verified'&&payload?.stale===false};
+    }catch{return {coin,ok:false};}
+  }));
+  const oiJob=Promise.all(OPS_COINS.flatMap(coin=>[7,30].map(async days=>{
+    const x=await opsReadR2(env,'market-hub/oi/v1/latest/'+coin+'-'+days+'.json');
+    const at=Number(x?.sample_unix);
+    return {coin,days,ok:x?.schema==='lumex_oi_mirror_v1'&&
+      x?.pair===coin+'USDT'&&x?.days===days&&
+      ['Bybit','Binance'].includes(x?.exchange)&&Array.isArray(x?.history)&&
+      x.history.length>=40&&Number.isSafeInteger(at)&&at<=seconds+120&&seconds-at<7200};
+  })));
+  const [pulse,derivative,live,whale,oi,candles,continuity]=await Promise.all([
+    opsReadR2(env,'market-hub/public-pulse/v1/latest.json'),
+    opsReadR2(env,'market-hub/derivatives/v1/status.json'),
+    liveJob,whalesJob,oiJob,candlesJob,continuityR2Proof(env,now)]);
+  const pulseAt=Number(pulse?.collected_at_unix),derAt=Number(derivative?.collected_ms);
+  const enabled={
+    candles:true,
+    pulse:env.AUTO_PUBLIC_PULSE_FETCH==='true',
+    oi:env.AUTO_OI_MIRROR_FETCH==='true',
+    derivatives:env.AUTO_DERIVATIVES_FETCH==='true',
+    live:env.AUTO_LIVE_STREAM==='true',
+    binance:env.AUTO_LIVE_STREAM==='true'&&env.AUTO_BINANCE_LIQUIDATIONS==='true',
+    whales:env.AUTO_WHALE_FETCH==='true',
+    archives:!!env.MARKET_DATA
+  };
+  const pulseReady=pulse?.schema==='lumex_public_pulse_v1'&&
+    Number.isSafeInteger(pulseAt)&&pulseAt<=seconds+120&&seconds-pulseAt<1200&&
+    OPS_COINS.every(c=>pulse?.feeds?.tickers?.data?.quotes?.[c+'USDT']&&
+      pulse?.feeds?.ratios?.[c]&&pulse?.feeds?.takers?.[c])&&
+      pulse?.feeds?.sentiment;
+  const derivReady=Number.isSafeInteger(derAt)&&derAt<=now+120000&&
+    now-derAt<1200000&&Array.isArray(derivative?.items)&&
+    OPS_COINS.every(c=>derivative.items.some(x=>x.symbol===c+'USDT'&&x.ok===true));
+  const whaleAt=Number(whale?.last_success_ms),whaleReady=whale?.enabled===true&&
+    whale?.source==='wordpress_configured'&&Number.isSafeInteger(whaleAt)&&
+    whaleAt<=now+120000&&now-whaleAt<7200000&&
+    Array.isArray(whale.watchlist)&&!whale.watchlist.some(x=>x.gap_possible===true);
+  const check=[
+    opsVerdict('r2_verified_candles_4',true,candles.every(x=>x.ok),null,
+      candles.every(x=>x.ok)?'verified_four_assets':'missing_or_stale_candle'),
+    opsVerdict('public_pulse_10_sources',enabled.pulse,Boolean(pulseReady),
+      Number.isSafeInteger(pulseAt)&&pulseAt>0?Math.max(0,seconds-pulseAt):null,
+      pulseReady?'source_attributed':'pulse_missing_or_stale'),
+    opsVerdict('source_matched_oi_8',enabled.oi,oi.every(x=>x.ok),null,
+      oi.every(x=>x.ok)?'eight_slots_verified':'oi_history_missing_or_stale'),
+    opsVerdict('gate_derivatives_4',enabled.derivatives,Boolean(derivReady),
+      Number.isSafeInteger(derAt)&&derAt>0?Math.max(0,Math.floor((now-derAt)/1000)):null,
+      derivReady?'observed_gate_funding_oi':'derivatives_missing_or_stale'),
+    opsVerdict('live_bybit_gate',enabled.live,
+      live?.enabled===true&&live?.feeds?.bybit?.connected===true&&
+        live?.feeds?.gate?.connected===true,null,
+      live?.enabled===true?'connection_state_checked':'stream_disabled'),
+    opsVerdict('binance_liquidation_snapshots',enabled.binance,
+      enabled.binance&&live?.feeds?.binance?.connected===true,null,
+      'sampled_1s_not_complete_capture'),
+    opsVerdict('btc_confirmed_watchlist',enabled.whales,Boolean(whaleReady),
+      Number.isSafeInteger(whaleAt)&&whaleAt>0?Math.max(0,Math.floor((now-whaleAt)/1000)):null,
+      whaleReady?'wordpress_addresses_confirmed':'watchlist_stale_gap_or_disabled'),
+    opsVerdict('r2_public_event_readback',enabled.archives,
+      continuity.ok===true&&continuity.list_errors===0&&
+      continuity.kinds?.liquidation?.sample_verified===true,null,
+      continuity.kinds?.liquidation?.sample_verified===true?
+        'bounded_liquidation_jsonl_verified':'no_recent_r2_readback_proof')
+  ];
+  const enabledChecks=check.filter(x=>x.enabled);
+  const good=enabledChecks.filter(x=>x.healthy).length;
+  return {ok:true,schema:'lumex_market_ops_readiness_v1',worker_version:'1.3.0',
+    checked_unix:seconds,scope:'public_market_only',trading_enabled:false,
+    checks:check,passed:good,enabled_checks:enabledChecks.length,
+    missing_or_unready:check.filter(x=>!x.enabled||!x.healthy).map(x=>x.id),
+    r2_summary:{list_checks:continuity.list_checks,list_errors:continuity.list_errors,
+      liquidation_sample_verified:continuity.kinds?.liquidation?.sample_verified===true,
+      whale_sample_verified:continuity.kinds?.whale_transfer?.sample_verified===true},
+    release_ready:check.every(x=>x.enabled&&x.healthy),
+    complete_market_capture:false,archive_merged:false,
+    safe_to_disable_wordpress_crons:false,
+    manual_rollout_required:true};
+}
+async function marketOpsDaily(env,now=Date.now()){
+  if(env.AUTO_MARKET_QA_DAILY!=='true'||!env.MARKET_DATA)
+    return {ok:false,disabled:true};
+  const date=new Date(now).toISOString().slice(0,10);
+  const key=OPS_PREFIX+'daily/'+date.replaceAll('-','')+'.json';
+  const existing=await env.MARKET_DATA.head(key);
+  if(existing)return {ok:true,already_saved:true,date};
+  const readiness=await marketOpsReadiness(env,now);
+  const doc={schema:'lumex_ops_daily_v1',date,observed_at_unix:readiness.checked_unix,
+    passed:readiness.passed,enabled_checks:readiness.enabled_checks,
+    ready:readiness.release_ready,
+    check_status:readiness.checks.map(x=>({id:x.id,enabled:x.enabled,healthy:x.healthy})),
+    r2_list_errors:readiness.r2_summary.list_errors,
+    liquidation_r2_sample_verified:readiness.r2_summary.liquidation_sample_verified,
+    complete_market_capture:false,archive_merged:false,
+    safe_to_disable_wordpress_crons:false};
+  const serialized=JSON.stringify(doc);
+  if(serialized.length>20000)throw Error('ops_daily_record_oversize');
+  await env.MARKET_DATA.put(key,serialized,{httpMetadata:{contentType:'application/json'}});
+  const proof=await env.MARKET_DATA.get(key);
+  if(!proof||await proof.text()!==serialized)throw Error('ops_daily_r2_readback_failed');
+  await env.MARKET_DATA.put(OPS_PREFIX+'latest.json',serialized,
+    {httpMetadata:{contentType:'application/json'}});
+  return {ok:true,saved:true,date};
+}
+async function marketOpsHistory(env,now=Date.now()){
+  const dates=Array.from({length:7},(_,i)=>{
+    const d=new Date(now-(6-i)*86400000);
+    return d.toISOString().slice(0,10);
+  });
+  const results=await Promise.all(dates.map(async date=>{
+    const x=await opsReadR2(env,OPS_PREFIX+'daily/'+date.replaceAll('-','')+'.json');
+    if(x?.schema!=='lumex_ops_daily_v1'||x?.date!==date||
+       !Number.isSafeInteger(x.passed)||!Number.isSafeInteger(x.enabled_checks)||
+       typeof x.ready!=='boolean'||typeof x.liquidation_r2_sample_verified!=='boolean')
+      return {date,status:'missing'};
+    return {date,status:'recorded',passed:x.passed,enabled_checks:x.enabled_checks,
+      ready:x.ready,r2_liquidation_verified:x.liquidation_r2_sample_verified,
+      r2_list_errors:Number.isSafeInteger(x.r2_list_errors)?x.r2_list_errors:null};
+  }));
+  return {ok:true,schema:'lumex_market_ops_history_v1',days:7,items:results,
+    incomplete_days:results.filter(x=>x.status==='missing').length,
+    safe_to_disable_wordpress_crons:false};
 }
 
 const HUB_HOUR_MS=3600000;
@@ -2147,7 +2299,17 @@ async function hubRoute(request,env){
     try{return await env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/watchlist-parity')}
     catch{return hubReply({ok:false,error:'whale_watchlist_unavailable'},503)}
   }
-    if(path==='/market-hub/v1/continuity-audit'&&method==='GET'){
+    if(path==='/market-hub/v1/release-readiness'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await marketOpsReadiness(env));}
+    catch{return hubReply({ok:false,error:'release_readiness_unavailable'},503);}
+  }
+  if(path==='/market-hub/v1/quality-history'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await marketOpsHistory(env));}
+    catch{return hubReply({ok:false,error:'quality_history_unavailable'},503);}
+  }
+  if(path==='/market-hub/v1/continuity-audit'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     const now=Date.now(),symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
@@ -2265,7 +2427,7 @@ async function hubRoute(request,env){
       items});
   }
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.12',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit','binance_usdm_forceOrder_sampled','btc_watchlist_set_parity','bounded_r2_readback_continuity_audit'],
+    version:'1.3.0',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit','binance_usdm_forceOrder_sampled','btc_watchlist_set_parity','bounded_r2_readback_continuity_audit','market_ops_release_readiness','r2_daily_quality_history'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/legacy-backfill-health'&&method==='GET'){
@@ -2403,10 +2565,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.12',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.3.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.12',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.3.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -2422,6 +2584,11 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_MARKET_QA_DAILY==='true'){
+      const utc=new Date();if(utc.getUTCHours()===0&&utc.getUTCMinutes()===15)
+        ctx.waitUntil(marketOpsDaily(env).catch(()=>console.error('market_ops_daily_failed')));
+    }
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
