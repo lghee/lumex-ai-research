@@ -104,5 +104,5 @@ assert.equal(unbound.r2.kinds.liquidation.reason,'r2_binding_missing');
 assert.equal(unbound.r2.kinds.whale_transfer.sample_verified,false);
 assert.equal(unbound.safe_to_disable_wordpress_crons,false);
 const health=await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json();
-assert.equal(health.version,'1.3.0');
-console.log('PASS 1.3.0 continuity: 4 DO hot-index windows, 12 bounded R2 probes, 2 real JSONL readbacks, source health, fail-closed/isolated, no Cron changes');
+assert.equal(health.version,'1.3.1');
+console.log('PASS 1.3.1 continuity: 4 DO hot-index windows, 12 bounded R2 probes, 2 real JSONL readbacks, source health, fail-closed/isolated, no Cron changes');
