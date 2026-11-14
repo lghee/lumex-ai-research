@@ -107,6 +107,41 @@ assert.equal(body.sections.observations.values.binance_liquidation_snapshots_24h
 const disabled=await marketTerminalSummary({...env,AUTO_BINANCE_LIQUIDATIONS:'false'},symbol,now);
 assert.equal(disabled.sections.observations.values.binance_liquidation_snapshots_24h,null,
   'disabled Binance must never be shown as 0 snapshots');
+// Regression: optional Binance/whale captures may be absent from a valid
+// hourly rollup, but must never blank the independently observed Bybit events.
+async function partialObservations(captures,binanceEnabled='false',upToDate=true){
+ const partialEnv={...env,AUTO_BINANCE_LIQUIDATIONS:binanceEnabled,
+   MARKET_EVENT_HUB:{getByName(name){assert.equal(name,symbol);return {
+     async fetch(){return new Response(JSON.stringify({
+       ok:true,symbol,window:'24h',scope:'observed_public_events_only',
+       market_total_estimate:false,
+       rollup:{up_to_date:upToDate,pending_hot_events:0},
+       captures,generated_at:new Date(now).toISOString(),last_observed_ms:now-20000
+     }));}
+   }}}};
+ return await marketTerminalSummary(partialEnv,symbol,now);
+}
+const bybitOnly=await partialObservations({liquidations:{events:3}});
+assert.equal(bybitOnly.sections.observations.status,'fresh');
+assert.equal(bybitOnly.sections.observations.values.bybit_liquidation_events_24h,3);
+assert.equal(bybitOnly.sections.observations.values.binance_liquidation_snapshots_24h,null);
+assert.equal(bybitOnly.sections.observations.values.btc_watchlist_address_flows_24h,null);
+const binanceOnly=await partialObservations({binance_liquidation_snapshots:{events:5}},'true');
+assert.equal(binanceOnly.sections.observations.status,'fresh');
+assert.equal(binanceOnly.sections.observations.values.bybit_liquidation_events_24h,null);
+assert.equal(binanceOnly.sections.observations.values.binance_liquidation_snapshots_24h,5);
+const disabledBinanceOnly=await partialObservations({binance_liquidation_snapshots:{events:5}});
+assert.equal(disabledBinanceOnly.sections.observations.status,'unavailable',
+  'disabled Binance alone must not create a misleading observed section');
+const whaleOnly=await partialObservations({btc_address_net:{events:4}});
+assert.equal(whaleOnly.sections.observations.status,'unavailable',
+  'whale-only capture must not fabricate a liquidation observation');
+const noCaptures=await partialObservations({});
+assert.equal(noCaptures.sections.observations.status,'unavailable');
+const unrolled=await partialObservations({liquidations:{events:3}},'false',false);
+assert.equal(unrolled.sections.observations.status,'unavailable',
+  'pending rollup must never show verified observed counts');
+
 assert.equal(body.orders_enabled,false);assert.equal(body.market_total_estimate,false);
 assert(!JSON.stringify(body).includes('positions'));
 const exp=Math.floor(Date.now()/1000)+70;
