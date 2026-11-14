@@ -1,0 +1,39 @@
+name: LUMEX production Worker public health check (read only)
+on:
+  push:
+    branches: [audit/lumex-runtime-health-20261115]
+permissions:
+  contents: read
+jobs:
+  public-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Probe deployed Worker; no secrets, no writes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, json, os
+          base="https://lumex-ai-research2.kpiplus195.workers.dev"
+          paths=["/health","/market-hub/v1/health","/market-hub/v1/public-pulse-health","/market-hub/v1/derivatives-health","/market-hub/v1/oi-health","/market-hub/v1/live-health","/market-hub/v1/whale-health"]
+          rows=["| Endpoint | HTTP | ok | version |","|---|---|---|---|"]
+          matches=0
+          for path in paths:
+              code="UNREACHABLE";ok="unknown";version="unknown";err=""
+              try:
+                  req=urllib.request.Request(base+path,headers={"Accept":"application/json","Cache-Control":"no-cache"},method="GET")
+                  with urllib.request.urlopen(req,timeout=12) as r:
+                      code=str(r.status);data=json.loads(r.read(220000))
+                  if isinstance(data,dict):
+                      ok=str(data.get("ok","missing"))
+                      version=str(data.get("version","missing"))[:40]
+                      if path in ["/health","/market-hub/v1/health"] and data.get("ok") is True and data.get("version")=="1.3.1":matches+=1
+              except urllib.error.HTTPError as e: code=str(e.code);err="HTTP_ERROR"
+              except Exception as e: err=type(e).__name__
+              print("PUBLIC_PROBE",path,"http",code,"ok",ok,"version",version,"error",err,flush=True)
+              rows.append("| `"+path+"` | "+code+" | "+ok+" | "+version+" |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as out:
+              out.write("### LUMEX runtime public GET probe\n\n"+"\n".join(rows)+"\n\nNo authorization, private data, R2 reads or cPanel changes.\n")
+          if matches!=2:raise SystemExit("Production v1.3.1 not verified; keep all Cron")
+          print("PASS public /health and /market-hub/v1/health version 1.3.1; R2 data and Cron cutover NOT proven")
+          PY
