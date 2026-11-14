@@ -37,7 +37,7 @@ const store=new Map([
    open_interest:{open_interest_usdt:8000000},oi_change_1h_pct:1.4
  }]
 ]);
-const env={LUMEX_AI_LAB_WORKER_TOKEN:token, MARKET_DATA:{
+const env={LUMEX_AI_LAB_WORKER_TOKEN:token, AUTO_BINANCE_LIQUIDATIONS:'true', MARKET_DATA:{
  async head(k){reads++;if(k!=='market/'+symbol+'_15.csv')return null;
   return {size:raw.length,customMetadata:{schema:'ohlcv_v2',quality:'verified',
    lastCandleMs:String(latest),rows:String(bars.length),source:'gateio_usdt_perpetual'}};},
@@ -104,6 +104,9 @@ assert.equal(body.sections.oi.values.exchange,'Bybit');
 assert.equal(body.sections.gate.values.funding_rate_pct,0.01);
 assert.equal(body.sections.observations.values.bybit_liquidation_events_24h,3);
 assert.equal(body.sections.observations.values.binance_liquidation_snapshots_24h,7);
+const disabled=await marketTerminalSummary({...env,AUTO_BINANCE_LIQUIDATIONS:'false'},symbol,now);
+assert.equal(disabled.sections.observations.values.binance_liquidation_snapshots_24h,null,
+  'disabled Binance must never be shown as 0 snapshots');
 assert.equal(body.orders_enabled,false);assert.equal(body.market_total_estimate,false);
 assert(!JSON.stringify(body).includes('positions'));
 const exp=Math.floor(Date.now()/1000)+70;
