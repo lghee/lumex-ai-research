@@ -16,7 +16,7 @@ const store=new Map([
  ['market-hub/public-pulse/v1/latest.json',{
   schema:'lumex_public_pulse_v1',order_execution:false,
   feeds:{
-   tickers:{sampled_unix:Math.floor(now/1000)-110,data:{quotes:{[symbol]:{last:50100,change_24h_pct:3.4}}}},
+   tickers:{source:'bybit_v5_linear',sampled_unix:Math.floor(now/1000)-110,data:{quotes:{[symbol]:{last:50100,change_24h_pct:3.4}}}},
    ratios:{BTC:{symbol,source:'bybit_v5_account_ratio',sampled_unix:Math.floor(now/1000)-160,
      data:{long_pct:54,short_pct:46}}},
    takers:{BTC:{symbol,source:'binance_futures_taker_volume',sampled_unix:Math.floor(now/1000)-200,
@@ -68,7 +68,19 @@ assert.equal(body.schema,'lumex_pro_market_terminal_v1');
 assert.equal(body.quality.total,5);
 assert.equal(body.quality.available,5);
 assert.equal(body.sections.candles.values.trend,'up');
+assert.equal(body.sections.pulse.values.bybit_price,50100);
 assert.equal(body.sections.pulse.values.bybit_accounts_long_pct,54);
+const pulseSnapshot=store.get('market-hub/public-pulse/v1/latest.json');
+const takerSnapshot=pulseSnapshot.feeds.takers.BTC;
+delete pulseSnapshot.feeds.takers.BTC;
+const withoutBinance=await marketTerminalSummary(env,symbol,now);
+assert.notEqual(withoutBinance.sections.pulse.status,'unavailable',
+  'Binance HTTP 403 must not hide valid Bybit account and ticker data');
+assert.equal(withoutBinance.sections.pulse.values.bybit_price,50100);
+assert.equal(withoutBinance.sections.pulse.values.bybit_accounts_long_pct,54);
+assert.equal(withoutBinance.sections.pulse.values.binance_taker_buy_pct,null);
+assert.equal(withoutBinance.sections.pulse.values.source_status.binance_taker,'unavailable');
+pulseSnapshot.feeds.takers.BTC=takerSnapshot;
 assert.equal(body.sections.pulse.values.binance_taker_buy_pct,62);
 assert.equal(body.sections.oi.values.exchange,'Bybit');
 assert.equal(body.sections.gate.values.funding_rate_pct,0.01);
