@@ -92,7 +92,7 @@
     "AUTO_PUBLIC_PULSE_FETCH": "true",
     "AUTO_OI_MIRROR_FETCH": "true",
     "AUTO_MARKET_QA_DAILY": "true",
-    "AUTO_BINANCE_LIQUIDATIONS": "true",
+    "AUTO_BINANCE_LIQUIDATIONS": "false",
     "AUTO_BINANCE_TAKER_FETCH": "false"
   },
   "keep_vars": true,
