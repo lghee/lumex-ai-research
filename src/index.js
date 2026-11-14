@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.10 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.11 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -1065,7 +1065,7 @@ function hubValidateEvent(ev,symbol,now){
   const side=['buy','sell','in','out','unknown'].includes(ev.side)?ev.side:'unknown';
   const txhash=typeof ev.txhash==='string'&&/^[a-fA-F0-9]{64}$/.test(ev.txhash)?ev.txhash:null;
   const capture=['public_stream','sampled_1s','sampled_2s','confirmed_chain_poll'].includes(ev.capture)?ev.capture:'public_observation';
-  const price_type=['bankruptcy_price','trade_price','last_trade_price'].includes(ev.price_type)?ev.price_type:'unspecified';
+  const price_type=['bankruptcy_price','trade_price','last_trade_price','avg_execution_price'].includes(ev.price_type)?ev.price_type:'unspecified';
   const position_side=['long','short'].includes(ev.position_side)?ev.position_side:null;
   const watched_address=kind==='whale_transfer'&&btcAddress(ev.watched_address)?ev.watched_address:null;
   const watch_label=watched_address?String(ev.watch_label||'watched reserve address').replace(/[^a-zA-Z0-9가-힣 _-]/g,'').slice(0,80):null;
@@ -1079,6 +1079,7 @@ function hubValidateEvent(ev,symbol,now){
 const LIVE_SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
 const LIVE_GATE_CONTRACTS=LIVE_SYMBOLS.map(s=>s.replace('USDT','_USDT'));
 const LIVE_ENABLED=env=>env?.AUTO_LIVE_STREAM==='true';
+const BINANCE_LIQ_ENABLED=env=>LIVE_ENABLED(env)&&env?.AUTO_BINANCE_LIQUIDATIONS==='true';
 const livePair=s=>LIVE_SYMBOLS.includes(s)?s:null;
 const liveSymbolFromGate=s=>livePair(String(s||'').replace('_USDT','USDT'));
 const liveFinite=n=>Number.isFinite(Number(n))?Number(n):NaN;
@@ -1140,6 +1141,47 @@ export function decodeGateCandles(raw){
       price_type:'gateio_futures_candle',capture:'public_stream_provisional'});
   }
   return output.slice(0,80);
+}
+
+
+/**
+ * Binance USDⓈ-M public forceOrder (1-second per-symbol sampled snapshots).
+ * No user/order endpoints. "ap" and "z" describe cumulative filled quantity
+ * at sampled average price, not the full liquidation flow. There is NO native
+ * stable order ID in the publicly documented forceOrder payload.
+ */
+export function decodeBinanceLiquidations(frame,now=Date.now()){
+  const raw=frame?.data??frame;
+  if(!raw||raw.e!=='forceOrder'||!raw.o||typeof raw.o!=='object')return [];
+  if(raw.st!==undefined&&raw.st!==1)return []; // reject COIN-M after unified futures migration
+  const o=raw.o,symbol=String(o.s||''),ts=Number(o.T),eventTs=Number(raw.E);
+  if(!LIVE_SYMBOLS.includes(symbol)||!['BUY','SELL'].includes(o.S)||
+     !['FILLED','PARTIALLY_FILLED'].includes(o.X)||
+     !Number.isSafeInteger(ts)||!Number.isSafeInteger(eventTs)||
+     ts<now-600000||ts>now+120000||Math.abs(eventTs-ts)>120000)return [];
+  if(frame?.stream && frame.stream!=='!forceOrder@arr'&&
+     frame.stream!==symbol.toLowerCase()+'@forceOrder')return [];
+  const price=Number(o.ap),qty=Number(o.z);
+  if(!Number.isFinite(price)||price<=0||price>1e9||
+     !Number.isFinite(qty)||qty<=0||qty>1e12)return [];
+  return [{kind:'liquidation',symbol,source:'binance',ts,price,quantity:qty,
+    side:o.S==='SELL'?'sell':'buy',position_side:o.S==='SELL'?'long':'short',
+    capture:'sampled_1s',price_type:'avg_execution_price'}];
+}
+async function binanceLiquidationId(e){
+  const body=['binance_forceOrder_snapshot_v1',e.symbol,e.ts,e.side,
+    Number(e.price).toFixed(8),Number(e.quantity).toFixed(8)].join('|');
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(body));
+  return 'binance:liq:'+e.symbol+':'+Array.from(new Uint8Array(digest).slice(0,16),
+    byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function watchlistDigest(items){
+  const addresses=Array.from(new Set(items.map(x=>x.address))).sort();
+  if(addresses.length<1||addresses.length>20||addresses.some(x=>!btcAddress(x)))
+    throw Error('watchlist_invalid');
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(addresses.join('\n')));
+  return {count:addresses.length,sha256:Array.from(new Uint8Array(digest),
+    byte=>byte.toString(16).padStart(2,'0')).join('')};
 }
 
 async function liveLiquidationId(e){
@@ -1336,6 +1378,18 @@ export class BtcReserveCollector extends DurableObject{
         accepted:state.accepted,requests:state.requests,errors:state.errors,
         last_error:state.error,watchlist:watch,coverage:state.coverage,orders_enabled:false});
     }
+    if(path==='/watchlist-parity'){
+      const state=await this.state(),ms=Number(state.watchlist_checked_ms)||0,now=Date.now();
+      const count=Number(state.watchlist_count)||0,sha=String(state.watchlist_sha256||'');
+      const configured=state.watchlist_source==='wordpress_configured';
+      const fresh=ms>now-1200000&&ms<=now+120000;
+      return hubReply({ok:configured&&fresh&&count>0&&/^[a-f0-9]{64}$/.test(sha),
+        schema:'lumex_watchlist_parity_v1',source:state.watchlist_source||'unknown',
+        address_count:count,address_set_sha256:/^[a-f0-9]{64}$/.test(sha)?sha:null,
+        checked_unix:Math.floor(ms/1000),recent_worker_success_unix:Math.floor((state.last_success_ms||0)/1000),
+        stale:!fresh,read_only:true,source_scope:'confirmed_btc_address_watchlist',
+        safe_to_disable_wordpress_crons:false});
+    }
     if(path==='/backfill-status')return hubReply(await legacyBackfillHealth(this.env,this.ctx.storage));
     if(path==='/backfill'){
       if(this.env.AUTO_LEGACY_BACKFILL!=='true')
@@ -1394,6 +1448,10 @@ export class BtcReserveCollector extends DurableObject{
       const {items,mode}=await this.watchlist();
       state.watchlist_source=mode;
       if(!items.length)throw Error('watchlist_empty');
+      const fingerprint=await watchlistDigest(items);
+      state.watchlist_count=fingerprint.count;
+      state.watchlist_sha256=fingerprint.sha256;
+      state.watchlist_checked_ms=now;
       const a=items[Number(state.nextIndex||0)%items.length];
       state.nextIndex=(Number(state.nextIndex||0)+1)%items.length;
       const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
@@ -1447,18 +1505,19 @@ export class MarketLiveCollector extends DurableObject{
     super(ctx,env);
     this.ctx=ctx;this.env=env;
     this.streams=new Map();this.pending=new Map();this.flushRunning=false;
-    this.lastSample=new Map();this.lastCandleSent=new Map();this.retryAt={gate:0,bybit:0};
+    this.lastSample=new Map();this.lastCandleSent=new Map();this.retryAt={gate:0,bybit:0,binance:0};
     this.metrics={gate:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       bybit:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
+      binance:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       pending:0,accepted:0,rejected:0,flush_errors:0,last_flush_ms:0,
       preview_sent:0,preview_errors:0,last_preview_ms:0,
       coverage:'only_observed_messages;past_disconnects_not_backfilled'};
   }
   safeStatus(){
     const now=Date.now(),feeds={};
-    for(const kind of ['gate','bybit']){
+    for(const kind of ['gate','bybit','binance']){
       const m=this.metrics[kind];
-      feeds[kind]={state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
+      feeds[kind]={enabled:kind!=='binance'||BINANCE_LIQ_ENABLED(this.env),state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
         packets:m.packets,restarts:m.restarts,error:m.error,
         connected:Boolean(this.streams.get(kind)?.readyState===1)};
     }
@@ -1485,7 +1544,11 @@ export class MarketLiveCollector extends DurableObject{
   }
   async ensure(){
     if(!LIVE_ENABLED(this.env))return;
-    for(const source of ['gate','bybit']){
+    if(!BINANCE_LIQ_ENABLED(this.env)&&this.streams.has('binance')){
+      try{this.streams.get('binance')?.close(1000,'optional source disabled')}catch{}
+      this.streams.delete('binance');this.metrics.binance.state='disabled';
+    }
+    for(const source of ['gate','bybit',...(BINANCE_LIQ_ENABLED(this.env)?['binance']:[]) ]){
       const sock=this.streams.get(source);
       if(sock&&(sock.readyState===0||sock.readyState===1))continue;
       if(Date.now()<this.retryAt[source])continue;
@@ -1494,7 +1557,9 @@ export class MarketLiveCollector extends DurableObject{
     if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+5000);
   }
   connect(source){
-    const url=source==='gate'?'wss://fx-ws.gateio.ws/v4/ws/usdt':'wss://stream.bybit.com/v5/public/linear';
+    const url=source==='gate'?'wss://fx-ws.gateio.ws/v4/ws/usdt':
+      source==='bybit'?'wss://stream.bybit.com/v5/public/linear':
+      'wss://fstream.binance.com/market/ws/!forceOrder@arr';
     this.metrics[source].state='connecting';
     let ws;
     try{ws=new WebSocket(url)}catch(error){this.disconnected(source,'connect_failed');return;}
@@ -1514,14 +1579,16 @@ export class MarketLiveCollector extends DurableObject{
                 event:'subscribe',payload:[tf,contract]}));
             }
           }
-        }else ws.send(JSON.stringify({op:'subscribe',args:LIVE_SYMBOLS.map(s=>'allLiquidation.'+s)}));
+        }else if(source==='bybit')
+          ws.send(JSON.stringify({op:'subscribe',args:LIVE_SYMBOLS.map(s=>'allLiquidation.'+s)}));
+        // Binance raw !forceOrder@arr stream is subscribed by URI; no app SUBSCRIBE/ping.
       }catch(error){this.disconnected(source,'subscribe_failed');}
     });
     ws.addEventListener('message',message=>{
       if(this.streams.get(source)!==ws||typeof message.data!=='string'||message.data.length>250000)return;
       this.metrics[source].last_received_ms=Date.now();this.metrics[source].packets++;
       try{
-        const raw=JSON.parse(message.data),items=source==='gate'?decodeGatePublic(raw):decodeBybitLiquidations(raw);
+        const raw=JSON.parse(message.data),items=source==='gate'?decodeGatePublic(raw):source==='bybit'?decodeBybitLiquidations(raw):decodeBinanceLiquidations(raw);
         if(items.length)this.ctx.waitUntil(this.ingestItems(items));
         if(source==='gate'){
           const previews=decodeGateCandles(raw);
@@ -1572,7 +1639,7 @@ export class MarketLiveCollector extends DurableObject{
   async ingestItems(items){
     for(const item of items){
       // No exchange secrets or account metadata; all events publicly observed.
-      if(item.kind==='liquidation')item.id=await liveLiquidationId(item);
+      if(item.kind==='liquidation')item.id=item.source==='binance'?await binanceLiquidationId(item):await liveLiquidationId(item);
       else{
         const previous=this.lastSample.get(item.kind+':'+item.symbol)||0;
         const minDelay=item.kind==='trade'?1000:2000;
@@ -1611,14 +1678,18 @@ export class MarketLiveCollector extends DurableObject{
   async alarm(){
     if(!LIVE_ENABLED(this.env))return;
     const now=Date.now();
-    for(const source of ['gate','bybit']){
+    for(const source of ['gate','bybit',...(BINANCE_LIQ_ENABLED(this.env)?['binance']:[])]){
       const m=this.metrics[source],ws=this.streams.get(source);
       if(ws?.readyState===1){
-        if(m.last_received_ms&&now-m.last_received_ms>90000){
+        if(m.last_received_ms&&now-m.last_received_ms>(source==='binance'?600000:90000)){
           this.disconnected(source,'feed_stale_reconnect');continue;
         }
         // Explicit source heartbeat. Gate expects futures.ping; Bybit expects op ping.
-        try{ws.send(source==='gate'?JSON.stringify({time:Math.floor(now/1000),channel:'futures.ping'}):'{"op":"ping"}')}
+        try{
+          if(source==='gate')ws.send(JSON.stringify({time:Math.floor(now/1000),channel:'futures.ping'}));
+          if(source==='bybit')ws.send('{"op":"ping"}');
+          // Binance responds to WebSocket control PING internally; no text ping route.
+        }
         catch{this.disconnected(source,'heartbeat_failed')}
       }
     }
@@ -1640,7 +1711,7 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
   if(!hours)throw Error('unsupported_insight_window');
   const start=Math.floor((now-hours*HUB_HOUR_MS)/HUB_HOUR_MS)*HUB_HOUR_MS;
   const buckets=new Map(),groups=new Map();
-  let count=0,liquidation=0,trade=0,whale=0,ticker=0,inBtc=0,outBtc=0;
+  let count=0,liquidation=0,binanceLiquidation=0,trade=0,whale=0,ticker=0,inBtc=0,outBtc=0;
   let lastObserved=0,firstObserved=Infinity;
   for(const row of rows){
     const bucket=Number(row.bucket),n=Number(row.events),qty=Number(row.quantity);
@@ -1650,7 +1721,10 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
     if(!HUB_KINDS.includes(kind)||!HUB_ORIGINS.includes(source))continue;
     count+=n;lastObserved=Math.max(lastObserved,Number(row.last_ts)||bucket);
     firstObserved=Math.min(firstObserved,Number(row.first_ts)||bucket);
-    if(kind==='liquidation')liquidation+=n;
+    if(kind==='liquidation'){
+      if(source==='binance')binanceLiquidation+=n;
+      else if(source==='bybit')liquidation+=n;
+    }
     if(kind==='trade')trade+=n;
     if(kind==='whale_transfer'){
       whale+=n;
@@ -1661,16 +1735,19 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
     const key=kind+':'+source+':'+side;
     const g=groups.get(key)||{kind,source,side,events:0,native_quantity:0};
     g.events+=n;g.native_quantity+=qty;groups.set(key,g);
-    const b=buckets.get(bucket)||{hour_ms:bucket,liquidation:0,whale_transfer:0,trade_sample:0,ticker_sample:0};
+    const b=buckets.get(bucket)||{hour_ms:bucket,liquidation:0,binance_liquidation_sampled:0,whale_transfer:0,trade_sample:0,ticker_sample:0};
     const k=kind==='trade'?'trade_sample':kind==='ticker'?'ticker_sample':kind;
-    b[k]+=n;buckets.set(bucket,b);
+    if(kind==='liquidation'&&source==='binance')b.binance_liquidation_sampled+=n;
+    else b[k]+=n;buckets.set(bucket,b);
   }
   const round=v=>Number(v.toFixed(8));
   return {
     ok:true,symbol,window:windowName,scope:'observed_public_events_only',
     coverage:'partial_public_sources;no_backfill_for_disconnects',
-    market_total_estimate:false,source_filters:['bybit_liquidations','gate_sampled_futures','btc_confirmed_watchlist'],
-    captures:{liquidations:{events:liquidation,source:'bybit_public_allLiquidation',price_type:'bankruptcy_price',order_side_not_position_side:true},
+    market_total_estimate:false,source_filters:['bybit_liquidations','binance_sampled_1s_liquidation_snapshots','gate_sampled_futures','btc_confirmed_watchlist'],
+    captures:{liquidations:{events:liquidation,source:'bybit_public_allLiquidation_only',price_type:'bankruptcy_price',order_side_not_position_side:true},
+      binance_liquidation_snapshots:{events:binanceLiquidation,sampling:'latest_per_symbol_per_1000ms',
+        source:'binance_usdm_forceOrder',price_type:'avg_execution_price',scope:'incomplete_snapshots_not_market_total'},
       trades:{events:trade,sampling:'per_symbol_1s_max',source:'gateio_futures'},
       tickers:{events:ticker,sampling:'per_symbol_2s_max'},
       btc_address_net:{events:whale,in_btc:round(inBtc),out_btc:round(outBtc),
@@ -1681,7 +1758,7 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
       .sort((a,b)=>b.events-a.events),
     hourly:Array.from(buckets.values()).sort((a,b)=>a.hour_ms-b.hour_ms),
     generated_at:new Date(now).toISOString(),trading_enabled:false,
-    note:'청산은 Bybit 공개 관측, 가격은 파산가격이며 실체결가가 아닙니다. Gate 체결은 샘플이고 고래는 관측 BTC 주소의 확인 거래 순변화입니다.'
+    note:'기존 Bybit 청산 지표는 Bybit만 집계. Binance는 1초 스냅샷 표본을 별도 보관하며 전체 체결/청산액이 아닙니다. 고래는 공개 BTC 관측 주소만입니다.'
   };
 }
 
@@ -1941,7 +2018,13 @@ async function hubRoute(request,env){
     }catch{return hubReply({ok:false,error:'pulse_read_unavailable'},503)}
   }
   // Strictly admin/service Bearer, read-only. No cross-exchange ledger merge.
-  if(path==='/market-hub/v1/collector-audit'&&method==='GET'){
+  if(path==='/market-hub/v1/watchlist-parity'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    if(!env.BTC_RESERVE_COLLECTOR)return hubReply({ok:false,error:'whale_binding_missing'},503);
+    try{return await env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/watchlist-parity')}
+    catch{return hubReply({ok:false,error:'whale_watchlist_unavailable'},503)}
+  }
+    if(path==='/market-hub/v1/collector-audit'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
     const names=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
@@ -2020,7 +2103,7 @@ async function hubRoute(request,env){
       items});
   }
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.10',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit'],
+    version:'1.2.11',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit','binance_usdm_forceOrder_sampled','btc_watchlist_set_parity'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/legacy-backfill-health'&&method==='GET'){
