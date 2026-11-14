@@ -2802,11 +2802,34 @@ async function hubRoute(request,env){
   }
   if(path==='/market-hub/v1/archive-health'&&method==='GET'){
     try{
-      const rows=await env.MARKET_DATA.list({prefix:'market-hub/events/',limit:25});
-      const objects=(rows?.objects||[]);
-      return hubReply({ok:true,objects_sampled:objects.length,truncated:!!rows?.truncated,
-        most_recent_modified_ms:objects.reduce((v,x)=>Math.max(v,Date.parse(x.uploaded)||0),0),
-        archive:'immutable_r2_jsonl',sample_not_total:true,order_execution:false});
+      // R2 list() is key-ordered, NOT newest-first. Global first-25 samples
+      // can show yesterday's files while current-hour objects exist.
+      // Inspect fixed recent UTC hour prefixes and read actual JSONL bytes.
+      const now=Date.now(),proof=await continuityR2Proof(env,now);
+      const kinds={};
+      for(const kind of CONTINUITY_KINDS){
+        const sample=proof.kinds?.[kind];
+        kinds[kind]={
+          sample_verified:sample?.sample_verified===true,
+          verified_records:Number.isSafeInteger(sample?.verified_records)?sample.verified_records:0,
+          hours_with_object:Number.isSafeInteger(sample?.hours_with_object)?sample.hours_with_object:0,
+          last_observed_hour_unix:Number.isSafeInteger(sample?.last_observed_hour_unix)?
+            sample.last_observed_hour_unix:null,
+          reason:sample?.reason||'unavailable'
+        };
+      }
+      return hubReply({ok:proof.ok===true,
+        schema:'lumex_archive_recent_health_v2',
+        window_hours:CONTINUITY_HOURS,
+        as_of_unix:Math.floor(now/1000),
+        list_checks:proof.list_checks,
+        list_errors:proof.list_errors,
+        kinds,archive:'immutable_r2_jsonl',
+        recent_liquidation_sample_verified:kinds.liquidation.sample_verified,
+        recent_whale_sample_verified:kinds.whale_transfer.sample_verified,
+        observed_only:true,complete_market_capture:false,
+        sample_not_total:true,order_execution:false,
+        safe_to_disable_wordpress_crons:false});
     }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
