@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'production/deploy/market-gate-liq-oi-priority-20261114.trigger'
+      - 'production/deploy/archive-health-recency-20261114.trigger'
 permissions:
   contents: read
 jobs:
