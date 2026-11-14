@@ -67,5 +67,5 @@ assert.equal(live.safeStatus().feeds.binance.enabled,false);
 const enabled=new MarketLiveCollector({storage:{getAlarm:async()=>0},waitUntil:()=>{}},{AUTO_LIVE_STREAM:'true',AUTO_BINANCE_LIQUIDATIONS:'true'});
 assert.equal(enabled.safeStatus().feeds.binance.enabled,true);
 const h=await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json();
-assert.equal(h.version,'1.2.12');
-console.log('PASS 1.2.12 Binance sample filter + 1s provenance, original Bybit count isolation, salted-free canonical BTC watchlist hash, Bearer + fallback gate');
+assert.equal(h.version,'1.3.0');
+console.log('PASS 1.3.0 Binance sample filter + 1s provenance, original Bybit count isolation, salted-free canonical BTC watchlist hash, Bearer + fallback gate');
