@@ -42,6 +42,6 @@ const fail=await hub.fetch(new Request('https://hub/publish',{method:'POST',
 headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'ETHUSDT',previews:valid})}));
 assert.equal((await fail.json()).broadcast,0);
 const health=await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),{})).json();
-assert.equal(health.version,'1.2.11');
+assert.equal(health.version,'1.2.12');
 assert(health.capabilities.includes('provisional_gate_futures_candles'));
 console.log('PASS 1.2.3: Gate 5/15/60/240/1D provisional parsing, bounded fanout, never stored as verified R2 bars');
