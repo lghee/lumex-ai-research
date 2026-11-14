@@ -26,7 +26,7 @@ assert.equal(noAuthHistory.status,401);
 const readiness=await (await worker.fetch(new Request('https://worker/market-hub/v1/release-readiness',
  {headers:{authorization:'Bearer '+token}}),env)).json();
 assert.equal(readiness.schema,'lumex_market_ops_readiness_v1');
-assert.equal(readiness.worker_version,'1.3.0');
+assert.equal(readiness.worker_version,'1.3.1');
 assert.equal(readiness.checks.length,8);
 assert.equal(readiness.release_ready,false);
 assert.equal(readiness.safe_to_disable_wordpress_crons,false);
@@ -70,5 +70,5 @@ const tainted=await marketOpsHistory(env,now);
 assert.equal(tainted.items.at(-1).status,'missing','corrupt/mismatched history is never healthy');
 store.set(archive,original);
 const health=await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json();
-assert.equal(health.version,'1.3.0');
-console.log('PASS 1.3.0 integrated ops: 8 gates, Bearer-protected one-call readiness, disabled-by-default daily R2, readback + idempotent archive, 7day history and tamper refusal');
+assert.equal(health.version,'1.3.1');
+console.log('PASS 1.3.1 integrated ops: 8 gates, Bearer-protected one-call readiness, disabled-by-default daily R2, readback + idempotent archive, 7day history and tamper refusal');
