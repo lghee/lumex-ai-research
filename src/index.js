@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.2.7 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.8 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -7,7 +7,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 
 
-/** Market Hub 1.2.7: independent, public-only Bybit/Binance/FNG collector.
+/** Market Hub 1.2.8: independent, public-only Bybit/Binance/FNG collector.
  * R2 is authoritative in CF mode. Historical MySQL and live liquidation ledgers
  * are not read or combined here; no user/order/credentials are accessed.
  */
@@ -140,6 +140,116 @@ async function collectPublicPulse(env){
   await env.MARKET_DATA.put(PUBLIC_PULSE_HEALTH,JSON.stringify(summary),
     {httpMetadata:{contentType:'application/json'}});
   return summary;
+}
+
+
+/** 1.2.8: source-matched Bybit/Binance public OI and price history.
+ * Never substitute Gate OI for Bybit/Binance, never merge two exchanges.
+ */
+const OI_PREFIX='market-hub/oi/v1/';
+const OI_COINS=['BTC','ETH','SOL','XRP'];
+const OI_INTERVALS=[7,30];
+const oiFinite=(x,min,max)=>{if(x===null||x===undefined||x===''||typeof x==='boolean')return null;
+  const n=Number(x);return Number.isFinite(n)&&n>=min&&n<=max?n:null;};
+async function oiGet(url){
+  const r=await fetch(url,{headers:{accept:'application/json'},signal:AbortSignal.timeout(9000)});
+  if(!r.ok)throw Error('oi_provider_http_'+r.status);
+  const text=await r.text();if(text.length<3||text.length>1600000)throw Error('oi_provider_size');
+  try{return JSON.parse(text)}catch{throw Error('oi_provider_json')}
+}
+function oiHistory(oi,candles,exchange,days,now){
+  const frameMs=(days===30?14400:3600)*1000,prices=new Map();
+  if(!Array.isArray(oi)||!Array.isArray(candles))throw Error('oi_history_schema');
+  for(const row of candles){
+    const t=oiFinite(row?.[0],1500000000000,now+120000),
+      p=oiFinite(row?.[4],0.00000001,1e10);
+    if(t!==null&&p!==null&&t%frameMs===0)prices.set(t,p);
+  }
+  const result=new Map();
+  for(const row of oi){
+    const t=oiFinite(row?.timestamp,1500000000000,now+120000);
+    const volume=oiFinite(exchange==='Bybit'?row?.openInterest:row?.sumOpenInterestValue,0.00000000001,1e18);
+    if(t===null||volume===null||!Number.isSafeInteger(t)||t>now+120000||
+      t<now-38*86400000)continue;
+    // Exchange OI timestamps are interval end; candle timestamps interval open.
+    const candleStart=Math.floor((t-1)/frameMs)*frameMs,price=prices.get(candleStart);
+    if(price===undefined)continue;
+    const notional=exchange==='Bybit'?volume*price:volume;
+    if(!Number.isFinite(notional)||notional<=0||notional>1e18)continue;
+    result.set(t,{ts:t,price:Number(price.toFixed(8)),oi_usd:Number(notional.toFixed(4))});
+  }
+  const rows=[...result.values()].sort((a,b)=>a.ts-b.ts).slice(-200);
+  const needed=days===30?90:48,minSpan=(days===30?25:5)*86400000;
+  if(rows.length<needed||rows.at(-1).ts-rows[0].ts<minSpan||
+     now-rows.at(-1).ts>(days===30?9*3600000:3*3600000))throw Error('oi_history_insufficient');
+  return rows;
+}
+async function oiFromBybit(coin,days,now){
+  const symbol=coin+'USDT',frame=days===30?'4h':'1h',interval=days===30?'240':'60';
+  const params='category=linear&symbol='+symbol;
+  const prefix='https://api.bybit.com/v5/market/';
+  const [ticker,oi,candles]=await Promise.all([
+    oiGet(prefix+'tickers?'+params),
+    oiGet(prefix+'open-interest?'+params+'&intervalTime='+frame+'&limit=200'),
+    oiGet(prefix+'kline?'+params+'&interval='+interval+'&limit=200')]);
+  if(ticker?.retCode!==0||oi?.retCode!==0||candles?.retCode!==0 ||
+      !Array.isArray(ticker?.result?.list)||!Array.isArray(oi?.result?.list)||!Array.isArray(candles?.result?.list))
+    throw Error('bybit_oi_schema');
+  const t=ticker.result.list.find(x=>x?.symbol===symbol);
+  const price=oiFinite(t?.markPrice,0.00000001,1e10),notional=oiFinite(t?.openInterestValue,0.00000001,1e18);
+  if(price===null||notional===null)throw Error('bybit_oi_quote_missing');
+  const rows=oiHistory(oi.result.list,candles.result.list,'Bybit',days,now);
+  return {exchange:'Bybit',price,oi_usd:notional,history:rows,
+    sources:['Bybit V5 public tickers','Bybit V5 public open-interest','Bybit V5 public kline']};
+}
+async function oiFromBinance(coin,days,now){
+  const symbol=coin+'USDT',frame=days===30?'4h':'1h';
+  const [ticker,oi,candles]=await Promise.all([
+    oiGet('https://fapi.binance.com/fapi/v1/premiumIndex?symbol='+symbol),
+    oiGet('https://fapi.binance.com/futures/data/openInterestHist?symbol='+symbol+'&period='+frame+'&limit=200'),
+    oiGet('https://fapi.binance.com/fapi/v1/klines?symbol='+symbol+'&interval='+frame+'&limit=200')]);
+  const price=oiFinite(ticker?.markPrice,0.00000001,1e10);
+  if(price===null)throw Error('binance_oi_quote_missing');
+  const rows=oiHistory(oi,candles,'Binance',days,now);
+  return {exchange:'Binance',price,oi_usd:rows.at(-1).oi_usd,history:rows,
+    sources:['Binance public premiumIndex','Binance public openInterestHist','Binance public klines']};
+}
+async function collectOiMirror(env){
+  if(env.AUTO_OI_MIRROR_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
+  const now=Date.now(),slot=Math.floor(now/300000)%8;
+  const coin=OI_COINS[slot%4],days=OI_INTERVALS[Math.floor(slot/4)],id=coin+'-'+days;
+  let report={symbol:coin+'USDT',days,checked_unix:Math.floor(now/1000),
+    ok:false,source:null,error:null,order_execution:false};
+  try{
+    let market;
+    try{market=await oiFromBybit(coin,days,now)}
+    catch{market=await oiFromBinance(coin,days,now)}
+    const record={ok:true,schema:'lumex_oi_mirror_v1',coin,pair:coin+'USDT',days,
+      exchange:market.exchange,price:market.price,oi_usd:market.oi_usd,
+      history:market.history,sources:market.sources,
+      sample_unix:Math.floor(now/1000),source_scope:'single_exchange_public_oi_only',
+      order_execution:false,merged_with_gate:false};
+    const body=JSON.stringify(record);
+    if(body.length>120000)throw Error('oi_snapshot_oversize');
+    const latestKey=OI_PREFIX+'latest/'+id+'.json';
+    const time=new Date(now).toISOString();
+    const archive=OI_PREFIX+'observations/'+coin+'/'+days+'/'+time.slice(0,10).replaceAll('-','')+'/'+time.slice(11,16).replace(':','')+'.json';
+    if(!await env.MARKET_DATA.head(archive))await env.MARKET_DATA.put(archive,body,{httpMetadata:{contentType:'application/json'}});
+    await env.MARKET_DATA.put(latestKey,body,{httpMetadata:{contentType:'application/json'}});
+    report={...report,ok:true,source:market.exchange,observations:market.history.length,age_seconds:0};
+  }catch(e){report.error=String(e?.message||'oi_collect_failed').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,72)}
+  const statusKey=OI_PREFIX+'health.json';
+  let status={ok:true,enabled:true,scope:'independent_bybit_or_binance_public_oi',
+    not_gate_substitution:true,order_execution:false,sources:{}};
+  try{
+    const prior=await env.MARKET_DATA.get(statusKey);
+    if(prior){const p=await prior.json();
+      if(p?.sources&&typeof p.sources==='object')status.sources=p.sources;
+    }
+  }catch{}
+  status.sources[id]=report;status.checked_unix=Math.floor(now/1000);
+  await env.MARKET_DATA.put(statusKey,JSON.stringify(status),{httpMetadata:{contentType:'application/json'}});
+  return report;
 }
 
 const PORT = 8080;
@@ -1743,6 +1853,26 @@ export class MarketEventHub extends DurableObject{
 }
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
+  if(path==='/market-hub/v1/oi-health'&&method==='GET'){
+    try{const obj=await env.MARKET_DATA?.get(OI_PREFIX+'health.json');
+      return hubReply({ok:true,enabled:env.AUTO_OI_MIRROR_FETCH==='true',report:obj?await obj.json():null});
+    }catch{return hubReply({ok:false,error:'oi_health_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/oi-history'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    const symbol=u.searchParams.get('symbol'),days=u.searchParams.get('days');
+    if(!OI_COINS.some(c=>symbol===c+'USDT')||!['7','30'].includes(days))
+      return hubReply({ok:false,error:'invalid_oi_query'},400);
+    try{const key=OI_PREFIX+'latest/'+symbol.slice(0,-4)+'-'+days+'.json';
+      const obj=await env.MARKET_DATA?.get(key);
+      if(!obj)return hubReply({ok:false,error:'oi_snapshot_unavailable'},503);
+      const x=await obj.json();
+      if(x?.schema!=='lumex_oi_mirror_v1'||x?.pair!==symbol||String(x.days)!==days||
+        x?.order_execution!==false||x?.source_scope!=='single_exchange_public_oi_only')
+        return hubReply({ok:false,error:'oi_snapshot_invalid'},503);
+      return hubReply(x);
+    }catch{return hubReply({ok:false,error:'oi_history_unavailable'},503)}
+  }
   if(path==='/market-hub/v1/public-pulse-health'&&method==='GET'){
     try{const x=await env.MARKET_DATA?.get(PUBLIC_PULSE_HEALTH);
       return hubReply({ok:true,enabled:env.AUTO_PUBLIC_PULSE_FETCH==='true',report:x?await x.json():null,order_execution:false});}
@@ -1758,7 +1888,7 @@ async function hubRoute(request,env){
     }catch{return hubReply({ok:false,error:'pulse_read_unavailable'},503)}
   }
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.7',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2'],
+    version:'1.2.8',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/legacy-backfill-health'&&method==='GET'){
@@ -1896,10 +2026,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.8',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -1915,6 +2045,8 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
+      ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(collectPublicPulse(env).catch(()=>console.error('public_pulse_collect_failed')));
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
