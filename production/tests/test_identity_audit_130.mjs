@@ -44,5 +44,5 @@ const partial=await (await worker.fetch(new Request(url,{headers:{Authorization:
 assert.equal(partial.ok,false);assert.equal(partial.items.find(x=>x.symbol==='ETHUSDT').ok,false);
 assert.equal(partial.safe_to_disable_wordpress_crons,false);
 const health=await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json();
-assert.equal(health.version,'1.3.0');
-console.log('PASS 1.3.0: Bearer, four bounded public identity samples plus BTC txid, 100-cap, fail closed, no merge');
+assert.equal(health.version,'1.3.1');
+console.log('PASS 1.3.1: Bearer, four bounded public identity samples plus BTC txid, 100-cap, fail closed, no merge');
