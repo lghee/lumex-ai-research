@@ -72,6 +72,6 @@ assert.equal(objects.size,3,'second poll has no new rows');
 const status=await worker.fetch(new Request('https://worker/market-hub/v1/legacy-backfill-health'),env);
 assert.equal(status.status,200);assert.equal((await status.json()).sources.length,3);
 const sidefx=await worker.fetch(new Request('https://worker/market-hub/v1/health'),env);
-assert.equal((await sidefx.json()).version,'1.2.12');
+assert.equal((await sidefx.json()).version,'1.3.0');
 globalThis.fetch=originalFetch;
 console.log('PASS 1.2.6 historic WordPress public-market: 401 isolation, 3 read-only cursor exports, exact R2 records, no live merge, no duplicate archive');
