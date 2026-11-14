@@ -84,10 +84,15 @@ pulseSnapshot.feeds.takers.BTC=takerSnapshot;
 const gateTaker={...takerSnapshot,source:'gateio_futures_contract_stats_taker_size',
   data:{status:'ok',buy_pct:57.4,sell_pct:42.6,exchange:'Gate',
     scope:'gateio_futures_contract_stats_closed_5m',volume_unit:'gate_futures_contracts',
-    period_minutes:15,bars:3,sample_unix:Math.floor(now/1000)-200}};
+    period_minutes:15,bars:3,sample_unix:Math.floor(now/1000)-200,
+    liquidation:{long_usdt:12345,short_usdt:54321,period_minutes:15,exchange:'Gate',
+      source:'gateio_public_contract_stats_liquidation_aggregates'}}};
 pulseSnapshot.feeds.takers.BTC=gateTaker;
 const sourced=await marketTerminalSummary(env,symbol,now);
 assert.equal(sourced.sections.pulse.values.gate_taker_buy_pct,57.4);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_long_usdt,12345);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_short_usdt,54321);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_window_minutes,15);
 assert.equal(sourced.sections.pulse.values.binance_taker_buy_pct,null,
   'Never label Gate figures as Binance');
 assert.equal(sourced.sections.pulse.values.taker_exchange,'Gate');
