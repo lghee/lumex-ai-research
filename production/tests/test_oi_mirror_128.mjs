@@ -68,6 +68,6 @@ blockBinance=true;await scheduled();
 assert.equal(blobs.get(oiKeys[0]),stored,'outage preserves good snapshot');
 h=JSON.parse(blobs.get('market-hub/oi/v1/health.json'));
 assert.equal(h.sources[one.coin+'-'+one.days].ok,false);
-assert.equal((await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json()).version,'1.2.10');
+assert.equal((await (await worker.fetch(new Request('https://worker/market-hub/v1/health'),env)).json()).version,'1.2.11');
 globalThis.fetch=original;
-console.log('PASS 1.2.10 OI: source-matched history, bounded Binance fallback, 8-slot preflight, auth, R2 retry provenance, outage preservation');
+console.log('PASS 1.2.11 OI: source-matched history, bounded Binance fallback, 8-slot preflight, auth, R2 retry provenance, outage preservation');
