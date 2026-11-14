@@ -1785,7 +1785,7 @@ async function continuityR2Proof(env,now=Date.now()){
 }
 function continuityFeedSummary(name,feed,enabled){
   const received=Number(feed?.last_received_ms);
-  const age=Number(feed?.age_seconds);
+  const age=feed?.age_seconds===null||feed?.age_seconds===undefined?null:Number(feed.age_seconds);
   const packets=Number(feed?.packets);
   return {source:name,enabled:enabled===true,connected:feed?.connected===true,
     last_received_unix:Number.isSafeInteger(received)&&received>0?Math.floor(received/1000):null,
