@@ -7,7 +7,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 
 
-/** Market Hub 1.2.10: independent, public-only Bybit/Binance/FNG collector.
+/** Market Hub 1.2.11: independent, public-only Bybit/Binance/FNG collector.
  * R2 is authoritative in CF mode. Historical MySQL and live liquidation ledgers
  * are not read or combined here; no user/order/credentials are accessed.
  */
@@ -143,7 +143,7 @@ async function collectPublicPulse(env){
 }
 
 
-/** 1.2.10: source-matched Bybit/Binance public OI and price history.
+/** 1.2.11: source-matched Bybit/Binance public OI and price history.
  * Never substitute Gate OI for Bybit/Binance, never merge two exchanges.
  */
 const OI_PREFIX='market-hub/oi/v1/';
@@ -1383,7 +1383,9 @@ export class BtcReserveCollector extends DurableObject{
       const count=Number(state.watchlist_count)||0,sha=String(state.watchlist_sha256||'');
       const configured=state.watchlist_source==='wordpress_configured';
       const fresh=ms>now-1200000&&ms<=now+120000;
-      return hubReply({ok:configured&&fresh&&count>0&&/^[a-f0-9]{64}$/.test(sha),
+      const enabled=this.env.AUTO_WHALE_FETCH==='true';
+      return hubReply({ok:enabled&&configured&&fresh&&count>0&&/^[a-f0-9]{64}$/.test(sha),
+        enabled,
         schema:'lumex_watchlist_parity_v1',source:state.watchlist_source||'unknown',
         address_count:count,address_set_sha256:/^[a-f0-9]{64}$/.test(sha)?sha:null,
         checked_unix:Math.floor(ms/1000),recent_worker_success_unix:Math.floor((state.last_success_ms||0)/1000),
@@ -2241,10 +2243,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.10',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.11',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.10',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.11',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
