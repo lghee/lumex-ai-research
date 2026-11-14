@@ -150,6 +150,86 @@ function pulseSentiment(src,now){
   return {value:v,classification:x.value_classification,sample_unix:ts,
     attribution:'Alternative.me',source_url:'https://alternative.me/crypto/fear-and-greed-index/'};
 }
+
+/** Source-truthful replacement when public Bybit ticker/account endpoints 403.
+ * Gate futures contract stats "long_users"/"short_users" refer to Gate users,
+ * not Bybit participants. Never map Gate fields into Bybit-labelled JSON.
+ */
+export function pulseGateTickerQuote(raw,coin){
+  const q=Array.isArray(raw)?raw.find(x=>x?.contract===coin+'_USDT'):null;
+  if(!q)throw Error('gate_quote_missing');
+  const price=pulseN(q.last,0.00000001,1e10),
+    change=pulseN(q.change_percentage,-100,10000),
+    funding=pulseN(q.funding_rate,-1,1);
+  if(price===null||change===null)throw Error('gate_quote_invalid');
+  return {last:price,change_24h_pct:Number(change.toFixed(3)),
+    funding_rate_pct:funding===null?null:Number((funding*100).toFixed(6)),
+    open_interest_usdt:null,
+    turnover_24h_usdt:pulseN(q.volume_24h_quote,0,1e18)};
+}
+async function pulseGatePublicTickers(){
+  const coins=await Promise.all(PUBLIC_PULSE_COINS.map(async coin=>{
+    const path='/api/v4/futures/usdt/tickers?contract='+coin+'_USDT';
+    let err='';
+    for(const host of ['https://api.gateio.ws','https://fx-api.gateio.ws']){
+      try{return [coin,pulseGateTickerQuote(await pulseJson(host+path,50000),coin)]}
+      catch(e){err=String(e?.message||e).slice(0,50)}
+    }
+    throw Error('gate_ticker_unavailable_'+err);
+  }));
+  const quotes=Object.fromEntries(coins.map(([c,q])=>[c+'USDT',q]));
+  const breadth={up:0,down:0,flat:0,total:4};
+  for(const q of Object.values(quotes))
+    q.change_24h_pct>0?breadth.up++:q.change_24h_pct<0?breadth.down++:breadth.flat++;
+  return {quotes,breadth,scope:'Gate USDT perpetual, four symbols; not Bybit prices'};
+}
+export function pulseGateUserRatio(rows,coin,now){
+  if(!Array.isArray(rows)||rows.length<1||rows.length>100)throw Error('gate_accounts_schema');
+  const frame=300;
+  const clean=rows.map(x=>{
+    const t=pulseN(x?.time,1500000000,4102444800),
+      long=pulseN(x?.long_users,0,1e12),short=pulseN(x?.short_users,0,1e12);
+    if(t===null||!Number.isSafeInteger(t)||t%frame!==0||
+      long===null||short===null||long+short<=0||
+      t+frame>now-5||t+frame<now-1800)return null;
+    return {end:t+frame,long,short};
+  }).filter(Boolean).sort((a,b)=>b.end-a.end);
+  if(!clean.length||now-clean[0].end>900)throw Error('gate_accounts_stale');
+  const ratio=Number((100*clean[0].long/(clean[0].long+clean[0].short)).toFixed(2));
+  return {long_pct:ratio,short_pct:Number((100-ratio).toFixed(2)),
+    sample_unix:clean[0].end,collected_unix:now,
+    exchange:'Gate',scope:coin+'USDT Gate contract_stats long_users / short_users'};
+}
+async function pulseGateAccountRatio(coin,now){
+  const path='/api/v4/futures/usdt/contract_stats?contract='+coin+'_USDT&interval=5m&limit=6';
+  let err='';
+  for(const host of ['https://api.gateio.ws','https://fx-api.gateio.ws']){
+    try{return pulseGateUserRatio(await pulseJson(host+path,120000),coin,now)}
+    catch(e){err=String(e?.message||e).slice(0,50)}
+  }
+  throw Error('gate_accounts_unavailable_'+err);
+}
+async function pulseTickerBySource(){
+  try{
+    return {source:'bybit_v5_linear',data:pulseTickers(
+      await pulseJson('https://api.bybit.com/v5/market/tickers?category=linear',2500000))};
+  }catch{
+    return {source:'gateio_usdt_perpetual_tickers',data:await pulseGatePublicTickers(),
+      fallback_reason:'bybit_public_unavailable'};
+  }
+}
+async function pulseRatioBySource(coin,now){
+  try{
+    return {source:'bybit_v5_account_ratio',data:pulseRatio(
+      await pulseJson('https://api.bybit.com/v5/market/account-ratio?category=linear&symbol='+
+        coin+'USDT&period=5min&limit=2',70000),coin,now)};
+  }catch{
+    return {source:'gateio_futures_contract_stats_user_ratio',
+      data:await pulseGateAccountRatio(coin,now),
+      fallback_reason:'bybit_public_unavailable'};
+  }
+}
+
 async function collectPublicPulse(env){
   if(env.AUTO_PUBLIC_PULSE_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
   const now=Math.floor(Date.now()/1000);
@@ -159,25 +239,24 @@ async function collectPublicPulse(env){
     ?previous.feeds:{};
   const reports={};let updated=0;
   const jobs=[
-    ['tickers','bybit_v5_linear','https://api.bybit.com/v5/market/tickers?category=linear',
-       x=>pulseTickers(x),2500000],
-    ...PUBLIC_PULSE_COINS.map(c=>['ratio_'+c,'bybit_v5_account_ratio',
-      'https://api.bybit.com/v5/market/account-ratio?category=linear&symbol='+c+'USDT&period=5min&limit=2',
-      x=>pulseRatio(x,c,now),70000]),
+    ['tickers','source_separated_ticker',null,()=>pulseTickerBySource(),0],
+    ...PUBLIC_PULSE_COINS.map(c=>['ratio_'+c,'source_separated_user_ratio',
+      null,()=>pulseRatioBySource(c,now),0]),
     ...PUBLIC_PULSE_COINS.map(c=>['taker_'+c,'source_separated_taker_volume',
       null,()=>pulseTakerByAllowedSource(c,now,env),0]),
     ['sentiment','alternative_me_fng','https://api.alternative.me/fng/?limit=1',
       x=>pulseSentiment(x,now),50000]
   ];
-  const results=await Promise.allSettled(jobs.map(async j=>j[0].startsWith('taker_')?j[3]():j[3](await pulseJson(j[2],j[4]))));
+  const results=await Promise.allSettled(jobs.map(async j=>j[0]==='tickers'||j[0].startsWith('ratio_')||j[0].startsWith('taker_')?j[3]():j[3](await pulseJson(j[2],j[4]))));
   for(let i=0;i<jobs.length;i++){
     const [key,source]=jobs[i],r=results[i];
     if(r.status==='rejected'){
       const error=String(r.reason?.message||'provider_error').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);
       reports[key]={ok:false,error};continue;
     }
-    const resolvedSource=key.startsWith('taker_')?r.value.source:source;
-    const data=key.startsWith('taker_')?r.value.data:r.value;
+    const direct=key==='tickers'||key.startsWith('ratio_')||key.startsWith('taker_');
+    const resolvedSource=direct?r.value.source:source;
+    const data=direct?r.value.data:r.value;
     const sampled_unix=key==='sentiment'||key.startsWith('ratio_')||key.startsWith('taker_')
       ?data.sample_unix:now;
     const record={source:resolvedSource,sampled_unix,data};
@@ -188,7 +267,7 @@ async function collectPublicPulse(env){
     else if(key.startsWith('ratio_'))(feeds.ratios??={})[key.slice(6)]=record;
     else if(key.startsWith('taker_'))(feeds.takers??={})[key.slice(6)]=record;
     updated++;reports[key]={ok:true,sampled_unix,source:resolvedSource,
-      ...(key.startsWith('taker_')?{fallback_reason:r.value.fallback_reason}: {})};
+      ...(direct&&r.value.fallback_reason?{fallback_reason:r.value.fallback_reason}:{})};
   }
   const summary={ok:updated>0,enabled:true,checked_unix:now,updated,total:jobs.length,
     sources:reports,scope:'source-attributed public market observations',order_execution:false};
@@ -2008,11 +2087,16 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       short=termValidNumber(ratio?.data?.short_pct,0,100),
       buy=termValidNumber(taker?.data?.buy_pct,0,100),
       sell=termValidNumber(taker?.data?.sell_pct,0,100);
-    const tickerOk=qAt!==null&&ticker?.source==='bybit_v5_linear'&&
-      price!==null&&change!==null;
-    const ratioOk=rAt!==null&&ratio?.symbol===symbol&&
-      ratio?.source==='bybit_v5_account_ratio'&&long!==null&&short!==null&&
-      Math.abs(long+short-100)<=2;
+    const tickerBase=qAt!==null&&price!==null&&change!==null;
+    const bybitTickerOk=tickerBase&&ticker?.source==='bybit_v5_linear';
+    const gateTickerOk=tickerBase&&ticker?.source==='gateio_usdt_perpetual_tickers';
+    const tickerOk=bybitTickerOk||gateTickerOk;
+    const ratioBase=rAt!==null&&ratio?.symbol===symbol&&
+      long!==null&&short!==null&&Math.abs(long+short-100)<=2;
+    const bybitRatioOk=ratioBase&&ratio?.source==='bybit_v5_account_ratio';
+    const gateRatioOk=ratioBase&&ratio?.source==='gateio_futures_contract_stats_user_ratio'&&
+      ratio?.data?.exchange==='Gate';
+    const ratioOk=bybitRatioOk||gateRatioOk;
     const takerBaseOk=tAt!==null&&taker?.symbol===symbol&&buy!==null&&sell!==null&&
       Math.abs(buy+sell-100)<=2;
     const binanceTakerOk=takerBaseOk&&taker?.source==='binance_futures_taker_volume';
@@ -2027,10 +2111,15 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     if(sourceTimes.length){
       sections.pulse=termSection('bybit_tickers_accounts_and_optional_binance_taker',
         Math.max(...sourceTimes),900,{
-          bybit_price:tickerOk?price:null,
+          bybit_price:bybitTickerOk?price:null,
+          gate_price:gateTickerOk?price:null,
+          price_exchange:bybitTickerOk?'Bybit':gateTickerOk?'Gate':null,
           change_24h_pct:tickerOk?change:null,
-          bybit_accounts_long_pct:ratioOk?long:null,
-          bybit_accounts_short_pct:ratioOk?short:null,
+          bybit_accounts_long_pct:bybitRatioOk?long:null,
+          bybit_accounts_short_pct:bybitRatioOk?short:null,
+          gate_accounts_long_pct:gateRatioOk?long:null,
+          gate_accounts_short_pct:gateRatioOk?short:null,
+          account_ratio_exchange:bybitRatioOk?'Bybit':gateRatioOk?'Gate':null,
           binance_taker_buy_pct:binanceTakerOk?buy:null,
           binance_taker_sell_pct:binanceTakerOk?sell:null,
           gate_taker_buy_pct:gateTakerOk?buy:null,
@@ -2044,8 +2133,10 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           taker_exchange:binanceTakerOk?'Binance':gateTakerOk?'Gate':null,
           taker_source_window_minutes:takerOk?
             termValidNumber(taker?.data?.period_minutes,5,60):null,
-          source_status:{bybit_ticker:tickerOk?'available':'unavailable',
-            bybit_account_ratio:ratioOk?'available':'unavailable',
+          source_status:{bybit_ticker:bybitTickerOk?'available':'unavailable',
+            gate_ticker:gateTickerOk?'available':'unavailable',
+            bybit_account_ratio:bybitRatioOk?'available':'unavailable',
+            gate_account_ratio:gateRatioOk?'available':'unavailable',
             binance_taker:binanceTakerOk?'available':'unavailable',
             gate_taker:gateTakerOk?'available':'unavailable'},
           fng_value:(usableTime(pulse.feeds?.sentiment?.sampled_unix,86400)!==null&&

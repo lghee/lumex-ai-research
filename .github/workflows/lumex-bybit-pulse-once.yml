@@ -1,0 +1,71 @@
+name: LUMEX Bybit 403 source-aware public pulse recovery (once)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'production/deploy/bybit-gate-pulse-20261115.trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: lumex-cloudflare-worker-production
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      LUMEX_WORKER_URL: ${{ vars.LUMEX_WORKER_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Ensure Cloudflare authentication
+        shell: bash
+        run: |
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            echo "::error::Cloudflare deployment secrets are not configured."
+            exit 1
+          fi
+      - name: Install
+        working-directory: production
+        run: npm install --no-audit --no-fund
+      - name: Full Worker regression tests
+        working-directory: production
+        run: npm run check:js
+      - name: Deploy only the existing Worker name, preserve existing secrets and R2
+        working-directory: production
+        run: npx wrangler deploy --config wrangler.jsonc
+      - name: Verify live Worker version
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          URL="${URL%/}"
+          for endpoint in health market-hub/v1/health; do
+            curl --fail --silent --show-error --max-time 30 "$URL/$endpoint" |
+              python3 -c 'import json,sys; x=json.load(sys.stdin); assert x.get("ok") is True; assert x.get("version")=="1.3.1"; print("PASS 1.3.1 deployed")'
+          done
+      - name: Show public ticker and account ratio status (prior 5-minute slot may remain)
+        shell: bash
+        run: |
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          URL="${URL%/}"
+          curl --fail --silent --show-error --max-time 30 "$URL/market-hub/v1/public-pulse-health" |
+            python3 -c '
+          import json,sys
+          x=json.load(sys.stdin)
+          assert x.get("ok") is True
+          r=x.get("report") or {}
+          print("Pulse enabled", x.get("enabled"), "updated", r.get("updated"), "/", r.get("total"))
+          for c in ("BTC","ETH","SOL","XRP"):
+              print("ratio",c,(r.get("sources") or {}).get("ratio_"+c))
+          print("tickers",(r.get("sources") or {}).get("tickers"))
+          print("NOTE: wait one scheduled 5-minute collection for source fallback health.")
+          '
+      - name: Never remove WordPress/auto-trading Cron as part of hotfix
+        if: failure()
+        run: echo "::warning::Retain all WordPress/cPanel market collectors and private trading/payment Cron until actual downstream parity is verified."
