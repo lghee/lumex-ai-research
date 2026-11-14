@@ -78,8 +78,9 @@ assert.equal(health.sources.taker_BTC.fallback_reason,'binance_disabled_due_to_h
 const before=storage.get('market-hub/public-pulse/v1/latest.json');
 gateOutage=true;
 await scheduled();
-assert.equal(storage.get('market-hub/public-pulse/v1/latest.json')===before,false,'other providers still update');
+assert.equal(storage.get('market-hub/public-pulse/v1/latest.json'),before,'same-second healthy provider response can be byte-identical');
 const health2=JSON.parse(storage.get('market-hub/public-pulse/v1/health.json'));
+assert.equal(health2.updated,6,'only non-Gate providers succeeded after Gate outage');
 assert.equal(health2.sources.taker_BTC.ok,false);
 assert(health2.sources.taker_BTC.error.startsWith('gate_taker_unavailable'));
 const retained=JSON.parse(storage.get('market-hub/public-pulse/v1/latest.json'));
