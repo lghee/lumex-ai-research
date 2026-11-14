@@ -12,7 +12,7 @@ for(const cron of ['* * * * *','*/5 * * * *']){
 }
 assert.deepEqual(queue.map(x=>x.kind),['market_tick','orchestrate']);
 assert.equal((await handler.fetch(new Request('https://worker/health'),env)).status,200);
-assert.equal((await (await handler.fetch(new Request('https://worker/health'),env)).json()).version,'1.2.7');
+assert.equal((await (await handler.fetch(new Request('https://worker/health'),env)).json()).version,'1.2.8');
 const request=new Request('https://worker/enqueue',{method:'POST',headers:{authorization:'Bearer '+'z'.repeat(40)},body:JSON.stringify({kind:'market_tick'})});
 assert.equal((await handler.fetch(request,env)).status,400,'market_tick must not be external action');
 
