@@ -2096,7 +2096,8 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       sections.observations=termSection('bybit_liquidation_vs_binance_sampled_plus_btc_watchlist',
         Math.floor(generatedMs/1000),300,{
           bybit_liquidation_events_24h:liq,
-          binance_liquidation_snapshots_24h:bin,
+          binance_liquidation_snapshots_24h:env.AUTO_BINANCE_LIQUIDATIONS==='true'?bin:null,
+          binance_stream_enabled:env.AUTO_BINANCE_LIQUIDATIONS==='true',
           btc_watchlist_address_flows_24h:symbol==='BTCUSDT'?whale:null,
           observations_partial:true,source_gap_possible:true,
           last_observed_ms:last,
