@@ -50,7 +50,7 @@ const noauth=await worker.fetch(new Request('https://worker/market-hub/v1/watchl
 assert.equal(noauth.status,401);
 const auth=await worker.fetch(new Request('https://worker/market-hub/v1/watchlist-parity',{headers:{authorization:'Bearer '+token}}),env);
 const parity=await auth.json();
-assert.equal(parity.ok,true);assert.equal(parity.address_count,1);
+assert.equal(parity.ok,true);assert.equal(parity.enabled,true);assert.equal(parity.address_count,1);
 assert.equal(parity.address_set_sha256,digest);
 assert.equal(parity.safe_to_disable_wordpress_crons,false);
 assert(!JSON.stringify(parity).includes(watched),'watchlist address must never leak');
@@ -58,6 +58,10 @@ await store.set('state',{watchlist_source:'legacy_seed_fallback',
   watchlist_count:1,watchlist_sha256:digest,watchlist_checked_ms:now,last_success_ms:now});
 const fallback=await (await worker.fetch(new Request('https://worker/market-hub/v1/watchlist-parity',{headers:{authorization:'Bearer '+token}}),env)).json();
 assert.equal(fallback.ok,false);
+env.AUTO_WHALE_FETCH='false';
+const disabled=await (await worker.fetch(new Request('https://worker/market-hub/v1/watchlist-parity',{headers:{authorization:'Bearer '+token}}),env)).json();
+assert.equal(disabled.ok,false);assert.equal(disabled.enabled,false);
+env.AUTO_WHALE_FETCH='true';
 const live=new MarketLiveCollector({storage:{getAlarm:async()=>0},waitUntil:()=>{}},{AUTO_LIVE_STREAM:'true',AUTO_BINANCE_LIQUIDATIONS:'false'});
 assert.equal(live.safeStatus().feeds.binance.enabled,false);
 const enabled=new MarketLiveCollector({storage:{getAlarm:async()=>0},waitUntil:()=>{}},{AUTO_LIVE_STREAM:'true',AUTO_BINANCE_LIQUIDATIONS:'true'});
