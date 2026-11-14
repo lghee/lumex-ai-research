@@ -113,6 +113,8 @@ async function collectPublicPulse(env){
     const data=r.value,sampled_unix=key==='sentiment'||key.startsWith('ratio_')||key.startsWith('taker_')
       ?data.sample_unix:now;
     const record={source,sampled_unix,data};
+    if(key.startsWith('ratio_')||key.startsWith('taker_'))
+      record.symbol=key.slice(key.indexOf('_')+1)+'USDT';
     if(key==='ratio_BTC')feeds.ratio=record;
     if(key==='tickers'||key==='sentiment')feeds[key]=record;
     else if(key.startsWith('ratio_'))(feeds.ratios??={})[key.slice(6)]=record;
