@@ -39,6 +39,19 @@ jobs:
                               detail["report_keys"]=list(rep)[:12]
                               for k in ["updated","updated_at","updated_unix","last_success","last_success_ms","last_run_unix","ok","enabled","successes","failures"]:
                                   if k in rep and isinstance(rep[k],(bool,int,float,str,type(None))):detail["report_"+k]=rep[k]
+                      # Flatten bounded, public, non-identifying health metrics only.
+                      def safe_metrics(obj,depth=0):
+                          if not isinstance(obj,dict) or depth>2:return {}
+                          allow={"enabled","healthy","ok","status","last_success_ms","last_received_ms","checked_unix","collected_ms","updated_unix","updated_at","updated","total","passed","failed","success","errors","age_seconds","sample_verified","verified_records","hours_with_object","last_observed_hour_unix","connected","count","received","last_tick_ms","last_tick","stale","is_live"}
+                          out={}
+                          for k,v in obj.items():
+                              if len(out)>=28:break
+                              if k in allow and (v is None or isinstance(v,(bool,int,float)) or (isinstance(v,str) and len(v)<45)):
+                                  out[k]=v
+                              if isinstance(v,dict) and depth<2 and k in ("report","sources","feeds","kinds","capture","health","bybit","gate","binance","whales","collectors"):
+                                  out[k]=safe_metrics(v,depth+1)
+                          return out
+                      detail["metrics"]=safe_metrics(data)
                       print("PUBLIC_STATUS",path,json.dumps(detail,ensure_ascii=False),flush=True)
                       if path in ["/health","/market-hub/v1/health"] and data.get("ok") is True and data.get("version")=="1.3.1":matches+=1
               except urllib.error.HTTPError as e:
