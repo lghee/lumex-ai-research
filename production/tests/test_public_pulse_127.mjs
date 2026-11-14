@@ -56,6 +56,8 @@ assert.deepEqual(Object.keys(latest.feeds.ratios).sort(),['BTC','ETH','SOL','XRP
 assert.deepEqual(Object.keys(latest.feeds.takers).sort(),['BTC','ETH','SOL','XRP']);
 assert.equal(latest.feeds.ratio.data.long_pct,58);
 assert.equal(latest.feeds.takers.SOL.data.buy_pct,60);
+assert.equal(latest.feeds.takers.SOL.symbol,'SOLUSDT');
+assert.equal(latest.feeds.ratios.ETH.symbol,'ETHUSDT');
 assert.equal(latest.feeds.sentiment.source,'alternative_me_fng');
 assert(writes.some(k=>k.startsWith('market-hub/public-pulse/v1/observations/')));
 assert(!writes.some(k=>k.includes('orders')||k.includes('live-ledger')));
