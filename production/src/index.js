@@ -1853,31 +1853,52 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
   }
   if(pulse?.schema==='lumex_public_pulse_v1'&&pulse?.order_execution===false){
     const q=pulse.feeds?.tickers?.data?.quotes?.[symbol],
+      ticker=pulse.feeds?.tickers,
       ratio=pulse.feeds?.ratios?.[coin],taker=pulse.feeds?.takers?.[coin];
+    const checkedAt=Math.floor(now/1000);
+    const usableTime=(v,maxAge)=>{
+      const t=termValidNumber(v,1500000000,4102444800);
+      return t!==null&&Number.isSafeInteger(t)&&t<=checkedAt+120&&checkedAt-t<=maxAge?t:null;
+    };
+    const qAt=usableTime(ticker?.sampled_unix,1800),
+      rAt=usableTime(ratio?.sampled_unix,2400),
+      tAt=usableTime(taker?.sampled_unix,2400);
     const price=termValidNumber(q?.last,0.00000001,1e10),
       change=termValidNumber(q?.change_24h_pct,-100,10000),
       long=termValidNumber(ratio?.data?.long_pct,0,100),
-      buy=termValidNumber(taker?.data?.buy_pct,0,100);
-    const timestamps=[pulse.feeds?.tickers?.sampled_unix,ratio?.sampled_unix,taker?.sampled_unix]
-      .map(x=>termValidNumber(x,1500000000,4102444800));
-    if(price!==null&&change!==null&&long!==null&&buy!==null&&
-       timestamps.every(x=>x!==null)&&ratio?.symbol===symbol&&taker?.symbol===symbol&&
-       ratio?.source==='bybit_v5_account_ratio'&&
-       taker?.source==='binance_futures_taker_volume'){
-      sections.pulse=termSection('bybit_ticker_and_account_ratio_plus_binance_taker',
-        Math.min(...timestamps),2400,{
-          bybit_price:price,change_24h_pct:change,bybit_accounts_long_pct:long,
-          bybit_accounts_short_pct:termValidNumber(ratio.data.short_pct,0,100),
-          binance_taker_buy_pct:buy,
-          binance_taker_sell_pct:termValidNumber(taker.data.sell_pct,0,100),
-          fng_value:(Number.isSafeInteger(Number(pulse.feeds?.sentiment?.sampled_unix))&&
-            Math.floor(now/1000)-Number(pulse.feeds.sentiment.sampled_unix)>=-120&&
-            Math.floor(now/1000)-Number(pulse.feeds.sentiment.sampled_unix)<86400)
+      short=termValidNumber(ratio?.data?.short_pct,0,100),
+      buy=termValidNumber(taker?.data?.buy_pct,0,100),
+      sell=termValidNumber(taker?.data?.sell_pct,0,100);
+    const tickerOk=qAt!==null&&ticker?.source==='bybit_v5_linear'&&
+      price!==null&&change!==null;
+    const ratioOk=rAt!==null&&ratio?.symbol===symbol&&
+      ratio?.source==='bybit_v5_account_ratio'&&long!==null&&short!==null&&
+      Math.abs(long+short-100)<=2;
+    const takerOk=tAt!==null&&taker?.symbol===symbol&&
+      taker?.source==='binance_futures_taker_volume'&&buy!==null&&sell!==null&&
+      Math.abs(buy+sell-100)<=2;
+    const sourceTimes=[tickerOk?qAt:null,ratioOk?rAt:null,takerOk?tAt:null]
+      .filter(x=>x!==null);
+    if(sourceTimes.length){
+      sections.pulse=termSection('bybit_tickers_accounts_and_optional_binance_taker',
+        Math.max(...sourceTimes),900,{
+          bybit_price:tickerOk?price:null,
+          change_24h_pct:tickerOk?change:null,
+          bybit_accounts_long_pct:ratioOk?long:null,
+          bybit_accounts_short_pct:ratioOk?short:null,
+          binance_taker_buy_pct:takerOk?buy:null,
+          binance_taker_sell_pct:takerOk?sell:null,
+          source_status:{bybit_ticker:tickerOk?'available':'unavailable',
+            bybit_account_ratio:ratioOk?'available':'unavailable',
+            binance_taker:takerOk?'available':'unavailable'},
+          fng_value:(usableTime(pulse.feeds?.sentiment?.sampled_unix,86400)!==null&&
+            pulse.feeds?.sentiment?.source==='alternative_me_fng')
             ?termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100):null,
           sentiment_source:'alternative_me_daily'
         },now);
     }
   }
+
   if(oi?.schema==='lumex_oi_mirror_v1'&&oi?.pair===symbol&&oi?.days===7&&
      ['Bybit','Binance'].includes(oi.exchange)&&oi?.order_execution===false&&
      oi?.source_scope==='single_exchange_public_oi_only'&&
