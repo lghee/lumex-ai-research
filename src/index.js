@@ -234,8 +234,10 @@ async function collectOiMirror(env){
     const latestKey=OI_PREFIX+'latest/'+id+'.json';
     const time=new Date(now).toISOString();
     const archive=OI_PREFIX+'observations/'+coin+'/'+days+'/'+time.slice(0,10).replaceAll('-','')+'/'+time.slice(11,16).replace(':','')+'.json';
-    if(!await env.MARKET_DATA.head(archive))await env.MARKET_DATA.put(archive,body,{httpMetadata:{contentType:'application/json'}});
-    await env.MARKET_DATA.put(latestKey,body,{httpMetadata:{contentType:'application/json'}});
+    const archived=await env.MARKET_DATA.get(archive);
+    const safeBody=archived?await archived.text():body;
+    if(!archived)await env.MARKET_DATA.put(archive,body,{httpMetadata:{contentType:'application/json'}});
+    await env.MARKET_DATA.put(latestKey,safeBody,{httpMetadata:{contentType:'application/json'}});
     report={...report,ok:true,source:market.exchange,observations:market.history.length,age_seconds:0};
   }catch(e){report.error=String(e?.message||'oi_collect_failed').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,72)}
   const statusKey=OI_PREFIX+'health.json';
@@ -1857,6 +1859,24 @@ async function hubRoute(request,env){
     try{const obj=await env.MARKET_DATA?.get(OI_PREFIX+'health.json');
       return hubReply({ok:true,enabled:env.AUTO_OI_MIRROR_FETCH==='true',report:obj?await obj.json():null});
     }catch{return hubReply({ok:false,error:'oi_health_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/oi-preflight'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    const slots=[];
+    try{
+      for(const coin of OI_COINS)for(const days of OI_INTERVALS){
+        const object=await env.MARKET_DATA?.get(OI_PREFIX+'latest/'+coin+'-'+days+'.json');
+        if(!object){slots.push({coin,days,ok:false,error:'missing'});continue;}
+        const record=await object.json();
+        if(record?.schema!=='lumex_oi_mirror_v1'||record?.coin!==coin||
+          record?.days!==days||record?.order_execution!==false){
+          slots.push({coin,days,ok:false,error:'invalid_schema'});continue;
+        }
+        slots.push({coin,days,ok:true,record});
+      }
+      return hubReply({ok:slots.every(x=>x.ok),schema:'lumex_oi_preflight_v1',
+        slots,order_execution:false});
+    }catch{return hubReply({ok:false,error:'oi_preflight_unavailable'},503)}
   }
   if(path==='/market-hub/v1/oi-history'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
