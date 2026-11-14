@@ -1747,7 +1747,7 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
     ok:true,symbol,window:windowName,scope:'observed_public_events_only',
     coverage:'partial_public_sources;no_backfill_for_disconnects',
     market_total_estimate:false,source_filters:['bybit_liquidations','binance_sampled_1s_liquidation_snapshots','gate_sampled_futures','btc_confirmed_watchlist'],
-    captures:{liquidations:{events:liquidation,source:'bybit_public_allLiquidation_only',price_type:'bankruptcy_price',order_side_not_position_side:true},
+    captures:{liquidations:{events:liquidation,source:'bybit_public_allLiquidation',price_type:'bankruptcy_price',order_side_not_position_side:true},
       binance_liquidation_snapshots:{events:binanceLiquidation,sampling:'latest_per_symbol_per_1000ms',
         source:'binance_usdm_forceOrder',price_type:'avg_execution_price',scope:'incomplete_snapshots_not_market_total'},
       trades:{events:trade,sampling:'per_symbol_1s_max',source:'gateio_futures'},
