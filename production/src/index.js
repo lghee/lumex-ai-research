@@ -272,6 +272,50 @@ async function oiFromBinance(coin,days,now){
   return {exchange:'Binance',price,oi_usd:rows.at(-1).oi_usd,history:rows,
     sources:['Binance public premiumIndex','Binance public openInterestHist','Binance public klines']};
 }
+
+/** Source-isolated Gate public futures contract stats OI rescue.
+ * A Gate fallback is stored and labelled as Gate, never misrepresented as
+ * Bybit/Binance OI, never combined with position/trading/order streams.
+ */
+export function oiGateHistory(rows,coin,days,now=Date.now()){
+  const span=days===30?14400000:3600000,required=days===30?90:48;
+  if(!OI_COINS.includes(coin)||![7,30].includes(days)||!Array.isArray(rows)||
+     rows.length<required||rows.length>500)throw Error('gate_oi_shape');
+  const unique=new Map();
+  for(const x of rows){
+    const t=oiFinite(x?.time,1500000000,4102444800),
+      p=oiFinite(x?.mark_price,0.00000001,1e10),
+      notional=oiFinite(x?.open_interest_usd,0.00000001,1e18);
+    if(t===null||!Number.isSafeInteger(t)||p===null||notional===null)continue;
+    const ts=t*1000+span; // closed interval, gate time is interval open
+    if(t*1000%span!==0||ts>now-5000||ts<now-38*86400000)continue;
+    unique.set(ts,{ts,price:Number(p.toFixed(8)),oi_usd:Number(notional.toFixed(4))});
+  }
+  const history=[...unique.values()].sort((a,b)=>a.ts-b.ts).slice(-200);
+  if(history.length<required||history.at(-1).ts-history[0].ts<
+      (days===30?25:5)*86400000||
+     now-history.at(-1).ts>(days===30?9:3)*3600000)
+    throw Error('gate_oi_insufficient_or_stale');
+  if(history.some((x,i)=>i>0&&x.ts-history[i-1].ts!==span))
+    throw Error('gate_oi_missing_interval');
+  const last=history.at(-1);
+  return {exchange:'Gate',price:last.price,oi_usd:last.oi_usd,history,
+    sources:['Gate futures contract_stats public '+(days===30?'4h':'1h')],
+    fallback_kind:'complete_single_exchange_oi_usd_series'};
+}
+async function oiFromGate(coin,days,now){
+  const interval=days===30?'4h':'1h',
+    path='/api/v4/futures/usdt/contract_stats?contract='+coin+'_USDT&interval='+interval+'&limit=200';
+  let error='';
+  for(const host of ['https://api.gateio.ws','https://fx-api.gateio.ws']){
+    try{
+      const data=await oiGet(host+path);
+      return oiGateHistory(data,coin,days,now);
+    }catch(e){error=String(e?.message||e).replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,56)}
+  }
+  throw Error('gate_oi_provider_unavailable_'+error);
+}
+
 async function collectOiMirror(env){
   if(env.AUTO_OI_MIRROR_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
   const now=Date.now(),slot=Math.floor(now/300000)%8;
@@ -280,11 +324,20 @@ async function collectOiMirror(env){
     ok:false,source:null,error:null,order_execution:false};
   try{
     let market;
+    const previousErrors=[];
     try{market=await oiFromBybit(coin,days,now)}
-    catch{market=await oiFromBinance(coin,days,now)}
+    catch(e){
+      previousErrors.push('bybit_'+String(e?.message||'unavailable').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,40));
+      try{market=await oiFromBinance(coin,days,now)}
+      catch(e2){
+        previousErrors.push('binance_'+String(e2?.message||'unavailable').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,40));
+        market=await oiFromGate(coin,days,now);
+      }
+    }
     const record={ok:true,schema:'lumex_oi_mirror_v1',coin,pair:coin+'USDT',days,
       exchange:market.exchange,price:market.price,oi_usd:market.oi_usd,
       history:market.history,sources:market.sources,
+      fallback_used:market.exchange==='Gate',
       sample_unix:Math.floor(now/1000),source_scope:'single_exchange_public_oi_only',
       order_execution:false,merged_with_gate:false};
     const body=JSON.stringify(record);
@@ -297,7 +350,8 @@ async function collectOiMirror(env){
     if(!archived)await env.MARKET_DATA.put(archive,body,{httpMetadata:{contentType:'application/json'}});
     await env.MARKET_DATA.put(latestKey,safeBody,{httpMetadata:{contentType:'application/json'}});
     const persisted=JSON.parse(safeBody);
-    report={...report,ok:true,source:persisted.exchange,observations:persisted.history.length,age_seconds:0};
+    report={...report,ok:true,source:persisted.exchange,observations:persisted.history.length,
+      fallback_used:persisted.exchange==='Gate',age_seconds:0};
   }catch(e){report.error=String(e?.message||'oi_collect_failed').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,72)}
   const statusKey=OI_PREFIX+'health.json';
   let status={ok:true,enabled:true,scope:'independent_bybit_or_binance_public_oi',
@@ -1970,7 +2024,7 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
   }
 
   if(oi?.schema==='lumex_oi_mirror_v1'&&oi?.pair===symbol&&oi?.days===7&&
-     ['Bybit','Binance'].includes(oi.exchange)&&oi?.order_execution===false&&
+     ['Bybit','Binance','Gate'].includes(oi.exchange)&&oi?.order_execution===false&&
      oi?.source_scope==='single_exchange_public_oi_only'&&
      Array.isArray(oi.history)&&oi.history.length>=48){
     const latest=termValidNumber(oi.oi_usd,0,1e18),mark=termValidNumber(oi.price,0,1e10);
@@ -2059,7 +2113,7 @@ export async function marketOpsReadiness(env,now=Date.now()){
     const at=Number(x?.sample_unix);
     return {coin,days,ok:x?.schema==='lumex_oi_mirror_v1'&&
       x?.pair===coin+'USDT'&&x?.days===days&&
-      ['Bybit','Binance'].includes(x?.exchange)&&Array.isArray(x?.history)&&
+      ['Bybit','Binance','Gate'].includes(x?.exchange)&&Array.isArray(x?.history)&&
       x.history.length>=40&&Number.isSafeInteger(at)&&at<=seconds+120&&seconds-at<7200};
   })));
   const [pulse,derivative,live,whale,oi,candles,continuity]=await Promise.all([
