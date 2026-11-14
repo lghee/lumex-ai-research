@@ -1,10 +1,146 @@
-/** LUMEX AI Research 1.2.6 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.2.7 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
  */
 import { DurableObject } from 'cloudflare:workers';
 
+
+
+/** Market Hub 1.2.7: independent, public-only Bybit/Binance/FNG collector.
+ * R2 is authoritative in CF mode. Historical MySQL and live liquidation ledgers
+ * are not read or combined here; no user/order/credentials are accessed.
+ */
+const PUBLIC_PULSE_KEY='market-hub/public-pulse/v1/latest.json';
+const PUBLIC_PULSE_HEALTH='market-hub/public-pulse/v1/health.json';
+const PUBLIC_PULSE_COINS=['BTC','ETH','SOL','XRP'];
+const pulseN=(v,min,max)=>{const n=Number(v);return v!==null&&v!==undefined&&v!==''&&
+  typeof v!=='boolean'&&Number.isFinite(n)&&n>=min&&n<=max?n:null;};
+async function pulseJson(url,max=2500000){
+  const resp=await fetch(url,{headers:{accept:'application/json'},
+    signal:AbortSignal.timeout(8000)});
+  if(!resp.ok)throw Error('provider_http_'+resp.status);
+  const txt=await resp.text();if(txt.length<2||txt.length>max)throw Error('provider_size');
+  try{return JSON.parse(txt)}catch{throw Error('provider_json')}
+}
+function pulseTickers(src){
+  if(src?.retCode!==0||src?.result?.category!=='linear'||!Array.isArray(src?.result?.list))throw Error('ticker_schema');
+  const quotes={};for(const q of src.result.list){
+    const sym=q?.symbol;
+    if(!PUBLIC_PULSE_COINS.some(c=>sym===c+'USDT'))continue;
+    const price=pulseN(q.lastPrice,0.00000001,1e9),change=pulseN(q.price24hPcnt,-1,100);
+    if(price===null||change===null)continue;
+    const f=pulseN(q.fundingRate,-1,1);
+    quotes[sym]={last:price,change_24h_pct:Number((change*100).toFixed(3)),
+      funding_rate_pct:f===null?null:Number((f*100).toFixed(6)),
+      open_interest_usdt:pulseN(q.openInterestValue,0,1e15),
+      turnover_24h_usdt:pulseN(q.turnover24h,0,1e15)};
+  }
+  if(PUBLIC_PULSE_COINS.some(c=>!quotes[c+'USDT']))throw Error('ticker_missing');
+  let up=0,down=0,flat=0;
+  for(const q of Object.values(quotes))q.change_24h_pct>0?up++:q.change_24h_pct<0?down++:flat++;
+  return {quotes,breadth:{up,down,flat,total:4},scope:'지원 중인 최대 4개 USDT 선형계약, 24h 등락률 기준'};
+}
+function pulseRatio(src,coin,now){
+  if(src?.retCode!==0||!Array.isArray(src?.result?.list))throw Error('ratio_schema');
+  for(const row of src.result.list){
+    if(row?.symbol!==coin+'USDT')continue;
+    const long=pulseN(row.buyRatio,0,1),short=pulseN(row.sellRatio,0,1),
+      ts=pulseN(row.timestamp,1500000000000,4102444800000);
+    if(long===null||short===null||ts===null||Math.abs(long+short-1)>.035)continue;
+    const sampled=Math.floor(ts/1000);
+    if(sampled<now-2400||sampled>now+120)continue;
+    return {long_pct:Number((long*100).toFixed(2)),short_pct:Number((short*100).toFixed(2)),
+      sample_unix:sampled,collected_unix:now,
+      scope:coin+'USDT Bybit · 5분 계정 보유자 비율'};
+  }
+  throw Error('ratio_unavailable');
+}
+function pulseTaker(src,coin,now){
+  if(!Array.isArray(src))throw Error('taker_schema');
+  const recent=new Map();
+  for(const row of src){
+    const ts=pulseN(row?.timestamp,1500000000000,4102444800000),
+      buy=pulseN(row?.buyVol,0,1e18),sell=pulseN(row?.sellVol,0,1e18);
+    if(ts===null||buy===null||sell===null)continue;
+    const t=Math.floor(ts/1000);
+    if(t<=now-2400||t+300>now-10||t>now)continue;
+    recent.set(t,{buy,sell});
+  }
+  const bars=[...recent].sort((a,b)=>a[0]-b[0]).slice(-6);
+  if(bars.length<3||bars.at(-1)[0]+300<now-1000)throw Error('taker_unavailable');
+  const buy=bars.reduce((n,x)=>n+x[1].buy,0),sell=bars.reduce((n,x)=>n+x[1].sell,0);
+  if(!(buy+sell>0))throw Error('taker_zero');
+  const pct=Number((100*buy/(buy+sell)).toFixed(2));
+  return {status:'ok',buy_pct:pct,sell_pct:Number((100-pct).toFixed(2)),
+    sample_unix:bars.at(-1)[0]+300,period_minutes:5,bars:bars.length,collected_unix:now};
+}
+function pulseSentiment(src,now){
+  const x=src?.data?.[0],v=pulseN(x?.value,0,100),ts=pulseN(x?.timestamp,1500000000,4102444800);
+  if(!x||v===null||ts===null||!Number.isInteger(v)||!Number.isInteger(ts)||
+    ts<now-90000||ts>now+120||
+    !['Extreme Fear','Fear','Neutral','Greed','Extreme Greed'].includes(x.value_classification))throw Error('fng_invalid');
+  return {value:v,classification:x.value_classification,sample_unix:ts,
+    attribution:'Alternative.me',source_url:'https://alternative.me/crypto/fear-and-greed-index/'};
+}
+async function collectPublicPulse(env){
+  if(env.AUTO_PUBLIC_PULSE_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
+  const now=Math.floor(Date.now()/1000);
+  let previous=null;
+  try{const x=await env.MARKET_DATA.get(PUBLIC_PULSE_KEY);previous=x?await x.json():null}catch{}
+  const feeds=previous?.schema==='lumex_public_pulse_v1'&&previous?.feeds&&typeof previous.feeds==='object'
+    ?previous.feeds:{};
+  const reports={};let updated=0;
+  const jobs=[
+    ['tickers','bybit_v5_linear','https://api.bybit.com/v5/market/tickers?category=linear',
+       x=>pulseTickers(x),2500000],
+    ...PUBLIC_PULSE_COINS.map(c=>['ratio_'+c,'bybit_v5_account_ratio',
+      'https://api.bybit.com/v5/market/account-ratio?category=linear&symbol='+c+'USDT&period=5min&limit=2',
+      x=>pulseRatio(x,c,now),70000]),
+    ...PUBLIC_PULSE_COINS.map(c=>['taker_'+c,'binance_futures_taker_volume',
+      'https://fapi.binance.com/futures/data/takerlongshortRatio?symbol='+c+'USDT&period=5m&limit=9',
+      x=>pulseTaker(x,c,now),10000]),
+    ['sentiment','alternative_me_fng','https://api.alternative.me/fng/?limit=1',
+      x=>pulseSentiment(x,now),50000]
+  ];
+  const results=await Promise.allSettled(jobs.map(async j=>j[3](await pulseJson(j[2],j[4]))));
+  for(let i=0;i<jobs.length;i++){
+    const [key,source]=jobs[i],r=results[i];
+    if(r.status==='rejected'){
+      const error=String(r.reason?.message||'provider_error').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);
+      reports[key]={ok:false,error};continue;
+    }
+    const data=r.value,sampled_unix=key==='sentiment'||key.startsWith('ratio_')||key.startsWith('taker_')
+      ?data.sample_unix:now;
+    const record={source,sampled_unix,data};
+    if(key.startsWith('ratio_')||key.startsWith('taker_'))
+      record.symbol=key.slice(key.indexOf('_')+1)+'USDT';
+    if(key==='ratio_BTC')feeds.ratio=record;
+    if(key==='tickers'||key==='sentiment')feeds[key]=record;
+    else if(key.startsWith('ratio_'))(feeds.ratios??={})[key.slice(6)]=record;
+    else if(key.startsWith('taker_'))(feeds.takers??={})[key.slice(6)]=record;
+    updated++;reports[key]={ok:true,sampled_unix};
+  }
+  const summary={ok:updated>0,enabled:true,checked_unix:now,updated,total:jobs.length,
+    sources:reports,scope:'source-attributed public market observations',order_execution:false};
+  if(updated>0){
+    const payload={ok:true,schema:'lumex_public_pulse_v1',order_execution:false,
+      collected_at_unix:now,feeds};
+    const doc=JSON.stringify(payload);
+    if(doc.length>100000)throw Error('pulse_snapshot_size');
+    const utc=new Date(now*1000);
+    const y=utc.toISOString().slice(0,10).replace(/-/g,'');
+    const period=utc.toISOString().slice(11,16).replace(':','');
+    // Once-per-5m archive: gaps stay gaps and do not become inferred zero readings.
+    const archive='market-hub/public-pulse/v1/observations/'+y+'/'+period+'.json';
+    if(!(await env.MARKET_DATA.head(archive)))
+      await env.MARKET_DATA.put(archive,doc,{httpMetadata:{contentType:'application/json'}});
+    await env.MARKET_DATA.put(PUBLIC_PULSE_KEY,doc,{httpMetadata:{contentType:'application/json'}});
+  }
+  await env.MARKET_DATA.put(PUBLIC_PULSE_HEALTH,JSON.stringify(summary),
+    {httpMetadata:{contentType:'application/json'}});
+  return summary;
+}
 
 const PORT = 8080;
 const SYMBOLS = Object.freeze(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']);
@@ -1607,8 +1743,22 @@ export class MarketEventHub extends DurableObject{
 }
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
+  if(path==='/market-hub/v1/public-pulse-health'&&method==='GET'){
+    try{const x=await env.MARKET_DATA?.get(PUBLIC_PULSE_HEALTH);
+      return hubReply({ok:true,enabled:env.AUTO_PUBLIC_PULSE_FETCH==='true',report:x?await x.json():null,order_execution:false});}
+    catch{return hubReply({ok:false,error:'public_pulse_health_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/public-pulse'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{const x=await env.MARKET_DATA?.get(PUBLIC_PULSE_KEY);
+      if(!x)return hubReply({ok:false,error:'snapshot_unavailable'},503);
+      const data=await x.json();
+      if(data?.schema!=='lumex_public_pulse_v1'||data?.order_execution!==false)return hubReply({ok:false,error:'invalid_snapshot'},503);
+      return hubReply(data);
+    }catch{return hubReply({ok:false,error:'pulse_read_unavailable'},503)}
+  }
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.2.6',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill'],
+    version:'1.2.7',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/legacy-backfill-health'&&method==='GET'){
@@ -1746,10 +1896,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.2.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.2.6',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.2.7',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
@@ -1765,6 +1915,8 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
+      ctx.waitUntil(collectPublicPulse(env).catch(()=>console.error('public_pulse_collect_failed')));
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
     if(controller.cron==='*/5 * * * *'&&env.AUTO_DERIVATIVES_FETCH==='true')
       ctx.waitUntil(collectGateDerivatives(env).catch(()=>console.error('derivatives_collect_failed')));
