@@ -1870,7 +1870,10 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           bybit_accounts_short_pct:termValidNumber(ratio.data.short_pct,0,100),
           binance_taker_buy_pct:buy,
           binance_taker_sell_pct:termValidNumber(taker.data.sell_pct,0,100),
-          fng_value:termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100),
+          fng_value:(Number.isSafeInteger(Number(pulse.feeds?.sentiment?.sampled_unix))&&
+            Math.floor(now/1000)-Number(pulse.feeds.sentiment.sampled_unix)>=-120&&
+            Math.floor(now/1000)-Number(pulse.feeds.sentiment.sampled_unix)<86400)
+            ?termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100):null,
           sentiment_source:'alternative_me_daily'
         },now);
     }
@@ -1908,10 +1911,12 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       whale=termValidNumber(events.captures?.btc_address_net?.events,0,10000000);
     const last=termValidNumber(events.last_observed_ms,1500000000000,4102444800000);
     if(liq!==null&&bin!==null&&whale!==null){
-      // No observed events is not a disconnection and has no fabricated 'as_of' clock.
-      const observedAt=last===null?Math.floor(now/1000):Math.floor(last/1000);
+      // Section freshness is the rollup generation time, not last trade/event
+      // time. Quiet market periods must never be labelled a stream outage.
+      const generatedMs=Date.parse(String(events.generated_at||''));
+      if(Number.isSafeInteger(generatedMs)&&generatedMs>0)
       sections.observations=termSection('bybit_liquidation_vs_binance_sampled_plus_btc_watchlist',
-        observedAt,3600,{
+        Math.floor(generatedMs/1000),300,{
           bybit_liquidation_events_24h:liq,
           binance_liquidation_snapshots_24h:bin,
           btc_watchlist_address_flows_24h:symbol==='BTCUSDT'?whale:null,
