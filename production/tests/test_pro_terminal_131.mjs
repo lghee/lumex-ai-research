@@ -53,7 +53,7 @@ const env={LUMEX_AI_LAB_WORKER_TOKEN:token, MARKET_DATA:{
       rollup:{up_to_date:true,pending_hot_events:0},
       captures:{liquidations:{events:3},binance_liquidation_snapshots:{events:7},
         btc_address_net:{events:2}},
-      last_observed_ms:now-25000
+      last_observed_ms:now-25000,generated_at:new Date(now).toISOString()
     }))}}}}
 };
 let res=await worker.fetch(new Request('https://worker/market-hub/v1/terminal?symbol='+symbol),env);
