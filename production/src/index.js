@@ -2087,11 +2087,16 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
       short=termValidNumber(ratio?.data?.short_pct,0,100),
       buy=termValidNumber(taker?.data?.buy_pct,0,100),
       sell=termValidNumber(taker?.data?.sell_pct,0,100);
-    const tickerOk=qAt!==null&&ticker?.source==='bybit_v5_linear'&&
-      price!==null&&change!==null;
-    const ratioOk=rAt!==null&&ratio?.symbol===symbol&&
-      ratio?.source==='bybit_v5_account_ratio'&&long!==null&&short!==null&&
-      Math.abs(long+short-100)<=2;
+    const tickerBase=qAt!==null&&price!==null&&change!==null;
+    const bybitTickerOk=tickerBase&&ticker?.source==='bybit_v5_linear';
+    const gateTickerOk=tickerBase&&ticker?.source==='gateio_usdt_perpetual_tickers';
+    const tickerOk=bybitTickerOk||gateTickerOk;
+    const ratioBase=rAt!==null&&ratio?.symbol===symbol&&
+      long!==null&&short!==null&&Math.abs(long+short-100)<=2;
+    const bybitRatioOk=ratioBase&&ratio?.source==='bybit_v5_account_ratio';
+    const gateRatioOk=ratioBase&&ratio?.source==='gateio_futures_contract_stats_user_ratio'&&
+      ratio?.data?.exchange==='Gate';
+    const ratioOk=bybitRatioOk||gateRatioOk;
     const takerBaseOk=tAt!==null&&taker?.symbol===symbol&&buy!==null&&sell!==null&&
       Math.abs(buy+sell-100)<=2;
     const binanceTakerOk=takerBaseOk&&taker?.source==='binance_futures_taker_volume';
@@ -2106,10 +2111,15 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     if(sourceTimes.length){
       sections.pulse=termSection('bybit_tickers_accounts_and_optional_binance_taker',
         Math.max(...sourceTimes),900,{
-          bybit_price:tickerOk?price:null,
+          bybit_price:bybitTickerOk?price:null,
+          gate_price:gateTickerOk?price:null,
+          price_exchange:bybitTickerOk?'Bybit':gateTickerOk?'Gate':null,
           change_24h_pct:tickerOk?change:null,
-          bybit_accounts_long_pct:ratioOk?long:null,
-          bybit_accounts_short_pct:ratioOk?short:null,
+          bybit_accounts_long_pct:bybitRatioOk?long:null,
+          bybit_accounts_short_pct:bybitRatioOk?short:null,
+          gate_accounts_long_pct:gateRatioOk?long:null,
+          gate_accounts_short_pct:gateRatioOk?short:null,
+          account_ratio_exchange:bybitRatioOk?'Bybit':gateRatioOk?'Gate':null,
           binance_taker_buy_pct:binanceTakerOk?buy:null,
           binance_taker_sell_pct:binanceTakerOk?sell:null,
           gate_taker_buy_pct:gateTakerOk?buy:null,
@@ -2123,8 +2133,10 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           taker_exchange:binanceTakerOk?'Binance':gateTakerOk?'Gate':null,
           taker_source_window_minutes:takerOk?
             termValidNumber(taker?.data?.period_minutes,5,60):null,
-          source_status:{bybit_ticker:tickerOk?'available':'unavailable',
-            bybit_account_ratio:ratioOk?'available':'unavailable',
+          source_status:{bybit_ticker:bybitTickerOk?'available':'unavailable',
+            gate_ticker:gateTickerOk?'available':'unavailable',
+            bybit_account_ratio:bybitRatioOk?'available':'unavailable',
+            gate_account_ratio:gateRatioOk?'available':'unavailable',
             binance_taker:binanceTakerOk?'available':'unavailable',
             gate_taker:gateTakerOk?'available':'unavailable'},
           fng_value:(usableTime(pulse.feeds?.sentiment?.sampled_unix,86400)!==null&&
