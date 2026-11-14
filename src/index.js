@@ -1723,8 +1723,13 @@ function continuityHourPath(t){
 async function continuityR2Proof(env,now=Date.now()){
   const kinds={};
   if(!env.MARKET_DATA||typeof env.MARKET_DATA.list!=='function'){
+    const kinds=Object.fromEntries(CONTINUITY_KINDS.map(kind=>[kind,{
+      archive_kind:kind,lookback_hours:CONTINUITY_HOURS,hours_with_object:0,
+      sample_verified:false,verified_records:0,last_observed_hour_unix:null,
+      reason:'r2_binding_missing'
+    }]));
     return {ok:false,reason:'r2_binding_missing',lookback_hours:CONTINUITY_HOURS,
-      list_checks:0,list_errors:0,kinds:{}};
+      list_checks:0,list_errors:0,kinds,completeness_proven:false};
   }
   const entries=CONTINUITY_KINDS.flatMap(kind=>Array.from({length:CONTINUITY_HOURS},(_,i)=>
     ({kind,hour_ms:continuityTimeBucket(now,i),
