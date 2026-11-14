@@ -1,4 +1,4 @@
-/** LUMEX AI Research 1.3.0 — autonomous research-only scheduler.
+/** LUMEX AI Research 1.3.1 — autonomous research-only scheduler.
  * The ONLY external side effects are public market reads, private R2 writes,
  * bounded OpenAI hypothesis calls and authenticated research-lab REST calls.
  * No exchange credentials, trading endpoints or customer portfolios.
@@ -7,7 +7,7 @@ import { DurableObject } from 'cloudflare:workers';
 
 
 
-/** Market Hub 1.3.0: independent, public-only Bybit/Binance/FNG collector.
+/** Market Hub 1.3.1: independent, public-only Bybit/Binance/FNG collector.
  * R2 is authoritative in CF mode. Historical MySQL and live liquidation ledgers
  * are not read or combined here; no user/order/credentials are accessed.
  */
@@ -143,7 +143,7 @@ async function collectPublicPulse(env){
 }
 
 
-/** 1.3.0: source-matched Bybit/Binance public OI and price history.
+/** 1.3.1: source-matched Bybit/Binance public OI and price history.
  * Never substitute Gate OI for Bybit/Binance, never merge two exchanges.
  */
 const OI_PREFIX='market-hub/oi/v1/';
@@ -1707,7 +1707,7 @@ export class MarketLiveCollector extends DurableObject{
 // separate offline import and are not silently counted.
 
 /**
- * Cloudflare Market Hub v1.3.0: read-only bounded 6-hour continuity evidence.
+ * Cloudflare Market Hub v1.3.1: read-only bounded 6-hour continuity evidence.
  * Source observations are sparse and never represent 100% exchange coverage.
  * R2 proofs read actual JSONL objects, rather than inferring successful writes
  * from list metadata, WordPress counters or the 14-day hot index.
@@ -1795,9 +1795,142 @@ function continuityFeedSummary(name,feed,enabled){
 }
 
 
-/** LUMEX Market Hub 1.3.0: one bounded operational readiness assessment.
+/** LUMEX Market Hub 1.3.1: one bounded operational readiness assessment.
  * Completeness is never inferred from silent market periods. No side effects.
  */
+
+/** 1.3.1: single PRO ticket read combining existing public-only Cloudflare data.
+ * Does not manufacture risk scores, cross-provider totals or customer trade signals.
+ */
+const TERMINAL_SYMBOLS=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
+const termUnavailable=(source,reason='not_collected')=>({
+  status:'unavailable',source,as_of_unix:null,reason,values:null
+});
+function termValidNumber(x,min=-Infinity,max=Infinity){
+  if(x===null||x===undefined||x===''||typeof x==='boolean')return null;
+  const n=Number(x);return Number.isFinite(n)&&n>=min&&n<=max?n:null;
+}
+function termSection(source,asof,ttl,values,now){
+  const stamp=termValidNumber(asof,1500000000,4102444800);
+  if(stamp===null||!Number.isSafeInteger(stamp)||!values||typeof values!=='object')
+    return termUnavailable(source,'invalid_or_missing_source');
+  const age=Math.floor(now/1000)-stamp;
+  if(age<-120)return termUnavailable(source,'future_timestamp');
+  return {status:age>ttl?'delayed':'fresh',source,as_of_unix:stamp,
+    age_seconds:Math.max(0,age),values};
+}
+export async function marketTerminalSummary(env,symbol,now=Date.now()){
+  if(!TERMINAL_SYMBOLS.includes(symbol))throw Error('terminal_invalid_symbol');
+  const coin=symbol.slice(0,-4);
+  const tasks=await Promise.allSettled([
+    hubGetCandles(env,symbol,15,80),
+    opsReadR2(env,PUBLIC_PULSE_KEY),
+    opsReadR2(env,OI_PREFIX+'latest/'+coin+'-7.json'),
+    readDerivatives(env,symbol),
+    env.MARKET_EVENT_HUB?
+      env.MARKET_EVENT_HUB.getByName(symbol)
+        .fetch('https://hub/insights?symbol='+symbol+'&window=24h')
+        .then(async r=>r.ok?await r.json():null):Promise.resolve(null)
+  ]);
+  const result=tasks.map(x=>x.status==='fulfilled'?x.value:null);
+  const [candles,pulse,oi,gate,events]=result;
+  const sections={
+    candles:termUnavailable('cloudflare_r2_closed_candles'),
+    pulse:termUnavailable('bybit_tickers_ratio_binance_taker_alternative_me'),
+    oi:termUnavailable('bybit_or_binance_source_matched_oi'),
+    gate:termUnavailable('gateio_usdt_perpetual'),
+    observations:termUnavailable('source_separated_public_observed_events')
+  };
+  if(candles?.symbol===symbol&&candles?.data_quality==='verified'&&
+     candles?.feed_mode==='cloudflare_r2_verified_closed_candles'&&
+     candles?.orders_enabled===false&&Array.isArray(candles.candles)&&candles.candles.length>=51){
+    const last=candles.candles.at(-1),trend=hubTrend(candles.candles),
+      asof=Math.floor((last.t+900000)/1000);
+    if(termValidNumber(last.c,0.00000001,1e10)!==null&&trend.status==='ok')
+      sections.candles=termSection('cloudflare_r2_closed_15m',asof,45*60,
+        {last_closed_price:last.c,trend:trend.trend,atr_pct:trend.atr_pct,
+          last_closed_open_ms:last.t,interval_minutes:15},now);
+  }
+  if(pulse?.schema==='lumex_public_pulse_v1'&&pulse?.order_execution===false){
+    const q=pulse.feeds?.tickers?.data?.quotes?.[symbol],
+      ratio=pulse.feeds?.ratios?.[coin],taker=pulse.feeds?.takers?.[coin];
+    const price=termValidNumber(q?.last,0.00000001,1e10),
+      change=termValidNumber(q?.change_24h_pct,-100,10000),
+      long=termValidNumber(ratio?.data?.long_pct,0,100),
+      buy=termValidNumber(taker?.data?.buy_pct,0,100);
+    const timestamps=[pulse.feeds?.tickers?.sampled_unix,ratio?.sampled_unix,taker?.sampled_unix]
+      .map(x=>termValidNumber(x,1500000000,4102444800));
+    if(price!==null&&change!==null&&long!==null&&buy!==null&&
+       timestamps.every(x=>x!==null)&&ratio?.symbol===symbol&&taker?.symbol===symbol&&
+       ratio?.source==='bybit_v5_account_ratio'&&
+       taker?.source==='binance_futures_taker_volume'){
+      sections.pulse=termSection('bybit_ticker_and_account_ratio_plus_binance_taker',
+        Math.min(...timestamps),2400,{
+          bybit_price:price,change_24h_pct:change,bybit_accounts_long_pct:long,
+          bybit_accounts_short_pct:termValidNumber(ratio.data.short_pct,0,100),
+          binance_taker_buy_pct:buy,
+          binance_taker_sell_pct:termValidNumber(taker.data.sell_pct,0,100),
+          fng_value:termValidNumber(pulse.feeds?.sentiment?.data?.value,0,100),
+          sentiment_source:'alternative_me_daily'
+        },now);
+    }
+  }
+  if(oi?.schema==='lumex_oi_mirror_v1'&&oi?.pair===symbol&&oi?.days===7&&
+     ['Bybit','Binance'].includes(oi.exchange)&&oi?.order_execution===false&&
+     oi?.source_scope==='single_exchange_public_oi_only'&&
+     Array.isArray(oi.history)&&oi.history.length>=48){
+    const latest=termValidNumber(oi.oi_usd,0,1e18),mark=termValidNumber(oi.price,0,1e10);
+    if(latest!==null&&mark!==null)
+      sections.oi=termSection(oi.exchange.toLowerCase()+'_single_exchange_open_interest',
+        oi.sample_unix,7200,{notional_usdt:latest,mark_price:mark,
+          exchange:oi.exchange,history_points:oi.history.length},now);
+  }
+  if(gate?.schema==='lumex_derivatives_v1'&&gate?.symbol===symbol&&
+     gate?.scope==='single_public_exchange_not_global'&&
+     gate?.order_execution===false){
+    const snapshot=termValidNumber(gate.snapshot_ms,1500000000000,4102444800000);
+    const mark=termValidNumber(gate.price?.mark_price,0.00000001,1e10);
+    if(mark!==null&&snapshot!==null)
+      sections.gate=termSection('gateio_perpetual_derivatives',
+        Math.floor(snapshot/1000),900,{
+          mark_price:mark,
+          funding_rate_pct:termValidNumber(gate.price?.funding_rate_pct,-100,100),
+          open_interest_usdt:termValidNumber(gate.open_interest?.open_interest_usdt,0,1e18),
+          oi_change_1h_pct:termValidNumber(gate.oi_change_1h_pct,-1000,1000),
+          next_funding_ms:termValidNumber(gate.funding_schedule?.next_funding_ms,0,4102444800000)
+        },now);
+  }
+  if(events?.ok===true&&events.symbol===symbol&&events.window==='24h'&&
+     events.scope==='observed_public_events_only'&&events.market_total_estimate===false&&
+     events.rollup?.up_to_date===true&&events.rollup?.pending_hot_events===0){
+    const liq=termValidNumber(events.captures?.liquidations?.events,0,10000000),
+      bin=termValidNumber(events.captures?.binance_liquidation_snapshots?.events,0,10000000),
+      whale=termValidNumber(events.captures?.btc_address_net?.events,0,10000000);
+    const last=termValidNumber(events.last_observed_ms,1500000000000,4102444800000);
+    if(liq!==null&&bin!==null&&whale!==null){
+      // No observed events is not a disconnection and has no fabricated 'as_of' clock.
+      const observedAt=last===null?Math.floor(now/1000):Math.floor(last/1000);
+      sections.observations=termSection('bybit_liquidation_vs_binance_sampled_plus_btc_watchlist',
+        observedAt,3600,{
+          bybit_liquidation_events_24h:liq,
+          binance_liquidation_snapshots_24h:bin,
+          btc_watchlist_address_flows_24h:symbol==='BTCUSDT'?whale:null,
+          observations_partial:true,source_gap_possible:true,
+          last_observed_ms:last,
+          zero_means_no_observation:true
+        },now);
+    }
+  }
+  const available=Object.values(sections).filter(x=>x.status!=='unavailable').length;
+  const fresh=Object.values(sections).filter(x=>x.status==='fresh').length;
+  return {ok:true,schema:'lumex_pro_market_terminal_v1',symbol,
+    generated_unix:Math.floor(now/1000),
+    scope:'source_separated_public_market_observations_only',
+    trading_enabled:false,orders_enabled:false,market_total_estimate:false,
+    sections,quality:{available,fresh,total:5,all_sources_fresh:available===5&&fresh===5},
+    disclaimer:'Bybit 계정비율, Binance 체결비율, Gate OI, 거래소별 청산 표본은 각기 다른 모집단입니다. 값의 합산이나 자동매매 신호 생성에 사용하지 않습니다.'};
+}
+
 const OPS_PREFIX='market-hub/ops/v1/';
 const OPS_COINS=['BTC','ETH','SOL','XRP'];
 function opsVerdict(id,enabled,healthy,ageSeconds=null,detail=''){
@@ -1890,7 +2023,7 @@ export async function marketOpsReadiness(env,now=Date.now()){
   ];
   const enabledChecks=check.filter(x=>x.enabled);
   const good=enabledChecks.filter(x=>x.healthy).length;
-  return {ok:true,schema:'lumex_market_ops_readiness_v1',worker_version:'1.3.0',
+  return {ok:true,schema:'lumex_market_ops_readiness_v1',worker_version:'1.3.1',
     checked_unix:seconds,scope:'public_market_only',trading_enabled:false,
     checks:check,passed:good,enabled_checks:enabledChecks.length,
     missing_or_unready:check.filter(x=>!x.enabled||!x.healthy).map(x=>x.id),
@@ -2310,6 +2443,19 @@ async function hubRoute(request,env){
     try{return hubReply(await marketOpsHistory(env));}
     catch{return hubReply({ok:false,error:'quality_history_unavailable'},503);}
   }
+  if(path==='/market-hub/v1/terminal'&&method==='GET'){
+    const symbol=hubName(u.searchParams.get('symbol'));
+    if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
+    if(!hubAuthorized(request,env)&&!(await hubCheckTicket(request,env,symbol)))
+      return hubReply({ok:false,error:'unauthorized'},401);
+    try{
+      const result=await marketTerminalSummary(env,symbol);
+      return new Response(JSON.stringify(result),{status:200,headers:{
+        'content-type':'application/json; charset=utf-8','cache-control':'no-store',
+        'access-control-allow-origin':'https://lumexbot.com','vary':'Origin',
+        'x-content-type-options':'nosniff'}});
+    }catch{return hubReply({ok:false,error:'terminal_unavailable'},503);}
+  }
   if(path==='/market-hub/v1/continuity-audit'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     const now=Date.now(),symbols=['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'];
@@ -2428,7 +2574,7 @@ async function hubRoute(request,env){
       items});
   }
   if(path==='/market-hub/v1/health'&&method==='GET')return hubReply({ok:true,service:'LUMEX Market Hub',
-    version:'1.3.0',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit','binance_usdm_forceOrder_sampled','btc_watchlist_set_parity','bounded_r2_readback_continuity_audit','market_ops_release_readiness','r2_daily_quality_history'],
+    version:'1.3.1',capabilities:['verified_candles','radar','observed_event_journal','authorized_websocket','public_stream_observer','btc_confirmed_address_flows','provisional_gate_futures_candles','observed_hourly_insights','funding_open_interest_snapshots','legacy_wp_public_market_backfill','public_source_attributed_pulse_r2','source_matched_oi_r2_mirror','read_only_source_coverage_audit','bounded_identity_match_audit','binance_usdm_forceOrder_sampled','btc_watchlist_set_parity','bounded_r2_readback_continuity_audit','market_ops_release_readiness','r2_daily_quality_history','pro_source_separated_terminal'],
     market_data_scope:'verified_closed_candles',live_exchange_ingestor:LIVE_ENABLED(env)?'enabled_check_live_health':'disabled',
     trade_capture:'sampled',liquidation_capture:'public_bybit_only',order_execution:false});
   if(path==='/market-hub/v1/legacy-backfill-health'&&method==='GET'){
@@ -2566,10 +2712,10 @@ export default{
   async fetch(request,env){
     const url=new URL(request.url);
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
-    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.3.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
+    if(url.pathname==='/health' && request.method==='GET')return respond({ok:true,service:'LUMEX Research',version:'1.3.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false});
     if(!auth(request,env.LUMEX_ADMIN_API_TOKEN))return respond({ok:false,error:'unauthorized'},401);
     if(url.pathname==='/status' && request.method==='GET'){
-      const out={ok:true,version:'1.3.0',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
+      const out={ok:true,version:'1.3.1',auto_research:enabled(env,'AUTO_RESEARCH'),auto_fetch:enabled(env,'AUTO_FETCH'),auto_ai:enabled(env,'AUTO_AI'),trading_enabled:false,has_wordpress_token:Boolean(env.LUMEX_AI_LAB_WORKER_TOKEN),has_container_key:Boolean(env.LUMEX_CONTAINER_KEY),has_openai_key:Boolean(env.OPENAI_API_KEY)};
       try{const state=await readScheduler(env);out.scheduler={lastRun:state.lastRun,lastSummary:state.lastSummary,aiLastResult:state.aiLastResult||null,aiLastExecution:state.aiLastExecution||null,errors:state.errors};out.markets=(await getMarketInventory(env,Date.now())).map(({symbol,interval_min,head,ready})=>({symbol,interval_min,ready,lastCandleMs:Number(head?.customMetadata?.lastCandleMs||0),source:head?.customMetadata?.source||null,quality:head?.customMetadata?.quality||'unverified',schema:head?.customMetadata?.schema||'unknown',rows:Number(head?.customMetadata?.rows||0),bytes:Number(head?.size||0)}));}catch(e){out.storage_error=safeError(e);}
       try{out.core=await callWP(env,'status');}catch(e){out.core_error=safeError(e);}
       return respond(out);
