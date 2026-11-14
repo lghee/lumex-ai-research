@@ -238,7 +238,8 @@ async function collectOiMirror(env){
     const safeBody=archived?await archived.text():body;
     if(!archived)await env.MARKET_DATA.put(archive,body,{httpMetadata:{contentType:'application/json'}});
     await env.MARKET_DATA.put(latestKey,safeBody,{httpMetadata:{contentType:'application/json'}});
-    report={...report,ok:true,source:market.exchange,observations:market.history.length,age_seconds:0};
+    const persisted=JSON.parse(safeBody);
+    report={...report,ok:true,source:persisted.exchange,observations:persisted.history.length,age_seconds:0};
   }catch(e){report.error=String(e?.message||'oi_collect_failed').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,72)}
   const statusKey=OI_PREFIX+'health.json';
   let status={ok:true,enabled:true,scope:'independent_bybit_or_binance_public_oi',
