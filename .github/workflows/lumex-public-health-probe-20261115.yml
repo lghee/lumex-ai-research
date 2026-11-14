@@ -15,7 +15,7 @@ jobs:
           python3 - <<'PY'
           import urllib.request, urllib.error, json, os
           base="https://lumex-ai-research2.kpiplus195.workers.dev"
-          paths=["/health","/market-hub/v1/health","/market-hub/v1/public-pulse-health","/market-hub/v1/derivatives-health","/market-hub/v1/oi-health","/market-hub/v1/live-health","/market-hub/v1/whale-health"]
+          paths=["/health","/market-hub/v1/health","/market-hub/v1/public-pulse-health","/market-hub/v1/derivatives-health","/market-hub/v1/oi-health","/market-hub/v1/live-health","/market-hub/v1/whale-health","/market-hub/v1/archive-health","/market-hub/v1/legacy-backfill-health"]
           rows=["| Endpoint | HTTP | ok | version |","|---|---|---|---|"]
           matches=0
           for path in paths:
@@ -27,6 +27,19 @@ jobs:
                   if isinstance(data,dict):
                       ok=str(data.get("ok","missing"))
                       version=str(data.get("version","missing"))[:40]
+                      # Field-level public status only. Never dump addresses, tokens or R2 keys.
+                      detail={}
+                      if "enabled" in data:detail["enabled"]=data["enabled"]
+                      for k in ["reason","updated_at","updated","last_success_utc","last_success_ms","last_collected_ms","connected","age_seconds"]:
+                          if k in data and isinstance(data[k],(bool,int,float,str,type(None))):detail[k]=data[k]
+                      if "report" in data:
+                          rep=data["report"]
+                          detail["report_present"]=isinstance(rep,dict)
+                          if isinstance(rep,dict):
+                              detail["report_keys"]=list(rep)[:12]
+                              for k in ["updated","updated_at","updated_unix","last_success","last_success_ms","last_run_unix","ok","enabled","successes","failures"]:
+                                  if k in rep and isinstance(rep[k],(bool,int,float,str,type(None))):detail["report_"+k]=rep[k]
+                      print("PUBLIC_STATUS",path,json.dumps(detail,ensure_ascii=False),flush=True)
                       if path in ["/health","/market-hub/v1/health"] and data.get("ok") is True and data.get("version")=="1.3.1":matches+=1
               except urllib.error.HTTPError as e:
                   code=str(e.code)
