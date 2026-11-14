@@ -37,7 +37,7 @@ const store=new Map([
    open_interest:{open_interest_usdt:8000000},oi_change_1h_pct:1.4
  }]
 ]);
-const env={LUMEX_AI_LAB_WORKER_TOKEN:token, MARKET_DATA:{
+const env={LUMEX_AI_LAB_WORKER_TOKEN:token, AUTO_BINANCE_LIQUIDATIONS:'true', MARKET_DATA:{
  async head(k){reads++;if(k!=='market/'+symbol+'_15.csv')return null;
   return {size:raw.length,customMetadata:{schema:'ohlcv_v2',quality:'verified',
    lastCandleMs:String(latest),rows:String(bars.length),source:'gateio_usdt_perpetual'}};},
@@ -84,10 +84,15 @@ pulseSnapshot.feeds.takers.BTC=takerSnapshot;
 const gateTaker={...takerSnapshot,source:'gateio_futures_contract_stats_taker_size',
   data:{status:'ok',buy_pct:57.4,sell_pct:42.6,exchange:'Gate',
     scope:'gateio_futures_contract_stats_closed_5m',volume_unit:'gate_futures_contracts',
-    period_minutes:15,bars:3,sample_unix:Math.floor(now/1000)-200}};
+    period_minutes:15,bars:3,sample_unix:Math.floor(now/1000)-200,
+    liquidation:{long_usdt:12345,short_usdt:54321,period_minutes:15,exchange:'Gate',
+      source:'gateio_public_contract_stats_liquidation_aggregates'}}};
 pulseSnapshot.feeds.takers.BTC=gateTaker;
 const sourced=await marketTerminalSummary(env,symbol,now);
 assert.equal(sourced.sections.pulse.values.gate_taker_buy_pct,57.4);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_long_usdt,12345);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_short_usdt,54321);
+assert.equal(sourced.sections.pulse.values.gate_liquidation_window_minutes,15);
 assert.equal(sourced.sections.pulse.values.binance_taker_buy_pct,null,
   'Never label Gate figures as Binance');
 assert.equal(sourced.sections.pulse.values.taker_exchange,'Gate');
@@ -99,6 +104,9 @@ assert.equal(body.sections.oi.values.exchange,'Bybit');
 assert.equal(body.sections.gate.values.funding_rate_pct,0.01);
 assert.equal(body.sections.observations.values.bybit_liquidation_events_24h,3);
 assert.equal(body.sections.observations.values.binance_liquidation_snapshots_24h,7);
+const disabled=await marketTerminalSummary({...env,AUTO_BINANCE_LIQUIDATIONS:'false'},symbol,now);
+assert.equal(disabled.sections.observations.values.binance_liquidation_snapshots_24h,null,
+  'disabled Binance must never be shown as 0 snapshots');
 assert.equal(body.orders_enabled,false);assert.equal(body.market_total_estimate,false);
 assert(!JSON.stringify(body).includes('positions'));
 const exp=Math.floor(Date.now()/1000)+70;

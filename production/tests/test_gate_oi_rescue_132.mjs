@@ -78,5 +78,17 @@ if(record.days===7){
  assert.equal(term.sections.oi.source,'gate_single_exchange_open_interest');
 }
 assert(writes.some(k=>k.startsWith('market-hub/oi/v1/observations/')));
+const nowSeconds=Math.floor(Date.now()/1000);
+const oldStatus=JSON.parse(store.get('market-hub/oi/v1/health.json'));
+oldStatus.sources['ETH-30']={ok:false,checked_unix:nowSeconds-1500,error:'oi_provider_http_403'};
+store.set('market-hub/oi/v1/health.json',JSON.stringify(oldStatus));
+const more=[];await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil:p=>more.push(p)});
+await Promise.all(more);
+const retried=JSON.parse(store.get('market-hub/oi/v1/health.json'));
+assert.equal(retried.sources['ETH-30'].ok,true,'prioritize previously failed ETH 30d before rotation');
+assert.equal(retried.sources['ETH-30'].source,'Gate');
+assert.equal(retried.sources['ETH-30'].priority_recovery,true);
+assert.equal(JSON.parse(store.get('market-hub/oi/v1/latest/ETH-30.json')).exchange,'Gate');
+assert.equal(retried.sources['ETH-30'].fallback_used,true);
 globalThis.fetch=original;
 console.log('PASS Gate OI 7d/30d 200 closed source-labeled samples, Bybit+Binance 403 fallback, R2 archive, Bearer protection and no provider mixing');
