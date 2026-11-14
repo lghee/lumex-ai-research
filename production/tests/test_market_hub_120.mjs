@@ -15,7 +15,7 @@ const env={MARKET_DATA:mock,LUMEX_AI_LAB_WORKER_TOKEN:'a'.repeat(64),
  LUMEX_CONTAINER_KEY:'b'.repeat(64),AUTO_FETCH:'false',AUTO_RESEARCH:'false',AUTO_AI:'false'};
 const req=(url,secret)=>new Request('https://worker'+url,{headers:secret?{authorization:'Bearer '+secret}:{}});
 const health=await (await handler.fetch(req('/market-hub/v1/health'),env)).json();
-assert.equal(health.version,'1.2.10');assert.equal(health.live_exchange_ingestor,'disabled');
+assert.equal(health.version,'1.2.11');assert.equal(health.live_exchange_ingestor,'disabled');
 assert.equal((await handler.fetch(req('/market-hub/v1/candles?symbol=BTCUSDT&interval=15'),env)).status,401);
 const result=await handler.fetch(req('/market-hub/v1/candles?symbol=BTCUSDT&interval=15',env.LUMEX_AI_LAB_WORKER_TOKEN),env);
 assert.equal(result.status,200);const candles=await result.json();
