@@ -89,7 +89,9 @@ export function pulseGateTaker(rows,coin,now){
       sell=pulseN(r?.short_taker_size,0,1e18);
     if(ts===null||buy===null||sell===null||!Number.isSafeInteger(ts)||
        ts%300!==0||ts+300>now-5||ts+300<now-1800||buy+sell<=0)continue;
-    unique.set(ts,{buy,sell});
+    unique.set(ts,{buy,sell,
+      long_liq_usdt:pulseN(r?.long_liq_usd_new??r?.long_liq_usd,0,1e18),
+      short_liq_usdt:pulseN(r?.short_liq_usd_new??r?.short_liq_usd,0,1e18)});
   }
   const bars=[...unique].sort((a,b)=>a[0]-b[0]).slice(-3);
   if(!bars.length||now-(bars.at(-1)[0]+300)>900)throw Error('gate_taker_stale');
@@ -97,11 +99,20 @@ export function pulseGateTaker(rows,coin,now){
     sell=bars.reduce((n,b)=>n+b[1].sell,0);
   if(!Number.isFinite(buy+sell)||buy+sell<=0)throw Error('gate_taker_invalid');
   const buyPct=Number((100*buy/(buy+sell)).toFixed(2));
+  const liqReady=bars.every(([,b])=>b.long_liq_usdt!==null&&b.short_liq_usdt!==null);
+  const liquidation=liqReady?{
+    long_usdt:Number(bars.reduce((t,[,b])=>t+b.long_liq_usdt,0).toFixed(4)),
+    short_usdt:Number(bars.reduce((t,[,b])=>t+b.short_liq_usdt,0).toFixed(4)),
+    period_minutes:bars.length*5,exchange:'Gate',
+    source:'gateio_public_contract_stats_liquidation_aggregates',
+    scope:'observed_5min_contract_statistics_not_individual_liquidation_trades'
+  }:null;
   return {status:'ok',buy_pct:buyPct,sell_pct:Number((100-buyPct).toFixed(2)),
     sample_unix:bars.at(-1)[0]+300,period_minutes:bars.length*5,
     bars:bars.length,collected_unix:now,contract:coin+'_USDT',
     scope:'gateio_futures_contract_stats_closed_5m',
-    volume_unit:'gate_futures_contracts',exchange:'Gate'};
+    volume_unit:'gate_futures_contracts',exchange:'Gate',
+    liquidation};
 }
 async function pulseGateTakerFetch(coin,now){
   const path='/api/v4/futures/usdt/contract_stats?contract='+coin+'_USDT&interval=5m&limit=6';
@@ -319,8 +330,24 @@ async function oiFromGate(coin,days,now){
 async function collectOiMirror(env){
   if(env.AUTO_OI_MIRROR_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
   const now=Date.now(),slot=Math.floor(now/300000)%8;
-  const coin=OI_COINS[slot%4],days=OI_INTERVALS[Math.floor(slot/4)],id=coin+'-'+days;
-  let report={symbol:coin+'USDT',days,checked_unix:Math.floor(now/1000),
+  let coin=OI_COINS[slot%4],days=OI_INTERVALS[Math.floor(slot/4)],priorityRecovery=false;
+  // Repair previously failed slots ahead of normal rotation, at most one per
+  // 5-minute Cron. 10-minute retry cooldown prevents a blocked provider from
+  // starving healthy combinations; Gate is always kept source-separated.
+  try{
+    const health=await env.MARKET_DATA.get(OI_PREFIX+'health.json');
+    const doc=health?await health.json():null;
+    const entries=doc?.sources&&typeof doc.sources==='object'?Object.entries(doc.sources):[];
+    const failures=entries.filter(([id,item])=>
+      /^(BTC|ETH|SOL|XRP)-(7|30)$/.test(id)&&item?.ok===false&&
+      Number.isSafeInteger(item?.checked_unix)&&
+      Math.floor(now/1000)-item.checked_unix>=600)
+      .sort((a,b)=>a[1].checked_unix-b[1].checked_unix);
+    if(failures.length){const match=/^(BTC|ETH|SOL|XRP)-(7|30)$/.exec(failures[0][0]);
+      coin=match[1];days=Number(match[2]);priorityRecovery=true;}
+  }catch{}
+  const id=coin+'-'+days;
+  let report={symbol:coin+'USDT',days,priority_recovery:priorityRecovery,checked_unix:Math.floor(now/1000),
     ok:false,source:null,error:null,order_execution:false};
   try{
     let market;
@@ -2008,6 +2035,12 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
           binance_taker_sell_pct:binanceTakerOk?sell:null,
           gate_taker_buy_pct:gateTakerOk?buy:null,
           gate_taker_sell_pct:gateTakerOk?sell:null,
+          gate_liquidation_long_usdt:gateTakerOk?
+            termValidNumber(taker?.data?.liquidation?.long_usdt,0,1e18):null,
+          gate_liquidation_short_usdt:gateTakerOk?
+            termValidNumber(taker?.data?.liquidation?.short_usdt,0,1e18):null,
+          gate_liquidation_window_minutes:gateTakerOk?
+            termValidNumber(taker?.data?.liquidation?.period_minutes,5,60):null,
           taker_exchange:binanceTakerOk?'Binance':gateTakerOk?'Gate':null,
           taker_source_window_minutes:takerOk?
             termValidNumber(taker?.data?.period_minutes,5,60):null,
