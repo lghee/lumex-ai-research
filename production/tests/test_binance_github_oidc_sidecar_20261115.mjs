@@ -8,7 +8,7 @@ const raw=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
  .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}');
 const {verifyGithubBinanceOidc,normalizeGithubBinanceFrames,default:worker}=
  await import('data:text/javascript;base64,'+Buffer.from(raw).toString('base64'));
-const {publicBinanceFrame}=await import('../scripts/binance-public-sidecar.mjs');
+const {publicBinanceFrame,oidcClaimChecks}=await import('../scripts/binance-public-sidecar.mjs');
 const now=Date.now(),epoch=Math.floor(now/1000);
 const pair=await crypto.subtle.generateKey({name:'RSASSA-PKCS1-v1_5',modulusLength:2048,
  publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'},true,['sign','verify']);
@@ -27,6 +27,11 @@ async function sign(data){
  return token+'.'+b64(signature);
 }
 const token=await sign(claims);
+const verifiedChecks=oidcClaimChecks(token,claims.run_id,now);
+assert(Object.values(verifiedChecks).every(x=>x===true),'valid signed GitHub token claims must all match');
+const wrongChecks=oidcClaimChecks(await sign({...claims,workflow_ref:'wrong'}),claims.run_id,now);
+assert.equal(wrongChecks.workflow_ref,false,'workflow ref mismatch must be surfaced');
+assert.equal(oidcClaimChecks(token,'111',now).run,false,'run id mismatch must be surfaced');
 assert.equal((await verifyGithubBinanceOidc(token,now,async()=>[jwk]))?.run_id,claims.run_id);
 for(const changed of [
  {ref:'refs/heads/dev'},{repository_id:'1'},{repository_owner_id:'2'},{event_name:'pull_request'},
