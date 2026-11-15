@@ -24,6 +24,34 @@ export function publicBinanceFrame(data){
     st:1,o:{s:v.o.s,S:v.o.S,X:v.o.X,T:Number(v.o.T),
       ap:String(v.o.ap||''),z:String(v.o.z||'')}}};
 }
+/** Validate expected public/non-secret OIDC claims locally for incident diagnosis.
+ * Never log the signed JWT, its signature, or request bearer tokens. */
+export function oidcClaimChecks(token,runId,now=Date.now()){
+  const [a,b]=String(token||'').split('.');
+  let h,c;try{
+    h=JSON.parse(Buffer.from(a,'base64url').toString('utf8'));
+    c=JSON.parse(Buffer.from(b,'base64url').toString('utf8'));
+  }catch{throw Error('oidc_claim_parse_failed')}
+  const t=Math.floor(now/1000);
+  return {
+    alg:h?.alg==='RS256',
+    kid:typeof h?.kid==='string'&&h.kid.length>0,
+    issuer:c?.iss==='https://token.actions.githubusercontent.com',
+    audience:c?.aud===AUD,
+    repository:c?.repository==='lghee/lumex-ai-research',
+    repository_id:String(c?.repository_id)==='1455460180',
+    owner_id:String(c?.repository_owner_id)==='123610810',
+    subject:c?.sub==='repo:lghee/lumex-ai-research:ref:refs/heads/main',
+    ref:c?.ref==='refs/heads/main',
+    workflow_ref:c?.workflow_ref==='lghee/lumex-ai-research/.github/workflows/lumex-binance-public-sidecar.yml@refs/heads/main',
+    event:['schedule','workflow_dispatch'].includes(c?.event_name),
+    runner:c?.runner_environment==='github-hosted',
+    run:String(c?.run_id)===String(runId),
+    issued:Number.isSafeInteger(c?.iat)&&c.iat<=t+30&&t-c.iat<=480,
+    expires:Number.isSafeInteger(c?.exp)&&c.exp>t&&c.exp<=t+900,
+    not_before:c?.nbf===undefined||(Number.isSafeInteger(c.nbf)&&c.nbf<=t+30)
+  };
+}
 async function getGithubOidc(){
   const endpoint=process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const auth=process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
@@ -43,7 +71,7 @@ export async function runSidecar(){
   if(typeof WebSocket!=='function')throw Error('node22_websocket_unavailable');
   const duration=205000;
   let opened=false,closed=false,failed=false,messages=0,batches=0,accepted=0;
-  let frames=[],pumping=false,sendErrors=0,token=null;
+  let frames=[],pumping=false,sendErrors=0,token=null,fatalAuth=false;
   const started=Date.now();
   const socket=new WebSocket(WS);
   const openedPromise=new Promise((resolveOpen,rejectOpen)=>{
@@ -74,7 +102,15 @@ export async function runSidecar(){
       const response=await fetch(API,{method:'POST',
         headers:{authorization:'Bearer '+token,'content-type':'application/json'},
         body:JSON.stringify(payload),signal:AbortSignal.timeout(13000)});
-      if(!response.ok)throw Error('sidecar_ingest_http_'+response.status);
+      if(!response.ok){
+        let reason='unknown';
+        try{const data=await response.json();
+          const text=String(data?.error||'');
+          if(/^[a-z0-9_-]{1,80}$/.test(text))reason=text;
+        }catch{}
+        if(response.status===401||response.status===403)fatalAuth=true;
+        throw Error('sidecar_ingest_http_'+response.status+'_'+reason);
+      }
       const out=await response.json();
       if(out?.ok!==true||out.run_id!==runId||!Number.isSafeInteger(out.accepted)||
         out.accepted<0||out.accepted>sending.length)throw Error('sidecar_ingest_invalid_ack');
@@ -91,7 +127,12 @@ export async function runSidecar(){
   try{
     await openedPromise;
     token=await getGithubOidc();
+    const checks=oidcClaimChecks(token,runId);
+    console.log('sidecar_oidc_claim_checks',JSON.stringify(checks));
+    if(Object.values(checks).some(ok=>ok!==true))
+      throw Error('oidc_claim_mismatch_'+Object.keys(checks).filter(k=>!checks[k]).join('_').slice(0,90));
     await pump(); // authenticated connection evidence (may contain 0 frames)
+    if(fatalAuth)throw Error('sidecar_ingress_rejected_authentication');
     timer=setInterval(()=>{void pump()},20000);
     await new Promise(resolveDone=>setTimeout(resolveDone,duration));
     for(let i=0;i<5&&(frames.length>0||i===0);i++){
