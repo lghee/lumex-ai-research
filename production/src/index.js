@@ -2477,6 +2477,36 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
  */
 const GH_BINANCE_AUD='lumex-binance-public-liquidation-v1';
 const GH_BINANCE_STATUS_KEY='market-hub/diagnostics/binance-github-sidecar-v1.json';
+const GH_BINANCE_PROOF_PREFIX='market-hub/events-source-proof/binance/v1/';
+/** Persistent, source-attributed authenticated Binance raw observation backup.
+ * Mirrors validated DO-accepted events to deterministic R2 object keys and
+ * performs read-after-write byte equality before claiming persistence.
+ * This is a separate R2 source proof, not a substitute for the EventHub archive.
+ */
+export async function persistGithubBinanceSourceProof(env,events,now=Date.now()){
+  if(!Array.isArray(events)||events.length>30||!env.MARKET_DATA)return null;
+  let latestKey=null,latestMs=0,verified=0;
+  for(const ev of events){
+    if(ev?.kind!=='liquidation'||ev?.source!=='binance'||
+      !HUB_SYMBOLS.includes(ev?.symbol)||
+      typeof ev.id!=='string'||!/^binance:liq:(BTCUSDT|ETHUSDT|SOLUSDT|XRPUSDT):[a-f0-9]{32}$/.test(ev.id)||
+      !Number.isSafeInteger(ev.ts)||ev.ts>now+120000||ev.ts<now-3600000)
+      throw Error('binance_source_proof_invalid_event');
+    const hour=new Date(ev.ts).toISOString().slice(0,13).replaceAll('-','/');
+    const key=GH_BINANCE_PROOF_PREFIX+hour+'/'+ev.id.replaceAll(':','_')+'.json';
+    const document={schema:'lumex_binance_public_observation_r2_v1',source:'binance',
+      market:'binance_usdm_forceorder',event:ev,observed_only:true,
+      full_market_coverage:false,orders_enabled:false};
+    const raw=JSON.stringify(document);
+    await env.MARKET_DATA.put(key,raw,{httpMetadata:{contentType:'application/json'}});
+    const stored=await env.MARKET_DATA.get(key);
+    if(!stored||await stored.text()!==raw)throw Error('binance_r2_readback_mismatch');
+    verified++;
+    if(ev.ts>=latestMs){latestMs=ev.ts;latestKey=key;}
+  }
+  return {verified,last_key:latestKey,last_event_ms:latestMs};
+}
+
 let ghJwksCache=null;
 function ghJwtBytes(s){
   if(typeof s!=='string'||s.length<1||s.length>10000||!/^[A-Za-z0-9_-]+$/.test(s))throw Error('jwt_b64_invalid');
@@ -2568,6 +2598,13 @@ async function githubBinanceSidecarRoute(request,env){
     if(!response.ok)return hubReply({ok:false,error:'hub_ingest_failed'},503);
     const out=await response.json();accepted+=Number(out.accepted||0);invalid+=Number(out.invalid||0);
   }
+  // Persist every normalized Binance public event in a source-isolated R2
+  // backup and read back exact bytes. The main EventHub's JSONL archive stays
+  // independent and is verified by its own continuity audit.
+  let r2Proof;
+  try{r2Proof=await persistGithubBinanceSourceProof(env,acceptedRows);}
+  catch{return hubReply({ok:false,error:'binance_source_r2_persistence_failed',
+    retry_allowed:true,cron_retirement_allowed:false},503)}
   // This status records observed session attempts; only R2 JSONL readback
   // proves durable historical event capture.
   const old=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
@@ -2580,6 +2617,10 @@ async function githubBinanceSidecarRoute(request,env){
     last_accepted_ms:accepted>0?current:Number(old?.last_accepted_ms||0),
     accepted_this_request:accepted,invalid_this_request:invalid,
     total_accepted:Number(old?.total_accepted||0)+accepted,
+    r2_source_proof_verified:r2Proof.verified,
+    r2_source_proof_key:r2Proof.last_key||String(old?.r2_source_proof_key||''),
+    r2_source_proof_last_event_ms:r2Proof.last_event_ms||Number(old?.r2_source_proof_last_event_ms||0),
+    r2_source_proof_last_run_ms:r2Proof.verified?current:Number(old?.r2_source_proof_last_run_ms||0),
     coverage:'scheduled_observation_windows_only_not_continuous',
     remote_egress:true,complete_market_capture:false,
     r2_archive:'pending_hub_alarm',cron_retirement_allowed:false,
@@ -2587,6 +2628,7 @@ async function githubBinanceSidecarRoute(request,env){
   await env.MARKET_DATA.put(GH_BINANCE_STATUS_KEY,JSON.stringify(health),
     {httpMetadata:{contentType:'application/json'}});
   return hubReply({ok:true,accepted,invalid,archive:'pending_r2_flush',
+    source_r2_verified:r2Proof.verified,source_r2_readback:true,
     observed_window_only:true,run_id:claim.run_id},200);
 }
 
@@ -3841,9 +3883,36 @@ async function hubRoute(request,env){
     const status=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
     if(status?.schema!=='lumex_binance_github_public_sidecar_v1')
       return hubReply({ok:false,reason:'no_signed_github_sidecar_session',
-        capture_confirmed:false,cron_retirement_allowed:false});
-    return hubReply({...status,stale:Date.now()-status.checked_ms>900000,
-      capture_confirmed:status.last_accepted_ms>0&&Date.now()-status.last_accepted_ms<1800000,
+        capture_confirmed:false,r2_readback_verified:false,cron_retirement_allowed:false});
+    const now=Date.now();
+    const age=now-Number(status.checked_ms||0);
+    let stored=false,proofEventMs=0;
+    const key=String(status.r2_source_proof_key||'');
+    // Never read user-controlled key patterns; read exactly our own source
+    // namespace and SHA-derived event IDs from a signed ingress.
+    if(/^market-hub\/events-source-proof\/binance\/v1\/\d{4}\/\d{2}\/\d{2}\/\d{2}\/binance_liq_(BTCUSDT|ETHUSDT|SOLUSDT|XRPUSDT)_[a-f0-9]{32}\.json$/.test(key)){
+      try{
+        const object=await env.MARKET_DATA.get(key);
+        if(object&&object.size>0&&object.size<5000){
+          const j=await object.json();
+          if(j?.schema==='lumex_binance_public_observation_r2_v1'&&
+            j?.source==='binance'&&j?.event?.source==='binance'&&
+            j?.event?.kind==='liquidation'&&
+            Number.isSafeInteger(j.event.ts)&&j.event.ts<=now+120000&&
+            j.event.ts>=now-366*86400000&&
+            key.endsWith(j.event.id.replaceAll(':','_')+'.json')){
+            stored=true;proofEventMs=j.event.ts;
+          }
+        }
+      }catch{}
+    }
+    return hubReply({...status,stale:age>900000,
+      source_session_stale:age>900000,
+      scheduled_session_proven:false,
+      // GitHub schedule is best effort; workflow_dispatch is not proof.
+      capture_confirmed:status.last_accepted_ms>0&&now-status.last_accepted_ms<1800000,
+      r2_readback_verified:stored,r2_last_observed_ms:proofEventMs||null,
+      source_sample_coverage:'discontinuous_observed_windows_only',
       cron_retirement_allowed:false});
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
