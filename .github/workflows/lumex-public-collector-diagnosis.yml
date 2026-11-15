@@ -15,13 +15,15 @@ jobs:
           BASE: https://lumex-ai-research2.kpiplus195.workers.dev
         run: |
           python3 - <<'PY'
-          import json,os,urllib.request,urllib.error
+          import json,os,subprocess
           base=os.environ['BASE'].rstrip('/')
           for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
               try:
-                  req=urllib.request.Request(base+'/'+endpoint,headers={'Accept':'application/json'})
-                  with urllib.request.urlopen(req,timeout=15) as response:
-                      x=json.loads(response.read(100000).decode('utf-8'))
+                  result=subprocess.run(['curl','--fail','--silent','--show-error',
+                      '--location','--max-time','15',base+'/'+endpoint],
+                      capture_output=True,text=True,timeout=20)
+                  if result.returncode!=0: raise ValueError('curl_http_or_network_error_'+str(result.returncode))
+                  x=json.loads(result.stdout[:100000])
                   if endpoint.endswith('live-health'):
                       x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
                   elif endpoint.endswith('whale-health'):
