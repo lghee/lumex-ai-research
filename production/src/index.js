@@ -2652,7 +2652,7 @@ export class MarketEventHub extends DurableObject{
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
     // Conservative coverage watermark: do not infer a complete 30-day
     // historical index from a ledger that previously expired after 14d.
-    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO hub_meta(key,value) VALUES ('long_history_started_ms',?)",Date.now());
+
   }
   longHistoryStart(){
     const rows=this.ctx.storage.sql.exec("SELECT value FROM hub_meta WHERE key='long_history_started_ms'").toArray();
@@ -2710,6 +2710,9 @@ export class MarketEventHub extends DurableObject{
         accepted.push(event);
       }
       if(accepted.length){
+        // The retention clock starts on the first REAL normalized event,
+        // never on an unverified provisional candlestick or idle status fetch.
+        this.ctx.storage.sql.exec("INSERT OR IGNORE INTO hub_meta(key,value) VALUES ('long_history_started_ms',?)",Date.now());
         const peers=this.ctx.getWebSockets();
         for(const ev of accepted){
           const frame=JSON.stringify({type:'observation',data:ev});
