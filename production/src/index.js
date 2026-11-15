@@ -2477,10 +2477,25 @@ function observedAnalyticView(sql, u, now=Date.now()) {
     return hubReply({...common,schema:'lumex_observed_pressure_v1',window_minutes:195,
       bins:[...bins.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms)});
   }
+  // Calculate the complete four-hour pressure distribution BEFORE limiting
+  // the detailed list. Never present a truncated list sum as an entire session.
+  const buckets=new Map();
+  const summary={long_usd_estimate:0,short_usd_estimate:0,long_count:0,short_count:0};
+  for(const e of events){
+    const step=Math.floor((e.ts-start)/300000),k=step+'|'+e.exchange;
+    const b=buckets.get(k)||{bucket_ms:start+step*300000,exchange:e.exchange,
+      long_usd_estimate:0,short_usd_estimate:0,long_count:0,short_count:0};
+    b[e.side+'_usd_estimate']+=e.amount_usd_estimate;
+    b[e.side+'_count']++;
+    summary[e.side+'_usd_estimate']+=e.amount_usd_estimate;
+    summary[e.side+'_count']++;
+    buckets.set(k,b);
+  }
   const max=500,limited=events.length>max;
   return hubReply({...common,schema:'lumex_observed_replay_v1',
     events:events.slice(0,max),events_total_in_hot_window:events.length,
-    truncated:limited,event_limit:max,hot_retention_days:14,
+    bins_5m:[...buckets.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms),
+    summary_estimate:summary,truncated:limited,event_limit:max,hot_retention_days:14,
     market_samples:[],market_samples_status:'not_included_use_verified_R2_candles_separately'});
 }
 
