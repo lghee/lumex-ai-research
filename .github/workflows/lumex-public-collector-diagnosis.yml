@@ -25,9 +25,9 @@ jobs:
                   if result.returncode!=0: raise ValueError('curl_http_or_network_error_'+str(result.returncode))
                   x=json.loads(result.stdout[:100000])
                   if endpoint.endswith('live-health'):
-                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
+                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','route','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
                   elif endpoint.endswith('whale-health'):
-                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'source':x.get('source'),'last_run_ms':x.get('last_run_ms'),'last_success_ms':x.get('last_success_ms'),'last_error':x.get('last_error'),'watchlist':[{'backfill_complete':z.get('backfill_complete'),'gap_possible':z.get('gap_possible'),'error':z.get('error')} for z in (x.get('watchlist') or []) if isinstance(z,dict)]}
+                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'source':x.get('source'),'last_run_ms':x.get('last_run_ms'),'last_success_ms':x.get('last_success_ms'),'last_error':x.get('last_error'),'watchlist':[{'backfill_complete':z.get('backfill_complete'),'gap_possible':z.get('gap_possible'),'last_checked_ms':z.get('last_checked_ms'),'error':z.get('error')} for z in (x.get('watchlist') or []) if isinstance(z,dict)]}
                   elif endpoint.endswith('legacy-backfill-health'):
                       x={'ok':x.get('ok'),'enabled':x.get('enabled'),'sources':[{'source':z.get('source'),'caught_up':z.get('caught_up'),'last_error':z.get('last_error'),'records_archived':z.get('records_archived'),'last_success_ms':z.get('last_success_ms')} for z in (x.get('sources') or []) if isinstance(z,dict)]}
                   elif endpoint.endswith('archive-health'):
@@ -38,3 +38,25 @@ jobs:
               except Exception as e:
                   print(endpoint,'UNAVAILABLE',type(e).__name__,str(e)[:100])
           PY
+      - name: Probe upstream Binance public WS handshake from separate GitHub network (read only)
+        run: |
+          node --input-type=module <<'JS'
+          const urls=[
+            'wss://fstream.binance.com/market/ws/!forceOrder@arr',
+            'wss://fstream.binance.com/market/stream?streams=!forceOrder@arr',
+            'wss://dstream.binance.com/ws/!forceOrder@arr'
+          ];
+          for(let i=0;i<urls.length;i++){
+            const url=urls[i],result=await new Promise(resolve=>{
+              let done=false,ws;
+              const finish=(status)=>{if(done)return;done=true;try{ws?.close()}catch{}resolve(status)};
+              const timer=setTimeout(()=>finish('timeout'),6000);
+              try{ws=new WebSocket(url);
+                ws.addEventListener('open',()=>{clearTimeout(timer);finish('connected')},{once:true});
+                ws.addEventListener('error',()=>{clearTimeout(timer);finish('error')},{once:true});
+                ws.addEventListener('close',e=>{clearTimeout(timer);finish('closed_'+e.code)},{once:true});
+              }catch(e){clearTimeout(timer);finish(e.name||'constructor_error')}
+            });
+            console.log('upstream_binance_route_'+i, result);
+          }
+          JS
