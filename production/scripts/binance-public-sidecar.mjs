@@ -41,7 +41,7 @@ export function oidcClaimChecks(token,runId,now=Date.now()){
     repository:c?.repository==='lghee/lumex-ai-research',
     repository_id:String(c?.repository_id)==='1455460180',
     owner_id:String(c?.repository_owner_id)==='123610810',
-    subject:c?.sub==='repo:lghee/lumex-ai-research:ref:refs/heads/main',
+    subject:typeof c?.sub==='string'&&c.sub.length>0&&c.sub.length<=1024,
     ref:c?.ref==='refs/heads/main',
     workflow_ref:c?.workflow_ref==='lghee/lumex-ai-research/.github/workflows/lumex-binance-public-sidecar.yml@refs/heads/main',
     event:['schedule','workflow_dispatch'].includes(c?.event_name),
