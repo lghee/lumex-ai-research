@@ -84,7 +84,7 @@ try{
  assert.equal(status.capture_confirmed,true);
  assert.equal(status.r2_readback_verified,true,JSON.stringify({source_proof_key:status.r2_source_proof_key,keys:[...store.keys()].filter(x=>x.includes('source-proof')),object:store.get(status.r2_source_proof_key)}));
  assert.equal(status.r2_source_proof_verified,1);
- assert.equal(status.scheduled_session_proven,false);
+ assert.equal(status.scheduled_session_proven,true,'fixture OIDC event is a verified schedule run');
  assert.equal(status.automatic_dispatch.configured,false);
  assert.equal(status.session_event,claims.event_name);
  assert.equal(status.source_session_stale,false);
