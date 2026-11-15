@@ -2796,6 +2796,12 @@ export function nativeWhales30d(rows,candles,now=Date.now()){
       throw Error('native_whale_candle_invalid');
     priceByHour.set(ts,close);
   }
+  const dailyPrice={};
+  for(const bar of candles){
+    const dt=new Date(Number(bar.t)).toISOString().slice(0,10);
+    dailyPrice[dt]=Number(bar.c);
+  }
+  const latestClose=Number(candles.at(-1)?.c||0);
   const from=now-30*86400000,out=[],ids=new Set();
   for(const row of rows){
     let e;try{e=JSON.parse(row.payload)}catch{throw Error('native_whale_payload_invalid')}
@@ -2822,7 +2828,10 @@ export function nativeWhales30d(rows,candles,now=Date.now()){
     data_coverage:'only_confirmed_watchlist_address_net_changes',
     source_caught_up:true,read_verified_unix:Math.floor(now/1000),
     archived_last_success_unix:Math.floor(now/1000),
-    archived_total:out.length,chunks_verified:0,cron_retirement_authorized:false};
+    archived_total:out.length,chunks_verified:0,
+    price_usd:latestClose,price_updated_unix:Math.floor(now/1000),
+    price_series:dailyPrice,
+    cron_retirement_authorized:false};
 }
 
 export function observedTimelineSummary(sql,days,now=Date.now(),longSince=now){
@@ -3474,7 +3483,13 @@ async function hubRoute(request,env){
        watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
        now-Number(report.last_success_ms||0)>1200000)
        return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
-    return env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
+    const upstream=await env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
+    if(!upstream.ok)return upstream;
+    const x=await upstream.json();
+    return hubReply({...x,tracked_addresses:watch.length,
+      backfill_complete:watch.length,backfill_total:watch.length,
+      watchlist_last_success_ms:report.last_success_ms,
+      watchlist_source:report.source});
   }
   if(path==='/market-hub/v1/historical-liquidation-health'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
