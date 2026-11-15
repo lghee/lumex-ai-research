@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const source=readFileSync(new URL('../src/index.js',import.meta.url),'utf8');
+assert.match(source,/qa_daily_enabled:env\.AUTO_MARKET_QA_DAILY==='true'/);
+assert.match(source,/r2_binding_present:!!env\.MARKET_DATA/);
+assert.match(source,/return \{date,status:'missing',reason:x\?'invalid_record':'absent_record'\}/);
+assert.match(source,/incomplete_days:results\.filter\(x=>x\.status!=='recorded'\)/);
+assert.match(source,/const existing=await opsReadR2\(env,key\)/);
+assert.match(source,/typeof existing\.liquidation_r2_sample_verified==='boolean'/);
+assert.match(source,/path==='\/market-hub\/v1\/quality-proof-retry'&&method==='POST'/);
+assert.match(source,/if\(!hubAuthorized\(request,env\)\)return hubReply\(\{ok:false,error:'unauthorized'\},401\)/);
+assert.match(source,/scope:'current_utc_date_only'/);
+assert.match(source,/safe_to_disable_wordpress_crons:false/);
+console.log('PASS QA history diagnostics and authenticated same-day repair checks');
