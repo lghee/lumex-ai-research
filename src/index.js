@@ -2553,6 +2553,77 @@ export function whaleLiqCrossQuery(sql,timestamps,now=Date.now()){
     rows,coverage:'recorded_bybit_and_binance_public_only_no_backfill',orders_enabled:false};
 }
 
+
+/** Source-isolated bounded public-observation adapters for legacy WP analytics.
+ * These summaries are not market-wide liquidation totals; Binance is sampled.
+ */
+export function observedLegacySummary(sql,hours,now=Date.now()){
+  if(![1,4,12,24].includes(hours))throw Error('summary_hours_invalid');
+  const since=now-hours*3600000,step=hours===1?300000:hours===4?900000:hours===12?1800000:3600000;
+  const input=sql.exec(
+    "SELECT ts,source,payload FROM hub_events WHERE kind='liquidation' AND ts>=? AND ts<=? AND source IN ('bybit','binance') ORDER BY ts DESC LIMIT 25001",
+    since,now).toArray();
+  if(input.length>25000)throw Error('observed_summary_event_limit');
+  const sum=new Map(),bins=new Map(),events=[];
+  for(const row of input){
+    let e;try{e=JSON.parse(row.payload)}catch{throw Error('summary_event_json')}
+    const source=row.source==='bybit'?'Bybit':row.source==='binance'?'Binance':null;
+    const side=e?.position_side,ts=Number(row.ts),p=Number(e?.price),q=Number(e?.quantity);
+    if(!source||!['long','short'].includes(side)||!Number.isSafeInteger(ts)||ts<since||ts>now||
+       !(p>0)||!(q>0)||!Number.isFinite(p)||!Number.isFinite(q)||
+       !['public_stream','sampled_1s'].includes(e.capture))
+      throw Error('summary_invalid_observation');
+    const amount=p*q;
+    if(!Number.isFinite(amount)||amount<=0||amount>1e15)throw Error('summary_amount_invalid');
+    const key=source+'|'+side,bucket=Math.floor(ts/step)*step,key2=bucket+'|'+key;
+    let s=sum.get(key);if(!s){s={exchange_name:source,position_side:side,value:0,n:0};sum.set(key,s)}
+    s.value+=amount;s.n++;
+    let b=bins.get(key2);if(!b){b={time_bucket:Math.floor(bucket/1000),exchange_name:source,position_side:side,value:0};bins.set(key2,b)}
+    b.value+=amount;
+    if(events.length<120)
+      events.push({id:String(e.id||'').slice(0,180),exchange:source,side,price:p,
+        amount:Number(amount.toFixed(2)),ts});
+  }
+  return {ok:true,schema:'lumex_cf_observed_sql_replacement_v1',
+    source:'cloudflare_hot_public_liquidations',legacy_sql_read:false,order_execution:false,
+    observed_only:true,market_total_estimate:false,provider_comparability:'not_comparable',
+    hours,bin_seconds:step/1000,generated_ms:now,retention_days:14,
+    truncated:false,observations_scanned:input.length,
+    sums:[...sum.values()].map(x=>({...x,value:Number(x.value.toFixed(2))})),
+    bins:[...bins.values()].map(x=>({...x,value:Number(x.value.toFixed(2))})).sort((a,b)=>a.time_bucket-b.time_bucket),
+    events,coverage:'hot_index_no_disconnection_backfill'};
+}
+export function observedTimelineSummary(sql,days,now=Date.now()){
+  if(![1,7,30].includes(days))throw Error('timeline_days_invalid');
+  const covered=Math.min(days,14),lower=now-covered*86400000;
+  // Aggregation happens inside DO SQLite, avoiding 100k public events sent to WP.
+  const rows=sql.exec(
+    "SELECT CAST(ts/3600000 AS INTEGER)*3600000 AS hour_ms, source, " +
+      "json_extract(payload,'$.position_side') AS side, COUNT(*) AS event_count, " +
+      "SUM(CAST(json_extract(payload,'$.price') AS REAL)*CAST(json_extract(payload,'$.quantity') AS REAL)) AS amount, MAX(ts) AS last_ms " +
+      "FROM hub_events WHERE kind='liquidation' AND ts>=? AND ts<=? " +
+      "AND source IN ('bybit','binance') AND json_extract(payload,'$.position_side') IN ('long','short') " +
+      "GROUP BY hour_ms,source,side ORDER BY hour_ms DESC LIMIT 2001", lower,now).toArray();
+  if(rows.length>2000)throw Error('timeline_too_many_hourly_groups');
+  const groups=[];
+  for(const r of rows){
+    const source=r.source==='bybit'?'Bybit':r.source==='binance'?'Binance':null;
+    const h=Number(r.hour_ms),last=Number(r.last_ms),n=Number(r.event_count),usd=Number(r.amount);
+    if(!source||!['long','short'].includes(r.side)||!Number.isSafeInteger(h)||
+       h<lower-3600000||h>now||!Number.isSafeInteger(last)||last<h||last>now||
+       !Number.isSafeInteger(n)||n<1||n>1000000||!Number.isFinite(usd)||usd<=0||usd>1e16)
+       throw Error('timeline_hourly_invalid');
+    groups.push({exchange_name:source,position_side:r.side,bucket:Math.floor(h/3600000),
+      total_usd:Number(usd.toFixed(2)),event_count:n,last_ts:Math.floor(last/1000)});
+  }
+  return {ok:true,schema:'lumex_cf_liquidation_timeline_v1',source:'cloudflare_hot_public_liquidations',
+    legacy_sql_read:false,order_execution:false,observed_only:true,
+    market_total_estimate:false,provider_comparability:'not_comparable',
+    requested_days:days,covered_days:covered,coverage_complete:days<=14,
+    backfill_older_than_hot_index:false,generated_ms:now,groups,
+    coverage:'observed_public_events_only; periods without collector evidence cannot be treated as zero'};
+}
+
 export class MarketEventHub extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -2702,6 +2773,16 @@ export class MarketEventHub extends DurableObject{
       if(timestamps===null)return hubReply({ok:false,error:'invalid_movement_timestamps'},400);
       try{return hubReply(whaleLiqCrossQuery(this.ctx.storage.sql,timestamps))}
       catch(error){return hubReply({ok:false,error:'whale_liquidation_cross_unavailable'},503)}
+    }
+    if(u.pathname==='/observed-summary'&&request.method==='GET'){
+      const hours=Number(u.searchParams.get('hours'));
+      try{return hubReply(observedLegacySummary(this.ctx.storage.sql,hours))}
+      catch{return hubReply({ok:false,error:'observed_summary_unavailable'},503)}
+    }
+    if(u.pathname==='/observed-timeline'&&request.method==='GET'){
+      const days=Number(u.searchParams.get('days'));
+      try{return hubReply(observedTimelineSummary(this.ctx.storage.sql,days))}
+      catch{return hubReply({ok:false,error:'observed_timeline_unavailable'},503)}
     }
     if(u.pathname==='/insights'&&request.method==='GET'){
       const windowName=String(u.searchParams.get('window')||'24h');
@@ -3246,6 +3327,13 @@ async function hubRoute(request,env){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(
       new Request('https://hub/whale-liquidation-cross?ts='+timestamps.join(',')));
+  }
+  if((path==='/market-hub/v1/observed-summary'||path==='/market-hub/v1/observed-timeline')&&method==='GET'){
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    const analytics=path.endsWith('summary')?'/observed-summary':'/observed-timeline';
+    const q=new URLSearchParams();
+    q.set(analytics==='/observed-summary'?'hours':'days',u.searchParams.get(analytics==='/observed-summary'?'hours':'days')||'');
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub'+analytics+'?'+q));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
