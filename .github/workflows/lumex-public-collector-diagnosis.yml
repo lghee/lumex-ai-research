@@ -30,7 +30,9 @@ jobs:
                       x={k:x.get(k) for k in ('ok','reason','source','checked_ms','connected',
                          'provider_messages_accepted','accepted_this_request','total_accepted',
                          'last_accepted_ms','capture_confirmed','stale','cron_retirement_allowed',
-                         'coverage','r2_archive')}
+                         'coverage','r2_archive','r2_source_proof_verified','r2_source_proof_key',
+                         'r2_readback_verified','r2_last_observed_ms','source_session_stale',
+                         'last_scheduled_ms','scheduled_session_proven','automatic_dispatch')}
                   elif endpoint.endswith('binance-egress-health'):
                       x={'ok':x.get('ok'),'status':x.get('status'),'checked_ms':x.get('checked_ms'),
                          'handshake_http_status':x.get('handshake_http_status'),'cached':x.get('cached'),
