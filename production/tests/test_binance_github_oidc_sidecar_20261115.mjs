@@ -61,7 +61,7 @@ assert.equal(await normalizeGithubBinanceFrames(Array(31).fill(frame),now),null)
 const store=new Map(),saved=[];
 const env={MARKET_EVENT_HUB:{getByName(name){return{fetch:async(req)=>{
  const body=await req.json();saved.push({name,...body});return new Response(JSON.stringify({ok:true,accepted:body.events.length,invalid:0}))
-}}}},MARKET_DATA:{get:async(key)=>store.has(key)?{json:async()=>store.get(key)}:null,
+}}}},MARKET_DATA:{get:async(key)=>store.has(key)?{json:async()=>store.get(key),text:async()=>JSON.stringify(store.get(key)),size:JSON.stringify(store.get(key)).length}:null,
  put:async(key,body)=>store.set(key,JSON.parse(body))}};
 const original=globalThis.fetch;
 try{
@@ -77,11 +77,18 @@ try{
  const response=await worker.fetch(request,env);
  const out=await response.json();
  assert.equal(response.status,200,JSON.stringify(out));
- assert.equal(out.accepted,1);assert.equal(saved.length,1);
+ assert.equal(out.accepted,1);assert.equal(out.source_r2_verified,1);assert.equal(out.source_r2_readback,true);assert.equal(saved.length,1);
  assert.equal(saved[0].name,'BTCUSDT');
  assert.equal(saved[0].events[0].source,'binance');
  const status=await(await worker.fetch(new Request('https://worker/market-hub/v1/github-binance-health'),env)).json();
  assert.equal(status.capture_confirmed,true);
+ assert.equal(status.r2_readback_verified,true);
+ assert.equal(status.r2_source_proof_verified,1);
+ assert.equal(status.scheduled_session_proven,false);
+ assert.equal(status.source_session_stale,false);
+ assert([...store.keys()].some(k=>k.startsWith('market-hub/events-source-proof/binance/v1/')));
+ const proofKey=status.r2_source_proof_key;
+ assert.equal(store.get(proofKey).event.source,'binance');
  assert.equal(status.cron_retirement_allowed,false);
  const unauthorized=await worker.fetch(new Request('https://worker/market-hub/v1/github-binance-ingest',{
   method:'POST',body:'{}'}),env);
