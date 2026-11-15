@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {decodeBinanceLiquidations} from '../src/index.js';
+const raw=fs.readFileSync(new URL('../src/index.js',import.meta.url),'utf8')
+ .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}');
+const {decodeBinanceLiquidations}=await import('data:text/javascript;base64,'+Buffer.from(raw).toString('base64'));
 
 // Production-only public-data toggle. Does not enable private orders or customer keys.
 const conf=JSON.parse(fs.readFileSync(new URL('../wrangler.jsonc',import.meta.url),'utf8'));
