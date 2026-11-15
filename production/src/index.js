@@ -3034,8 +3034,12 @@ export default{
   async scheduled(controller,env,ctx){
     // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
     if(controller.cron==='*/5 * * * *'&&env.AUTO_MARKET_QA_DAILY==='true'){
-      const utc=new Date(controller.scheduledTime||Date.now());if(utc.getUTCHours()===0&&utc.getUTCMinutes()===15)
-        ctx.waitUntil(marketOpsDaily(env).catch(()=>console.error('market_ops_daily_failed')));
+      // Retry throughout the UTC day. A single missed 00:15 cron must not
+      // permanently lose the daily proof. marketOpsDaily is idempotent by R2 key.
+      // Never synthesize historical proof: it must be observed on that date.
+      const utc=new Date(controller.scheduledTime||Date.now());
+      if(utc.getUTCHours()>0||(utc.getUTCHours()===0&&utc.getUTCMinutes()>=15))
+        ctx.waitUntil(marketOpsDaily(env,utc.getTime()).catch(e=>console.error('market_ops_daily_failed',String(e?.message||e).slice(0,120))));
     }
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
