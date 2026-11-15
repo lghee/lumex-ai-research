@@ -86,7 +86,7 @@ try{
  assert.equal(status.r2_source_proof_verified,1);
  assert.equal(status.scheduled_session_proven,false);
  assert.equal(status.automatic_dispatch.configured,false);
- assert.equal(status.session_event,'schedule'===claims.event_name?'schedule':'schedule');
+ assert.equal(status.session_event,claims.event_name);
  assert.equal(status.source_session_stale,false);
  assert([...store.keys()].some(k=>k.startsWith('market-hub/events-source-proof/binance/v1/')));
  const proofKey=status.r2_source_proof_key;
