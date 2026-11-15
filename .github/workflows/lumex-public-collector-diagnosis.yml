@@ -17,7 +17,7 @@ jobs:
           python3 - <<'PY'
           import json,os,subprocess
           base=os.environ['BASE'].rstrip('/')
-          for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/binance-egress-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
+          for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/binance-egress-health','market-hub/v1/github-binance-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
               try:
                   result=subprocess.run(['curl','--fail','--silent','--show-error',
                       '--location','--max-time','15',base+'/'+endpoint],
@@ -26,6 +26,11 @@ jobs:
                   x=json.loads(result.stdout[:100000])
                   if endpoint.endswith('live-health'):
                       x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','route','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
+                  elif endpoint.endswith('github-binance-health'):
+                      x={k:x.get(k) for k in ('ok','reason','source','checked_ms','connected',
+                         'provider_messages_accepted','accepted_this_request','total_accepted',
+                         'last_accepted_ms','capture_confirmed','stale','cron_retirement_allowed',
+                         'coverage','r2_archive')}
                   elif endpoint.endswith('binance-egress-health'):
                       x={'ok':x.get('ok'),'status':x.get('status'),'checked_ms':x.get('checked_ms'),
                          'handshake_http_status':x.get('handshake_http_status'),'cached':x.get('cached'),
