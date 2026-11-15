@@ -2504,7 +2504,7 @@ function observedAnalyticView(sql, u, now=Date.now()) {
  * Each provider is isolated; no WordPress SQL is read or compared here.
  * Hot DO records are at most 14 days; older windows are marked uncovered.
  */
-function whaleLiqCrossTimestamps(input, now=Date.now()) {
+export function whaleLiqCrossTimestamps(input, now=Date.now()) {
   if(typeof input!=='string'||input.length>200||!/^([0-9]{10})(,[0-9]{10}){0,11}$/.test(input))
     return null;
   const values=input.split(',').map(Number);
@@ -2513,7 +2513,7 @@ function whaleLiqCrossTimestamps(input, now=Date.now()) {
     return null;
   return values;
 }
-function whaleLiqCrossQuery(sql,timestamps,now=Date.now()){
+export function whaleLiqCrossQuery(sql,timestamps,now=Date.now()){
   const retentionStart=now-14*86400000;
   const rows=[],uncovered=[];
   for(let index=0;index<timestamps.length;index++){
