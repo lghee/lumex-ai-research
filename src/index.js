@@ -1072,7 +1072,7 @@ async function hubGetCandles(env,symbol,frame,limit=500){
   }
   const closed=out.filter(r=>r[0]+frame*60000<=now);
   if(closed.length<40)throw Error('market_insufficient_closed_candles');
-  const ret=closed.slice(-Math.min(500,Math.max(40,limit)));
+  const ret=closed.slice(-Math.min(850,Math.max(40,limit)));
   const last=ret.at(-1)[0],age=Math.max(0,now-last-frame*60000);
   return {
     symbol,interval:frame===1440?'D':String(frame),source:String(m.source||'unknown')+' (R2 verified futures candles)',
@@ -2781,6 +2781,50 @@ export function observedLegacySummary(sql,hours,now=Date.now()){
     bins:[...bins.values()].map(x=>({...x,value:Number(x.value.toFixed(2))})).sort((a,b)=>a.time_bucket-b.time_bucket),
     events,coverage:'hot_index_no_disconnection_backfill'};
 }
+
+/** Native confirmed BTC reserve observation adapter.
+ * Uses the existing 35-day public event hot ledger plus 60-minute verified
+ * BTC futures close solely to estimate USD, not to infer exchange balances.
+ */
+export function nativeWhales30d(rows,candles,now=Date.now()){
+  if(!Array.isArray(rows)||rows.length>5000||!Array.isArray(candles)||candles.length<720)
+    throw Error('native_whale_input_limit');
+  const priceByHour=new Map();
+  for(const bar of candles){
+    const ts=Number(bar?.t),close=Number(bar?.c);
+    if(!Number.isSafeInteger(ts)||ts%3600000!==0||!(close>0)||!Number.isFinite(close))
+      throw Error('native_whale_candle_invalid');
+    priceByHour.set(ts,close);
+  }
+  const from=now-30*86400000,out=[],ids=new Set();
+  for(const row of rows){
+    let e;try{e=JSON.parse(row.payload)}catch{throw Error('native_whale_payload_invalid')}
+    const ts=Number(row.ts),qty=Number(e.quantity),side=e.side;
+    const id=String(e.id||''),hash=String(e.txhash||''),label=String(e.watch_label||'').trim();
+    if(row.source!=='blockstream'||!Number.isSafeInteger(ts)||ts<from||ts>now+120000||
+       !['in','out'].includes(side)||!Number.isFinite(qty)||qty<=0||qty>21000000||
+       !/^[0-9a-f]{64}$/i.test(hash)||!id.startsWith('btc:addressflow:')||
+       !label||label.length>90||ids.has(id)||e.capture!=='confirmed_chain_poll'||
+       !e.watched_address||e.unit!=='BTC')throw Error('native_whale_event_invalid');
+    ids.add(id);
+    const h=Math.floor(ts/3600000)*3600000,price=priceByHour.get(h)||
+      priceByHour.get(h-3600000)||null;
+    if(price===null)throw Error('native_whale_price_candle_unavailable');
+    out.push({asset:'BTC',chain:'bitcoin',provider:'esplora',event_id:id,
+      transfer_direction:side,exchange_name:label.slice(0,90),
+      transaction_hash:hash.toLowerCase(),event_ts:Math.floor(ts/1000),
+      amount_coin:Number(qty.toFixed(8)),amount_usd:Number((qty*price).toFixed(4))});
+  }
+  return {rows:out,source:'cloudflare_native_confirmed_btc_watchlist',
+    schema:'lumex_cf_native_whales_30d_v1',source_scope:'tracked_public_btc_reserve_address_net_changes_only',
+    legacy_sql_read:false,live_ledger_merged:false,market_total_estimate:false,
+    order_execution:false,days:30,provider:'esplora',price_method:'verified_r2_btc_usdt_60m_close_estimate',
+    data_coverage:'only_confirmed_watchlist_address_net_changes',
+    source_caught_up:true,read_verified_unix:Math.floor(now/1000),
+    archived_last_success_unix:Math.floor(now/1000),
+    archived_total:out.length,chunks_verified:0,cron_retirement_authorized:false};
+}
+
 export function observedTimelineSummary(sql,days,now=Date.now(),longSince=now){
   if(![1,7,30].includes(days))throw Error('timeline_days_invalid');
   const longReady=now-longSince>=30*86400000;
@@ -2974,6 +3018,19 @@ export class MarketEventHub extends DurableObject{
       if(timestamps===null)return hubReply({ok:false,error:'invalid_movement_timestamps'},400);
       try{return hubReply(whaleLiqCrossQuery(this.ctx.storage.sql,timestamps))}
       catch(error){return hubReply({ok:false,error:'whale_liquidation_cross_unavailable'},503)}
+    }
+    if(u.pathname==='/native-whales-30d'&&request.method==='GET'){
+      const now=Date.now(),since=this.longHistoryStart();
+      if(now-since<30*86400000)return hubReply({ok:false,error:'native_whale_30d_not_warm'},503);
+      try{
+        const rows=this.ctx.storage.sql.exec(
+          "SELECT ts,source,payload FROM hub_events WHERE kind='whale_transfer' AND source='blockstream' AND ts>=? ORDER BY ts DESC LIMIT 5001",
+          now-30*86400000).toArray();
+        if(rows.length>5000)return hubReply({ok:false,error:'native_whale_30d_overflow'},503);
+        const candles=await hubGetCandles(this.env,'BTCUSDT',60,850);
+        if(candles.stale===true||candles.data_quality!=='verified')return hubReply({ok:false,error:'native_whale_price_data_stale'},503);
+        return hubReply({...nativeWhales30d(rows,candles.candles,now),symbol:'BTCUSDT',events_total:rows.length});
+      }catch{return hubReply({ok:false,error:'native_whale_30d_unavailable'},503)}
     }
     if(u.pathname==='/long-history-readiness'&&request.method==='GET'){
       const now=Date.now(),started=this.longHistoryStart(),days=(now-started)/86400000;
@@ -3404,6 +3461,20 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     try{return await hubWhales30dArchive(env)}
     catch(error){return hubReply({ok:false,error:'whale_archive_read_failed'},503)}
+  }
+  if(path==='/market-hub/v1/native-whales-30d'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    if(!env.BTC_RESERVE_COLLECTOR||!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'whale_binding_missing'},503);
+    const status=await env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc').fetch('https://whales/status');
+    if(!status.ok)return hubReply({ok:false,error:'watchlist_health_unavailable'},503);
+    const report=await status.json(),now=Date.now();
+    const watch=report.watchlist||[];
+    if(report.enabled!==true||report.source!=='wordpress_configured'||
+       !Array.isArray(watch)||watch.length<1||watch.length>20||
+       watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
+       now-Number(report.last_success_ms||0)>1200000)
+       return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
+    return env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
   }
   if(path==='/market-hub/v1/historical-liquidation-health'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
