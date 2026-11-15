@@ -60,6 +60,43 @@ jobs:
               except Exception as e:
                   print(endpoint,'UNAVAILABLE',type(e).__name__,str(e)[:100])
           PY
+      - name: Inspect actual Bybit public USDT kline and trade delivery (no tokens)
+        run: |
+          node --input-type=module <<'JS'
+          // Read-only public market feed audit; no credentials, orders or Worker writes.
+          const symbol='BTCUSDT',url='wss://stream.bybit.com/v5/public/linear';
+          const result={handshake:false,subscribed:false,public_trades:0,klines:0,example_interval:null,
+            last_trade_ms:null,last_candle_open_ms:null,orders_enabled:false};
+          const ws=new WebSocket(url);
+          await new Promise(resolve=>{
+            let done=false;
+            const finish=()=>{if(done)return;done=true;try{ws.close()}catch{}resolve()};
+            const timer=setTimeout(finish,23000);
+            ws.addEventListener('open',()=>{
+              result.handshake=true;
+              ws.send(JSON.stringify({op:'subscribe',args:['publicTrade.'+symbol,'kline.5.'+symbol]}));
+            });
+            ws.addEventListener('message',ev=>{
+              if(typeof ev.data!=='string'||ev.data.length>300000)return;
+              let j;try{j=JSON.parse(ev.data)}catch{return}
+              if(j.op==='subscribe'&&j.success===true)result.subscribed=true;
+              if(j.topic==='publicTrade.'+symbol&&Array.isArray(j.data)){
+                result.public_trades+=j.data.length;
+                const t=Number(j.data.at(-1)?.T);
+                if(Number.isSafeInteger(t))result.last_trade_ms=t;
+              }
+              if(j.topic==='kline.5.'+symbol&&Array.isArray(j.data)){
+                result.klines+=j.data.length;result.example_interval='5';
+                const t=Number(j.data.at(-1)?.start);
+                if(Number.isSafeInteger(t))result.last_candle_open_ms=t;
+              }
+              if(result.public_trades>0&&result.klines>0){clearTimeout(timer);finish();}
+            });
+            ws.addEventListener('error',()=>{clearTimeout(timer);finish()});
+            ws.addEventListener('close',()=>{clearTimeout(timer);finish()});
+          });
+          console.log('bybit_prochart_public_feed',JSON.stringify(result));
+          JS
       - name: Probe upstream Binance public WS handshake from separate GitHub network (read only)
         run: |
           node --input-type=module <<'JS'
