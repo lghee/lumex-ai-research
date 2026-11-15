@@ -2426,6 +2426,79 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
   };
 }
 
+
+/** Source-separated, bounded observed-only analytics from the hot DO event ledger.
+ * Never substitutes legacy WordPress archives or reports market-wide totals.
+ */
+function observedAnalyticView(sql, u, now=Date.now()) {
+  const view=u.pathname==='/observed-pressure'?'pressure':u.pathname==='/observed-replay'?'replay':null;
+  if(!view)return hubReply({ok:false,error:'unknown_observed_view'},404);
+  const start=view==='pressure'?now-195*60000:Number(u.searchParams.get('start_ms'));
+  const end=view==='pressure'?now+1:Number(u.searchParams.get('end_ms'));
+  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>=end||
+     start<now-14*86400000||end>now+60000||
+     (view==='replay'&&end-start>14400000))
+    return hubReply({ok:false,error:'observed_window_out_of_hot_retention'},422);
+  // The limit prevents an unbounded customer query; overflow is explicitly reported.
+  const rows=sql.exec(
+    "SELECT ts,source,payload FROM hub_events WHERE kind='liquidation' AND ts>=? AND ts<? ORDER BY ts ASC LIMIT 20001",
+    start,end).toArray();
+  if(rows.length>20000)return hubReply({ok:false,error:'observed_event_count_exceeds_safe_limit',coverage:'partial'},503);
+  const bins=new Map(),events=[],bySource={Bybit:0,Binance:0};let invalid=0;
+  for(const row of rows){
+    const source=row.source==='bybit'?'Bybit':row.source==='binance'?'Binance':null;
+    if(!source){invalid++;continue}
+    let e;try{e=JSON.parse(String(row.payload))}catch{invalid++;continue}
+    const ts=Number(row.ts),price=Number(e?.price),qty=Number(e?.quantity),side=e?.position_side;
+    if(!Number.isSafeInteger(ts)||ts<start||ts>=end||
+      !Number.isFinite(price)||price<=0||!Number.isFinite(qty)||qty<=0||
+      !['long','short'].includes(side)){invalid++;continue}
+    const amount=price*qty;
+    if(!Number.isFinite(amount)||amount<=0||amount>1e15){invalid++;continue}
+    bySource[source]++;
+    if(view==='pressure'){
+      const bucket=Math.floor(ts/60000)*60000,key=bucket+'|'+source+'|'+side;
+      const acc=bins.get(key)||{bucket_ms:bucket,exchange:source,side,events:0,notional_estimate_usd:0};
+      acc.events++;acc.notional_estimate_usd+=amount;bins.set(key,acc);
+    }else{
+      events.push({id:String(e.id||'').slice(0,180),ts,exchange:source,side,price,quantity:qty,
+        amount_usd_estimate:Number(amount.toFixed(2)),price_type:String(e.price_type||'unspecified'),
+        capture:source==='Bybit'?'public_stream':'sampled_1s'});
+    }
+  }
+  if(invalid>0)return hubReply({ok:false,error:'observed_invalid_rows',invalid_rows:invalid},503);
+  const common={ok:true,order_execution:false,market_total_estimate:false,
+    source_scope:'hot_public_liquidation_observations_only',
+    coverage:'observed_only_no_gap_backfill',from_ms:start,to_ms:end,
+    query_generated_ms:now,exchange_counts:bySource,
+    notional_basis:'observed_price_times_native_quantity_estimate_not_market_total',
+    provider_comparability:'not_comparable'};
+  if(view==='pressure'){
+    return hubReply({...common,schema:'lumex_observed_pressure_v1',window_minutes:195,
+      bins:[...bins.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms)});
+  }
+  // Calculate the complete four-hour pressure distribution BEFORE limiting
+  // the detailed list. Never present a truncated list sum as an entire session.
+  const buckets=new Map();
+  const summary={long_usd_estimate:0,short_usd_estimate:0,long_count:0,short_count:0};
+  for(const e of events){
+    const step=Math.floor((e.ts-start)/300000),k=step+'|'+e.exchange;
+    const b=buckets.get(k)||{bucket_ms:start+step*300000,exchange:e.exchange,
+      long_usd_estimate:0,short_usd_estimate:0,long_count:0,short_count:0};
+    b[e.side+'_usd_estimate']+=e.amount_usd_estimate;
+    b[e.side+'_count']++;
+    summary[e.side+'_usd_estimate']+=e.amount_usd_estimate;
+    summary[e.side+'_count']++;
+    buckets.set(k,b);
+  }
+  const max=2000,limited=events.length>max;
+  return hubReply({...common,schema:'lumex_observed_replay_v1',
+    events:events.slice(0,max),events_total_in_hot_window:events.length,
+    bins_5m:[...buckets.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms),
+    summary_estimate:summary,truncated:limited,event_limit:max,hot_retention_days:14,
+    market_samples:[],market_samples_status:'not_included_use_verified_R2_candles_separately'});
+}
+
 export class MarketEventHub extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -2566,6 +2639,10 @@ export class MarketEventHub extends DurableObject{
         historical_r2_reimported:false,order_execution:false});
     }
 
+    if((u.pathname==='/observed-pressure'||u.pathname==='/observed-replay')&&request.method==='GET') {
+      try{return observedAnalyticView(this.ctx.storage.sql,u)}
+      catch(e){return hubReply({ok:false,error:'observed_analytics_unavailable'},503)}
+    }
     if(u.pathname==='/insights'&&request.method==='GET'){
       const windowName=String(u.searchParams.get('window')||'24h');
       const hours=insightWindow(windowName);
@@ -2995,6 +3072,17 @@ async function hubRoute(request,env){
     if(!interval)return hubReply({ok:false,error:'unsupported_interval'},400);
     try{return hubReply(await hubGetCandles(env,symbol,interval,500))}
     catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
+  }
+  if((path==='/market-hub/v1/observed-pressure'||path==='/market-hub/v1/observed-replay')&&method==='GET') {
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    const endpoint=path.endsWith('pressure')?'/observed-pressure':'/observed-replay';
+    const q=new URLSearchParams();
+    if(endpoint==='/observed-replay'){
+      q.set('start_ms',u.searchParams.get('start_ms')||'');
+      q.set('end_ms',u.searchParams.get('end_ms')||'');
+    }
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+      new Request('https://hub'+endpoint+'?'+q.toString()));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
