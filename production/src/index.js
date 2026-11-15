@@ -2776,12 +2776,12 @@ export class MarketEventHub extends DurableObject{
     }
     if(u.pathname==='/observed-summary'&&request.method==='GET'){
       const hours=Number(u.searchParams.get('hours'));
-      try{return hubReply(observedLegacySummary(this.ctx.storage.sql,hours))}
+      try{return hubReply({...observedLegacySummary(this.ctx.storage.sql,hours),symbol:u.searchParams.get('symbol')})}
       catch{return hubReply({ok:false,error:'observed_summary_unavailable'},503)}
     }
     if(u.pathname==='/observed-timeline'&&request.method==='GET'){
       const days=Number(u.searchParams.get('days'));
-      try{return hubReply(observedTimelineSummary(this.ctx.storage.sql,days))}
+      try{return hubReply({...observedTimelineSummary(this.ctx.storage.sql,days),symbol:u.searchParams.get('symbol')})}
       catch{return hubReply({ok:false,error:'observed_timeline_unavailable'},503)}
     }
     if(u.pathname==='/insights'&&request.method==='GET'){
@@ -3333,6 +3333,7 @@ async function hubRoute(request,env){
     const analytics=path.endsWith('summary')?'/observed-summary':'/observed-timeline';
     const q=new URLSearchParams();
     q.set(analytics==='/observed-summary'?'hours':'days',u.searchParams.get(analytics==='/observed-summary'?'hours':'days')||'');
+    q.set('symbol',symbol);
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub'+analytics+'?'+q));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
