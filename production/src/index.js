@@ -1761,6 +1761,7 @@ export class BtcReserveCollector extends DurableObject{
           observed_confirmed:v.observed||0,gap_possible:!!v.gap_possible,error:v.error||null}));
       return hubReply({ok:true,enabled:this.env.AUTO_WHALE_FETCH==='true',source:state.watchlist_source,
         last_run_ms:state.last_run_ms,last_success_ms:state.last_success_ms,
+        watchlist_count:Number(state.watchlist_count||0),
         accepted:state.accepted,requests:state.requests,errors:state.errors,
         last_error:state.error,watchlist:watch,coverage:state.coverage,orders_enabled:false});
     }
@@ -2782,6 +2783,25 @@ export function observedLegacySummary(sql,hours,now=Date.now()){
     events,coverage:'hot_index_no_disconnection_backfill'};
 }
 
+/** A recent and complete scan of EVERY configured BTC address can prove
+ * historic coverage earlier than a 30-day waiting period. This is NOT
+ * exchange-wide BTC flow coverage or a complete market transaction history. */
+export function nativeWhaleWatchlistBackfillProof(status,now=Date.now()){
+  const count=Number(status?.watchlist_count),watch=status?.watchlist;
+  const latest=Number(status?.last_success_ms);
+  if(status?.enabled!==true||status?.source!=='wordpress_configured'||
+     !Number.isSafeInteger(count)||count<1||count>20||
+     !Array.isArray(watch)||watch.length!==count||
+     !Number.isSafeInteger(latest)||latest>now+120000||now-latest>1200000)
+    return false;
+  const maxAge=Math.max(1800000,count*8*60000);
+  return watch.every(entry=>entry?.backfill_complete===true&&
+    entry?.gap_possible===false&&!entry?.error&&
+    Number.isSafeInteger(Number(entry.last_checked_ms))&&
+    Number(entry.last_checked_ms)<=now+120000&&
+    now-Number(entry.last_checked_ms)<=maxAge);
+}
+
 /** Native confirmed BTC reserve observation adapter.
  * Uses the existing 35-day public event hot ledger plus 60-minute verified
  * BTC futures close solely to estimate USD, not to infer exchange balances.
@@ -3030,7 +3050,19 @@ export class MarketEventHub extends DurableObject{
     }
     if(u.pathname==='/native-whales-30d'&&request.method==='GET'){
       const now=Date.now(),since=this.longHistoryStart();
-      if(now-since<30*86400000)return hubReply({ok:false,error:'native_whale_30d_not_warm'},503);
+      if(now-since<30*86400000){
+        // Trust only a full, fresh per-address Esplora history scan, never
+        // the existence or age of any single event.
+        if(!this.env.BTC_RESERVE_COLLECTOR)
+          return hubReply({ok:false,error:'native_whale_watchlist_binding_missing'},503);
+        let verified=false;
+        try{
+          const response=await this.env.BTC_RESERVE_COLLECTOR
+            .getByName('reserve-btc').fetch('https://whales/status');
+          verified=response.ok&&nativeWhaleWatchlistBackfillProof(await response.json(),now);
+        }catch{}
+        if(!verified)return hubReply({ok:false,error:'native_whale_30d_backfill_not_ready'},503);
+      }
       try{
         const rows=this.ctx.storage.sql.exec(
           "SELECT ts,source,payload FROM hub_events WHERE kind='whale_transfer' AND source='blockstream' AND ts>=? ORDER BY ts DESC LIMIT 5001",
@@ -3478,10 +3510,7 @@ async function hubRoute(request,env){
     if(!status.ok)return hubReply({ok:false,error:'watchlist_health_unavailable'},503);
     const report=await status.json(),now=Date.now();
     const watch=report.watchlist||[];
-    if(report.enabled!==true||report.source!=='wordpress_configured'||
-       !Array.isArray(watch)||watch.length<1||watch.length>20||
-       watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
-       now-Number(report.last_success_ms||0)>1200000)
+    if(!nativeWhaleWatchlistBackfillProof(report,now))
        return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
     const upstream=await env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
     if(!upstream.ok)return upstream;
