@@ -1,0 +1,25 @@
+name: LUMEX Binance public liquidation observer (sampled)
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lumex-binance-public-source-sampler
+  cancel-in-progress: false
+
+jobs:
+  collect-public-samples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Observe Binance public forceOrder and deliver verified snapshots
+        run: node production/scripts/binance-public-sidecar.mjs
