@@ -164,7 +164,7 @@ export function buildExchangeComparison(coin,rows,now=Date.now()){
 }
 export async function collectExchangeCompare(env,{now=Date.now(),fetchImpl=fetch,coins=null}={}){
   if(!env?.MARKET_DATA)throw Error('r2_binding_missing');
-  const selection=coins||EX_COINS.filter((c,i)=>i%2===Math.floor(now/300000)%2);
+  const selection=coins||EX_COINS.filter((c,i)=>Math.floor(i/2)===Math.floor(now/300000)%2);
   if(selection.length<1||selection.length>2||selection.some(c=>!validCoin(c)))throw Error('invalid_batch');
   const results=[];
   for(let slot=0;slot<selection.length;slot++){
