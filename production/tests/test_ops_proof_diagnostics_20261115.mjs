@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../src/index.js',import.meta.url),'utf8');
 assert.match(source,/qa_daily_enabled:env\.AUTO_MARKET_QA_DAILY==='true'/);
 assert.match(source,/r2_binding_present:!!env\.MARKET_DATA/);
-assert.match(source,/return \\{date,status:'missing',reason:x\\?'invalid_record':'absent_record'\\}/);
+assert.match(source,/return \{date,status:'missing',reason:x\?'invalid_record':'absent_record'\}/);
 assert.match(source,/incomplete_days:results\.filter\(x=>x\.status!=='recorded'\)/);
 assert.match(source,/const existing=await opsReadR2\(env,key\)/);
 assert.match(source,/typeof existing\.liquidation_r2_sample_verified==='boolean'/);
