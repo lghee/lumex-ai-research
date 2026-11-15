@@ -2531,7 +2531,7 @@ export async function persistGithubBinanceSourceProof(env,events,now=Date.now())
       typeof ev.id!=='string'||!/^binance:liq:(BTCUSDT|ETHUSDT|SOLUSDT|XRPUSDT):[a-f0-9]{32}$/.test(ev.id)||
       !Number.isSafeInteger(ev.ts)||ev.ts>now+120000||ev.ts<now-3600000)
       throw Error('binance_source_proof_invalid_event');
-    const hour=new Date(ev.ts).toISOString().slice(0,13).replaceAll('-','/');
+    const hour=new Date(ev.ts).toISOString().slice(0,13).replaceAll('-','/').replace('T','/');
     const key=GH_BINANCE_PROOF_PREFIX+hour+'/'+ev.id.replaceAll(':','_')+'.json';
     const document={schema:'lumex_binance_public_observation_r2_v1',source:'binance',
       market:'binance_usdm_forceorder',event:ev,observed_only:true,
