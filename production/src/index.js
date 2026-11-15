@@ -1551,10 +1551,12 @@ export async function backfillOneLegacySource(env,storage,source){
 export async function runLegacyBackfill(env,storage){
   if(env.AUTO_LEGACY_BACKFILL!=='true')return {ok:true,enabled:false,archival_only:true};
   const results=[];
-  // Catch up the immutable public liquidation archive more quickly without
-  // touching any private data. At most 8 x 100 rows per 5-minute execution;
-  // stop immediately at an error or a verified source-high-water mark.
-  for(let i=0;i<8;i++){
+  // Bounded one-time historical migration: at most 16 x 100 public records
+  // every five minutes. Stop after eight pages if 30 s has elapsed.
+  // Never read customer accounts, orders, payments or private keys.
+  const started=Date.now();
+  for(let i=0;i<16;i++){
+    if(i>=8&&Date.now()-started>30000)break;
     const liq=await backfillOneLegacySource(env,storage,'liquidations');
     results.push(liq);
     if(!liq.success||liq.caught_up)break;
@@ -1626,7 +1628,7 @@ export async function runLegacyLiqIndex(env,storage,now=Date.now()){
   if(!storage?.sql||!env.MARKET_DATA?.list)return {ok:false,code:'index_unavailable'};
   liqIndexSchema(storage);
   const prev=await storage.get(LIQ_INDEX_KEY)||{cursor:null,cycles:0};
-  const opts={prefix:PREFIX+'liquidations/',limit:16};
+  const opts={prefix:PREFIX+'liquidations/',limit:32};
   if(prev.cursor)opts.cursor=prev.cursor;
   const list=await env.MARKET_DATA.list(opts);
   let indexed=0,rowsAdded=0;
@@ -3825,7 +3827,9 @@ export default{
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
         .fetch('https://whales/backfill').catch(e=>console.error('legacy_backfill_failed',String(e?.message||e||'unknown').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,80))));
     }
-    if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
+    // Keep the 4 BTC watchlist addresses current and progress their
+    // historical cursors using existing Cloudflare minute ticks only.
+    if(controller.cron==='* * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
         .fetch('https://whales/poll').catch(()=>console.error('btc_whale_poll_failed')));
     }
