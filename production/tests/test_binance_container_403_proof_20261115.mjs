@@ -28,7 +28,7 @@ const testEnv={AUTO_BINANCE_CONTAINER_EGRESS_PROBE:'true',MARKET_DATA:r2stub,
    record.push(url);
    return new Response(JSON.stringify({ok:false,handshake_http_status:403,error_code:'upstream_http_forbidden'}),{status:200});
   }
- }};}}
+ };}}
 };
 let result=await probeBinanceContainerEgress(testEnv,now);
 assert.equal(result.status,'upstream_403');
