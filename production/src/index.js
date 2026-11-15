@@ -1551,10 +1551,12 @@ export async function backfillOneLegacySource(env,storage,source){
 export async function runLegacyBackfill(env,storage){
   if(env.AUTO_LEGACY_BACKFILL!=='true')return {ok:true,enabled:false,archival_only:true};
   const results=[];
-  // Catch up the immutable public liquidation archive more quickly without
-  // touching any private data. At most 8 x 100 rows per 5-minute execution;
-  // stop immediately at an error or a verified source-high-water mark.
-  for(let i=0;i<8;i++){
+  // Bounded one-time historical migration: at most 16 x 100 public records
+  // every five minutes. Stop after eight pages if 30 s has elapsed.
+  // Never read customer accounts, orders, payments or private keys.
+  const started=Date.now();
+  for(let i=0;i<16;i++){
+    if(i>=8&&Date.now()-started>30000)break;
     const liq=await backfillOneLegacySource(env,storage,'liquidations');
     results.push(liq);
     if(!liq.success||liq.caught_up)break;
@@ -1626,7 +1628,7 @@ export async function runLegacyLiqIndex(env,storage,now=Date.now()){
   if(!storage?.sql||!env.MARKET_DATA?.list)return {ok:false,code:'index_unavailable'};
   liqIndexSchema(storage);
   const prev=await storage.get(LIQ_INDEX_KEY)||{cursor:null,cycles:0};
-  const opts={prefix:PREFIX+'liquidations/',limit:16};
+  const opts={prefix:PREFIX+'liquidations/',limit:32};
   if(prev.cursor)opts.cursor=prev.cursor;
   const list=await env.MARKET_DATA.list(opts);
   let indexed=0,rowsAdded=0;
@@ -1993,8 +1995,35 @@ export class MarketLiveCollector extends DurableObject{
       source==='bybit'?'wss://stream.bybit.com/v5/public/linear':binance.url;
     if(binance)this.metrics.binance.route=binance.route;
     this.metrics[source].state='connecting';
+    // Binance works from independent hosts but the Cloudflare DO outbound
+    // WebSocket constructor has repeatedly failed. Alternate with Cloudflare's
+    // documented fetch Upgrade client so the handshake HTTP result is visible.
+    if(source==='binance'&&this.metrics.binance.restarts%2===1){
+      this.retryAt.binance=Date.now()+20000; // avoid overlapping handshakes
+      this.ctx.waitUntil(this.connectBinanceViaUpgrade(url));
+      return;
+    }
     let ws;
     try{ws=new WebSocket(url)}catch(error){this.disconnected(source,'connect_failed');return;}
+    this.registerSocket(source,ws,false);
+  }
+  async connectBinanceViaUpgrade(url){
+    try{
+      const httpsUrl=url.replace(/^wss:\/\//,'https://');
+      if(!/^https:\/\/(?:fstream|dstream)\.binance\.com\//.test(httpsUrl))
+        throw Error('invalid_public_binance_origin');
+      const reply=await fetch(httpsUrl,{
+        headers:{Upgrade:'websocket'},signal:AbortSignal.timeout(12000)});
+      if(reply.status!==101||!reply.webSocket){
+        this.disconnected('binance','upgrade_http_'+reply.status);return;
+      }
+      this.registerSocket('binance',reply.webSocket,true);
+    }catch(e){
+      const reason=e?.name==='TimeoutError'?'upgrade_timeout':'upgrade_fetch_error';
+      this.disconnected('binance',reason);
+    }
+  }
+  registerSocket(source,ws,needsAccept=false){
     this.streams.set(source,ws);
     ws.addEventListener('open',()=>{
       if(this.streams.get(source)!==ws)return;
@@ -2030,6 +2059,16 @@ export class MarketLiveCollector extends DurableObject{
     });
     ws.addEventListener('close',()=>{if(this.streams.get(source)===ws)this.disconnected(source,'exchange_closed')});
     ws.addEventListener('error',()=>{if(this.streams.get(source)===ws)this.disconnected(source,'exchange_websocket_error')});
+    if(needsAccept){
+      // fetch Upgrade returns an accepted HTTP 101 socket which does not need
+      // Binance SUBSCRIBE. Explicitly accept it to start the CF read loop.
+      try{
+        ws.accept();
+        if(this.streams.get(source)===ws){
+          this.metrics[source].state='connected';this.metrics[source].error=null;
+        }
+      }catch{this.disconnected(source,'upgrade_accept_failed')}
+    }
   }
   disconnected(source,reason){
     const ws=this.streams.get(source);if(ws){this.streams.delete(source);try{ws.close()}catch{}}
@@ -3788,7 +3827,9 @@ export default{
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
         .fetch('https://whales/backfill').catch(e=>console.error('legacy_backfill_failed',String(e?.message||e||'unknown').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,80))));
     }
-    if(controller.cron==='*/5 * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
+    // Keep the 4 BTC watchlist addresses current and progress their
+    // historical cursors using existing Cloudflare minute ticks only.
+    if(controller.cron==='* * * * *'&&env.AUTO_WHALE_FETCH==='true'&&env.BTC_RESERVE_COLLECTOR){
       ctx.waitUntil(env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc')
         .fetch('https://whales/poll').catch(()=>console.error('btc_whale_poll_failed')));
     }
