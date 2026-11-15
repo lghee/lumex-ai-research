@@ -82,7 +82,7 @@ try{
  assert.equal(saved[0].events[0].source,'binance');
  const status=await(await worker.fetch(new Request('https://worker/market-hub/v1/github-binance-health'),env)).json();
  assert.equal(status.capture_confirmed,true);
- assert.equal(status.r2_readback_verified,true);
+ assert.equal(status.r2_readback_verified,true,JSON.stringify({source_proof_key:status.r2_source_proof_key,keys:[...store.keys()].filter(x=>x.includes('source-proof')),object:store.get(status.r2_source_proof_key)}));
  assert.equal(status.r2_source_proof_verified,1);
  assert.equal(status.scheduled_session_proven,false);
  assert.equal(status.automatic_dispatch.configured,false);
