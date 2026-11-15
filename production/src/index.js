@@ -3593,6 +3593,11 @@ export async function hubWhales30dArchive(env,now=Date.now()){
 
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
+  // PRO-only via WordPress, server-side Bearer; no public customer access to Worker R2.
+  if(path==='/market-hub/v1/exchange-compare'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./exchange-compare.mjs')).serveExchangeCompare(request,env);
+  }
   if(path==='/market-hub/v1/oi-health'&&method==='GET'){
     try{const obj=await env.MARKET_DATA?.get(OI_PREFIX+'health.json');
       return hubReply({ok:true,enabled:env.AUTO_OI_MIRROR_FETCH==='true',report:obj?await obj.json():null});
@@ -4125,6 +4130,9 @@ export default{
     if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
+      ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
+        console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
