@@ -1,6 +1,6 @@
 """LUMEX Cloudflare Container HTTP interface. Never sends exchange orders."""
 from __future__ import annotations
-import csv, io, json, os, tempfile, hmac, urllib.error, urllib.parse, hashlib, math
+import csv, io, json, os, tempfile, hmac, urllib.error, urllib.parse, hashlib, math, base64, http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv, refresh_public_perpetual_candles, MARKET_SOURCES,
@@ -8,6 +8,44 @@ from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv
 SUPPORTED={'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'}
 FRAMES={5,15,60}
 MAX_PAYLOAD=12_500_000
+
+def probe_binance_public_handshake(connection_factory=None):
+    """One read-only HTTP Upgrade probe from the existing research Container.
+
+    Do not interpret an upgrade as market capture or use any private/account
+    Binance APIs. HTTP response bodies/IPs are intentionally never exposed.
+    """
+    host='fstream.binance.com'
+    path='/market/stream?streams=!forceOrder@arr'
+    factory=connection_factory or http.client.HTTPSConnection
+    connection=None
+    try:
+        connection=factory(host,timeout=7)
+        nonce=base64.b64encode(os.urandom(16)).decode('ascii')
+        connection.request('GET',path,headers={
+            'Connection':'Upgrade','Upgrade':'websocket',
+            'Sec-WebSocket-Version':'13','Sec-WebSocket-Key':nonce,
+            'User-Agent':'LUMEX-Public-Market-Research/1.0',
+        })
+        response=connection.getresponse()
+        status=int(response.status)
+        return {'ok':status==101,
+            'handshake_http_status':status,
+            'error_code':'upgrade_accepted' if status==101 else
+                'upstream_http_forbidden' if status in (403,451) else
+                'upstream_unavailable',
+            'origin_category':'binance_official_public_usdm',
+            'scope':'http_upgrade_handshake_only','trading_enabled':False}
+    except (OSError,TimeoutError,http.client.HTTPException,ValueError):
+        return {'ok':False,'handshake_http_status':None,
+            'error_code':'upstream_unavailable',
+            'origin_category':'binance_official_public_usdm',
+            'scope':'http_upgrade_handshake_only','trading_enabled':False}
+    finally:
+        if connection is not None:
+            try:connection.close()
+            except Exception:pass
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def send(self, status:int, value, content_type='application/json', extra_headers=None):
@@ -31,6 +69,10 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get('content-length','0'))
             if size<2 or size>MAX_PAYLOAD:return self.send(413,{'error':'payload_size_invalid'})
             arg=json.loads(self.rfile.read(size))
+            if self.path=='/binance-egress-probe':
+                if not isinstance(arg,dict) or arg!={'scope':'public_usdm_forceOrder'}:
+                    raise ResearchError('invalid_public_probe_scope')
+                return self.send(200,probe_binance_public_handshake())
             if self.path=='/fetch':
                 sym=arg.get('symbol');interval=int(arg.get('interval_min',0))
                 if sym not in SUPPORTED or interval not in FRAMES:raise ResearchError('bad_market')
