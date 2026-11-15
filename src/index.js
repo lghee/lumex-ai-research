@@ -2499,6 +2499,60 @@ function observedAnalyticView(sql, u, now=Date.now()) {
     market_samples:[],market_samples_status:'not_included_use_verified_R2_candles_separately'});
 }
 
+
+/** Authenticated BTC reserve-movement × public-liquidation cross-window query.
+ * Each provider is isolated; no WordPress SQL is read or compared here.
+ * Hot DO records are at most 14 days; older windows are marked uncovered.
+ */
+export function whaleLiqCrossTimestamps(input, now=Date.now()) {
+  if(typeof input!=='string'||input.length>200||!/^([0-9]{10})(,[0-9]{10}){0,11}$/.test(input))
+    return null;
+  const values=input.split(',').map(Number);
+  if(values.length>12||new Set(values).size!==values.length||
+     values.some(t=>!Number.isSafeInteger(t)||t<1500000000||t>Math.floor(now/1000)+120))
+    return null;
+  return values;
+}
+export function whaleLiqCrossQuery(sql,timestamps,now=Date.now()){
+  const retentionStart=now-14*86400000;
+  const rows=[],uncovered=[];
+  for(let index=0;index<timestamps.length;index++){
+    const ts=timestamps[index]*1000;
+    if(ts<retentionStart){uncovered.push(index);continue}
+    const end=Math.min(now,ts+14400000);
+    if(end<=ts)continue;
+    const first=Math.min(now,ts+3600000);
+    // SQLite json_extract operates only on validated normalized public observations.
+    // Bounded, parameterized 4-hour range per movement. No fetch of private orders.
+    const matches=sql.exec(
+      "SELECT source, json_extract(payload,'$.position_side') AS side, " +
+      "COUNT(*) AS count_4h, " +
+      "SUM(CASE WHEN ts<? THEN 1 ELSE 0 END) AS count_1h, " +
+      "SUM(CAST(json_extract(payload,'$.price') AS REAL)*CAST(json_extract(payload,'$.quantity') AS REAL)) AS usd_4h, " +
+      "SUM(CASE WHEN ts<? THEN CAST(json_extract(payload,'$.price') AS REAL)*CAST(json_extract(payload,'$.quantity') AS REAL) ELSE 0 END) AS usd_1h " +
+      "FROM hub_events WHERE kind='liquidation' AND ts>=? AND ts<? " +
+      "AND source IN ('bybit','binance') AND json_extract(payload,'$.position_side') IN ('long','short') " +
+      "GROUP BY source,side LIMIT 5", first,first,ts,end).toArray();
+    if(matches.length>4)throw Error('whale_liq_provider_overflow');
+    for(const x of matches){
+      const exchange=x.source==='bybit'?'Bybit':x.source==='binance'?'Binance':null;
+      if(!exchange||!['long','short'].includes(x.side))throw Error('whale_liq_provider_invalid');
+      const n1=Number(x.count_1h),n4=Number(x.count_4h),v1=Number(x.usd_1h),v4=Number(x.usd_4h);
+      if(!Number.isSafeInteger(n1)||!Number.isSafeInteger(n4)||n1<0||n4<n1||
+         !Number.isFinite(v1)||!Number.isFinite(v4)||v1<0||v4<v1-1e-4||v4>1e16)
+        throw Error('whale_liq_aggregation_invalid');
+      rows.push({movement_idx:index,exchange,side:x.side,count_1h:n1,count_4h:n4,
+        usd_1h:Number(v1.toFixed(2)),usd_4h:Number(v4.toFixed(2))});
+    }
+  }
+  return {ok:true,schema:'lumex_whale_liquidation_cross_v1',
+    source_scope:'cloudflare_hot_public_liquidation_ledger',
+    legacy_sql_read:false,market_total_estimate:false,provider_comparability:'not_comparable',
+    order_execution:false,generated_ms:now,hot_retention_days:14,
+    window_hours:[1,4],movement_timestamps:timestamps,uncovered_indices:uncovered,
+    rows,coverage:'recorded_bybit_and_binance_public_only_no_backfill',orders_enabled:false};
+}
+
 export class MarketEventHub extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -2642,6 +2696,12 @@ export class MarketEventHub extends DurableObject{
     if((u.pathname==='/observed-pressure'||u.pathname==='/observed-replay')&&request.method==='GET') {
       try{return observedAnalyticView(this.ctx.storage.sql,u)}
       catch(e){return hubReply({ok:false,error:'observed_analytics_unavailable'},503)}
+    }
+    if(u.pathname==='/whale-liquidation-cross'&&request.method==='GET'){
+      const timestamps=whaleLiqCrossTimestamps(u.searchParams.get('ts'));
+      if(timestamps===null)return hubReply({ok:false,error:'invalid_movement_timestamps'},400);
+      try{return hubReply(whaleLiqCrossQuery(this.ctx.storage.sql,timestamps))}
+      catch(error){return hubReply({ok:false,error:'whale_liquidation_cross_unavailable'},503)}
     }
     if(u.pathname==='/insights'&&request.method==='GET'){
       const windowName=String(u.searchParams.get('window')||'24h');
@@ -3178,6 +3238,14 @@ async function hubRoute(request,env){
     }
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(
       new Request('https://hub'+endpoint+'?'+q.toString()));
+  }
+  if(path==='/market-hub/v1/whale-liquidation-cross'&&method==='GET'){
+    if(symbol!=='BTCUSDT')return hubReply({ok:false,error:'btc_only'},400);
+    const timestamps=whaleLiqCrossTimestamps(u.searchParams.get('ts'));
+    if(timestamps===null)return hubReply({ok:false,error:'invalid_movement_timestamps'},400);
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+      new Request('https://hub/whale-liquidation-cross?ts='+timestamps.join(',')));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
