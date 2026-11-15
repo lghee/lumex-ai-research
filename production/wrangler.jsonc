@@ -90,6 +90,7 @@
     "AUTO_DERIVATIVES_FETCH": "true",
     "AUTO_LEGACY_BACKFILL": "true",
     "AUTO_PUBLIC_PULSE_FETCH": "true",
+    "AUTO_EXCHANGE_COMPARE_FETCH": "true",
     "AUTO_OI_MIRROR_FETCH": "true",
     "AUTO_MARKET_QA_DAILY": "true",
     "AUTO_BINANCE_LIQUIDATIONS": "true",
