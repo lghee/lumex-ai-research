@@ -1551,8 +1551,16 @@ export async function backfillOneLegacySource(env,storage,source){
 export async function runLegacyBackfill(env,storage){
   if(env.AUTO_LEGACY_BACKFILL!=='true')return {ok:true,enabled:false,archival_only:true};
   const results=[];
-  // Three bounded indexed SQL reads / 5m, up to 300 rows total.
-  for(const source of LEGACY_SOURCES)results.push(await backfillOneLegacySource(env,storage,source));
+  // Catch up the immutable public liquidation archive more quickly without
+  // touching any private data. At most 8 x 100 rows per 5-minute execution;
+  // stop immediately at an error or a verified source-high-water mark.
+  for(let i=0;i<8;i++){
+    const liq=await backfillOneLegacySource(env,storage,'liquidations');
+    results.push(liq);
+    if(!liq.success||liq.caught_up)break;
+  }
+  for(const source of ['whales','market_snapshots'])
+    results.push(await backfillOneLegacySource(env,storage,source));
   return {ok:results.every(x=>x.success),enabled:true,archival_only:true,
     live_ledger_merge:false,source_rows_deleted:false,
     results,checked_at_ms:Date.now()};
@@ -2368,6 +2376,8 @@ export async function marketOpsHistory(env,now=Date.now()){
 }
 
 const HUB_HOUR_MS=3600000;
+const HUB_LONG_RETENTION_DAYS=35;
+const HUB_SHORT_RETENTION_DAYS=14;
 const HUB_WINDOWS=Object.freeze({'1h':1,'24h':24,'7d':168,'14d':336,'30d':720});
 function insightWindow(name){return HUB_WINDOWS[name]||null}
 export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.now()){
@@ -2430,13 +2440,15 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
 /** Source-separated, bounded observed-only analytics from the hot DO event ledger.
  * Never substitutes legacy WordPress archives or reports market-wide totals.
  */
-function observedAnalyticView(sql, u, now=Date.now()) {
+function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
   const view=u.pathname==='/observed-pressure'?'pressure':u.pathname==='/observed-replay'?'replay':null;
   if(!view)return hubReply({ok:false,error:'unknown_observed_view'},404);
   const start=view==='pressure'?now-195*60000:Number(u.searchParams.get('start_ms'));
   const end=view==='pressure'?now+1:Number(u.searchParams.get('end_ms'));
   if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>=end||
-     start<now-14*86400000||end>now+60000||
+     start<now-HUB_LONG_RETENTION_DAYS*86400000||
+     (view==='replay' && start<now-HUB_SHORT_RETENTION_DAYS*86400000 && start<longSince)||
+     end>now+60000||
      (view==='replay'&&end-start>14400000))
     return hubReply({ok:false,error:'observed_window_out_of_hot_retention'},422);
   // The limit prevents an unbounded customer query; overflow is explicitly reported.
@@ -2495,7 +2507,7 @@ function observedAnalyticView(sql, u, now=Date.now()) {
   return hubReply({...common,schema:'lumex_observed_replay_v1',
     events:events.slice(0,max),events_total_in_hot_window:events.length,
     bins_5m:[...buckets.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms),
-    summary_estimate:summary,truncated:limited,event_limit:max,hot_retention_days:14,
+    summary_estimate:summary,truncated:limited,event_limit:max,hot_retention_days:HUB_LONG_RETENTION_DAYS,
     market_samples:[],market_samples_status:'not_included_use_verified_R2_candles_separately'});
 }
 
@@ -2593,9 +2605,11 @@ export function observedLegacySummary(sql,hours,now=Date.now()){
     bins:[...bins.values()].map(x=>({...x,value:Number(x.value.toFixed(2))})).sort((a,b)=>a.time_bucket-b.time_bucket),
     events,coverage:'hot_index_no_disconnection_backfill'};
 }
-export function observedTimelineSummary(sql,days,now=Date.now()){
+export function observedTimelineSummary(sql,days,now=Date.now(),longSince=now){
   if(![1,7,30].includes(days))throw Error('timeline_days_invalid');
-  const covered=Math.min(days,14),lower=now-covered*86400000;
+  const longReady=now-longSince>=30*86400000;
+  const covered=days===30&&!longReady?HUB_SHORT_RETENTION_DAYS:days,
+    lower=now-covered*86400000;
   // Aggregation happens inside DO SQLite, avoiding 100k public events sent to WP.
   const rows=sql.exec(
     "SELECT CAST(ts/3600000 AS INTEGER)*3600000 AS hour_ms, source, " +
@@ -2619,7 +2633,7 @@ export function observedTimelineSummary(sql,days,now=Date.now()){
   return {ok:true,schema:'lumex_cf_liquidation_timeline_v1',source:'cloudflare_hot_public_liquidations',
     legacy_sql_read:false,order_execution:false,observed_only:true,
     market_total_estimate:false,provider_comparability:'not_comparable',
-    requested_days:days,covered_days:covered,coverage_complete:days<=14,
+    requested_days:days,covered_days:covered,coverage_complete:days<30||longReady,
     backfill_older_than_hot_index:false,generated_ms:now,groups,
     coverage:'observed_public_events_only; periods without collector evidence cannot be treated as zero'};
 }
@@ -2635,6 +2649,14 @@ export class MarketEventHub extends DurableObject{
       this.ctx.storage.sql.exec("ALTER TABLE hub_events ADD COLUMN rollup_done INTEGER NOT NULL DEFAULT 0");
     this.ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS hub_events_rollup_pending ON hub_events(rollup_done,ts)");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_hourly(bucket INTEGER NOT NULL,kind TEXT NOT NULL,source TEXT NOT NULL,side TEXT NOT NULL,events INTEGER NOT NULL,quantity REAL NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,PRIMARY KEY(bucket,kind,source,side))");
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hub_meta(key TEXT PRIMARY KEY, value INTEGER NOT NULL)");
+    // Conservative coverage watermark: do not infer a complete 30-day
+    // historical index from a ledger that previously expired after 14d.
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO hub_meta(key,value) VALUES ('long_history_started_ms',?)",Date.now());
+  }
+  longHistoryStart(){
+    const rows=this.ctx.storage.sql.exec("SELECT value FROM hub_meta WHERE key='long_history_started_ms'").toArray();
+    return Number(rows[0]?.value||Date.now());
   }
   async fetch(request){
     const u=new URL(request.url);
@@ -2765,7 +2787,7 @@ export class MarketEventHub extends DurableObject{
     }
 
     if((u.pathname==='/observed-pressure'||u.pathname==='/observed-replay')&&request.method==='GET') {
-      try{return observedAnalyticView(this.ctx.storage.sql,u)}
+      try{return observedAnalyticView(this.ctx.storage.sql,u,Date.now(),this.longHistoryStart())}
       catch(e){return hubReply({ok:false,error:'observed_analytics_unavailable'},503)}
     }
     if(u.pathname==='/whale-liquidation-cross'&&request.method==='GET'){
@@ -2774,6 +2796,17 @@ export class MarketEventHub extends DurableObject{
       try{return hubReply(whaleLiqCrossQuery(this.ctx.storage.sql,timestamps))}
       catch(error){return hubReply({ok:false,error:'whale_liquidation_cross_unavailable'},503)}
     }
+    if(u.pathname==='/long-history-readiness'&&request.method==='GET'){
+      const now=Date.now(),started=this.longHistoryStart(),days=(now-started)/86400000;
+      const old=this.ctx.storage.sql.exec("SELECT MIN(ts) AS oldest_ms, MAX(ts) AS latest_ms, COUNT(*) AS rows FROM hub_events WHERE kind='liquidation'").toArray()[0]||{};
+      return hubReply({ok:true,schema:'lumex_long_history_readiness_v1',
+        generated_ms:now,watermark_ms:started,retention_days:HUB_LONG_RETENTION_DAYS,
+        minimum_days_for_30d:30,watermark_age_days:Number(days.toFixed(3)),
+        thirty_day_ledger_warm:days>=30,oldest_observed_ms:old.oldest_ms||null,
+        latest_observed_ms:old.latest_ms||null,observations:Number(old.rows||0),
+        continuous_provider_capture_not_proven:true,
+        safe_to_disable_wordpress_crons:false,orders_enabled:false});
+    }
     if(u.pathname==='/observed-summary'&&request.method==='GET'){
       const hours=Number(u.searchParams.get('hours'));
       try{return hubReply({...observedLegacySummary(this.ctx.storage.sql,hours),symbol:u.searchParams.get('symbol')})}
@@ -2781,7 +2814,7 @@ export class MarketEventHub extends DurableObject{
     }
     if(u.pathname==='/observed-timeline'&&request.method==='GET'){
       const days=Number(u.searchParams.get('days'));
-      try{return hubReply({...observedTimelineSummary(this.ctx.storage.sql,days),symbol:u.searchParams.get('symbol')})}
+      try{return hubReply({...observedTimelineSummary(this.ctx.storage.sql,days,Date.now(),this.longHistoryStart()),symbol:u.searchParams.get('symbol')})}
       catch{return hubReply({ok:false,error:'observed_timeline_unavailable'},503)}
     }
     if(u.pathname==='/insights'&&request.method==='GET'){
@@ -2810,7 +2843,7 @@ export class MarketEventHub extends DurableObject{
         this.ctx.storage.sql.exec('SELECT payload FROM hub_events WHERE kind=? AND ts>=? ORDER BY ts DESC LIMIT ?',kind,cutoff,limit).toArray():
         this.ctx.storage.sql.exec('SELECT payload FROM hub_events WHERE ts>=? ORDER BY ts DESC LIMIT ?',cutoff,limit).toArray();
       return hubReply({ok:true,events:rows.map(r=>JSON.parse(r.payload)),scope:'observed_only',
-        hot_retention_days:14,archive:'R2_immutable_batches'});
+        hot_retention_days:HUB_LONG_RETENTION_DAYS,archive:'R2_immutable_batches'});
     }
     return hubReply({ok:false,error:'not_found'},404);
   }
@@ -2832,7 +2865,9 @@ export class MarketEventHub extends DurableObject{
           for(const r of batch)this.ctx.storage.sql.exec('UPDATE hub_events SET archived=1 WHERE id=?',r.id);
         }
         // Only hot index expires; immutable R2 event batches retain historical evidence.
-        this.ctx.storage.sql.exec('DELETE FROM hub_events WHERE archived=1 AND rollup_done=1 AND ts<?',Date.now()-14*86400000);
+        const clock=Date.now();
+        this.ctx.storage.sql.exec("DELETE FROM hub_events WHERE archived=1 AND rollup_done=1 AND kind NOT IN ('liquidation','whale_transfer') AND ts<?",clock-HUB_SHORT_RETENTION_DAYS*86400000);
+        this.ctx.storage.sql.exec("DELETE FROM hub_events WHERE archived=1 AND rollup_done=1 AND kind IN ('liquidation','whale_transfer') AND ts<?",clock-HUB_LONG_RETENTION_DAYS*86400000);
       }catch(e){console.error('market_hub_archive_error',safeError(e));}
     }
     const pending=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE archived=0 OR rollup_done=0 LIMIT 1').toArray();
@@ -3335,6 +3370,10 @@ async function hubRoute(request,env){
     q.set(analytics==='/observed-summary'?'hours':'days',u.searchParams.get(analytics==='/observed-summary'?'hours':'days')||'');
     q.set('symbol',symbol);
     return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub'+analytics+'?'+q));
+  }
+  if(path==='/market-hub/v1/long-history-readiness'&&method==='GET'){
+    if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
+    return env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/long-history-readiness'));
   }
   if(path==='/market-hub/v1/events'&&method==='GET'){
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
