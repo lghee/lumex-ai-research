@@ -3832,6 +3832,17 @@ async function hubRoute(request,env){
         safe_to_disable_wordpress_crons:false});
     }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
   }
+  if(path==='/market-hub/v1/github-binance-ingest'&&method==='POST')
+    return githubBinanceSidecarRoute(request,env);
+  if(path==='/market-hub/v1/github-binance-health'&&method==='GET'){
+    const status=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
+    if(status?.schema!=='lumex_binance_github_public_sidecar_v1')
+      return hubReply({ok:false,reason:'no_signed_github_sidecar_session',
+        capture_confirmed:false,cron_retirement_allowed:false});
+    return hubReply({...status,stale:Date.now()-status.checked_ms>900000,
+      capture_confirmed:status.last_accepted_ms>0&&Date.now()-status.last_accepted_ms<1800000,
+      cron_retirement_allowed:false});
+  }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     try{return hubReply(await hubRadar(env))}
@@ -3861,17 +3872,6 @@ async function hubRoute(request,env){
     headers.set('vary','Origin');
     headers.set('cache-control','no-store');
     return new Response(upstream.body,{status:upstream.status,headers});
-  }
-  if(path==='/market-hub/v1/github-binance-ingest'&&method==='POST')
-    return githubBinanceSidecarRoute(request,env);
-  if(path==='/market-hub/v1/github-binance-health'&&method==='GET'){
-    const status=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
-    if(status?.schema!=='lumex_binance_github_public_sidecar_v1')
-      return hubReply({ok:false,reason:'no_signed_github_sidecar_session',
-        capture_confirmed:false,cron_retirement_allowed:false});
-    return hubReply({...status,stale:Date.now()-status.checked_ms>900000,
-      capture_confirmed:status.last_accepted_ms>0&&Date.now()-status.last_accepted_ms<1800000,
-      cron_retirement_allowed:false});
   }
   if(path==='/market-hub/v1/ingest'&&method==='POST'){
     if(!hubIngestAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
