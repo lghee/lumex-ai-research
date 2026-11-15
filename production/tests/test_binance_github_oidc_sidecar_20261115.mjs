@@ -6,7 +6,7 @@ const textBuffer=Buffer.from;
 const b64=x=>Buffer.from(x).toString('base64url');
 const raw=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
  .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}');
-const {verifyGithubBinanceOidc,normalizeGithubBinanceFrames,default:worker}=
+const {verifyGithubBinanceOidc,normalizeGithubBinanceFrames,dispatchGithubBinanceIfStale,default:worker}=
  await import('data:text/javascript;base64,'+Buffer.from(raw).toString('base64'));
 const {publicBinanceFrame,oidcClaimChecks}=await import('../scripts/binance-public-sidecar.mjs');
 const now=Date.now(),epoch=Math.floor(now/1000);
@@ -85,13 +85,41 @@ try{
  assert.equal(status.r2_readback_verified,true);
  assert.equal(status.r2_source_proof_verified,1);
  assert.equal(status.scheduled_session_proven,false);
+ assert.equal(status.automatic_dispatch.configured,false);
+ assert.equal(status.session_event,'schedule'===claims.event_name?'schedule':'schedule');
  assert.equal(status.source_session_stale,false);
  assert([...store.keys()].some(k=>k.startsWith('market-hub/events-source-proof/binance/v1/')));
  const proofKey=status.r2_source_proof_key;
  assert.equal(store.get(proofKey).event.source,'binance');
  assert.equal(status.cron_retirement_allowed,false);
+ // 5-minute Cloudflare Cron dispatcher is fail-closed until a scoped secret exists.
+ const missingSecret=await dispatchGithubBinanceIfStale({MARKET_DATA:{get:async()=>null}},Date.now());
+ assert.equal(missingSecret.reason,'github_dispatch_secret_not_configured');
+ const dispatchStore=new Map(),calls=[];
+ const dispatchEnv={MARKET_DATA:{
+  get:async(key)=>dispatchStore.has(key)?{json:async()=>dispatchStore.get(key)}:null,
+  put:async(key,data)=>dispatchStore.set(key,JSON.parse(data))
+ },LUMEX_GITHUB_DISPATCH_TOKEN:'f'.repeat(46),
+ LUMEX_GITHUB_DISPATCH_FALLBACK:'true'};
+ globalThis.fetch=async(url,opts)=>{
+  assert.equal(url,'https://api.github.com/repos/lghee/lumex-ai-research/actions/workflows/lumex-binance-public-sidecar.yml/dispatches');
+  assert.equal(opts.method,'POST');
+  assert.deepEqual(JSON.parse(opts.body),{ref:'main'});
+  assert(opts.headers.authorization.startsWith('Bearer '));
+  calls.push(url);
+  return new Response(null,{status:204});
+ };
+ const first=await dispatchGithubBinanceIfStale(dispatchEnv,Date.now());
+ assert.equal(first.result,'dispatched');
+ assert.equal(calls.length,1);
+ const second=await dispatchGithubBinanceIfStale(dispatchEnv,Date.now()+70000);
+ assert.equal(second.skipped,'rate_limited');
+ assert.equal(calls.length,1);
+ const fresh=await dispatchGithubBinanceIfStale({...dispatchEnv,MARKET_DATA:env.MARKET_DATA},Date.now());
+ assert.equal(fresh.skipped,'signed_session_recent');
+ assert.equal(calls.length,1);
  const unauthorized=await worker.fetch(new Request('https://worker/market-hub/v1/github-binance-ingest',{
   method:'POST',body:'{}'}),env);
  assert.equal(unauthorized.status,401);
 }finally{globalThis.fetch=original}
-console.log('PASS GitHub OIDC RS256 scoped live Binance sample ingress + duplicate ID + source archive pending + fail closed');
+console.log('PASS signed Binance public event -> R2 readback, webhook source attestation, safe Cloudflare 5-minute dispatch fallback and OIDC trust');
