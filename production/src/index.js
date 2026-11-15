@@ -2478,6 +2478,45 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
 const GH_BINANCE_AUD='lumex-binance-public-liquidation-v1';
 const GH_BINANCE_STATUS_KEY='market-hub/diagnostics/binance-github-sidecar-v1.json';
 const GH_BINANCE_PROOF_PREFIX='market-hub/events-source-proof/binance/v1/';
+const GH_BINANCE_FALLBACK_KEY='market-hub/diagnostics/binance-cloudflare-dispatch-v1.json';
+/** Optional Cloudflare native 5-minute trigger for GitHub's unreliable cron.
+ * Only use a restricted repository-scoped GitHub Actions:write token supplied
+ * as a CF Worker secret. No token/response body/IP is persisted or logged.
+ * Suppress duplicate dispatch if any signed GitHub-sidecar session is recent.
+ */
+export async function dispatchGithubBinanceIfStale(env,now=Date.now()){
+  if(!env.MARKET_DATA)return {ok:false,reason:'r2_missing'};
+  const last=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
+  const age=now-Number(last?.checked_ms||0);
+  if(last?.schema==='lumex_binance_github_public_sidecar_v1'&&age>=0&&age<420000)
+    return {ok:true,skipped:'signed_session_recent',age_seconds:Math.floor(age/1000)};
+  const token=env.LUMEX_GITHUB_DISPATCH_TOKEN;
+  if(typeof token!=='string'||token.length<30)
+    return {ok:false,reason:'github_dispatch_secret_not_configured',
+      scheduled_github_actions_proven:false};
+  const previous=await opsReadR2(env,GH_BINANCE_FALLBACK_KEY);
+  const since=now-Number(previous?.attempt_ms||0);
+  if(previous?.schema==='lumex_gh_binance_dispatch_v1'&&since>=0&&since<270000)
+    return {...previous,skipped:'rate_limited'};
+  const body={schema:'lumex_gh_binance_dispatch_v1',attempt_ms:now,
+    result:'pending',status_code:null,source:'cloudflare_5m_cron',
+    target:'github_actions_public_binance_sidecar',
+    no_private_exchange_access:true,cron_retirement_allowed:false};
+  await env.MARKET_DATA.put(GH_BINANCE_FALLBACK_KEY,JSON.stringify(body),
+    {httpMetadata:{contentType:'application/json'}});
+  try{
+    const res=await fetch('https://api.github.com/repos/lghee/lumex-ai-research/actions/workflows/lumex-binance-public-sidecar.yml/dispatches',{
+      method:'POST',headers:{authorization:'Bearer '+token,accept:'application/vnd.github+json',
+        'content-type':'application/json','user-agent':'LUMEX-Public-Collector/1.0'},
+      body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(10000)});
+    body.status_code=res.status;
+    body.result=res.status===204?'dispatched':'github_http_'+res.status;
+  }catch{body.result='github_dispatch_transport_error'}
+  await env.MARKET_DATA.put(GH_BINANCE_FALLBACK_KEY,JSON.stringify(body),
+    {httpMetadata:{contentType:'application/json'}});
+  return {ok:body.result==='dispatched',...body};
+}
+
 /** Persistent, source-attributed authenticated Binance raw observation backup.
  * Mirrors validated DO-accepted events to deterministic R2 object keys and
  * performs read-after-write byte equality before claiming persistence.
@@ -2617,6 +2656,8 @@ async function githubBinanceSidecarRoute(request,env){
     last_accepted_ms:accepted>0?current:Number(old?.last_accepted_ms||0),
     accepted_this_request:accepted,invalid_this_request:invalid,
     total_accepted:Number(old?.total_accepted||0)+accepted,
+    session_event:claim.event_name,
+    last_scheduled_ms:claim.event_name==='schedule'?current:Number(old?.last_scheduled_ms||0),
     r2_source_proof_verified:r2Proof.verified,
     r2_source_proof_key:r2Proof.last_key||String(old?.r2_source_proof_key||''),
     r2_source_proof_last_event_ms:r2Proof.last_event_ms||Number(old?.r2_source_proof_last_event_ms||0),
@@ -3880,10 +3921,18 @@ async function hubRoute(request,env){
   if(path==='/market-hub/v1/github-binance-ingest'&&method==='POST')
     return githubBinanceSidecarRoute(request,env);
   if(path==='/market-hub/v1/github-binance-health'&&method==='GET'){
+    const fallback=await opsReadR2(env,GH_BINANCE_FALLBACK_KEY);
+    const dispatch={configured:env.LUMEX_GITHUB_DISPATCH_FALLBACK==='true'&&
+        typeof env.LUMEX_GITHUB_DISPATCH_TOKEN==='string'&&
+        env.LUMEX_GITHUB_DISPATCH_TOKEN.length>=30,
+      last_attempt_ms:Number(fallback?.attempt_ms||0)||null,
+      last_result:String(fallback?.result||'never_attempted'),
+      github_schedule_automated_unverified:true};
     const status=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
     if(status?.schema!=='lumex_binance_github_public_sidecar_v1')
       return hubReply({ok:false,reason:'no_signed_github_sidecar_session',
-        capture_confirmed:false,r2_readback_verified:false,cron_retirement_allowed:false});
+        capture_confirmed:false,r2_readback_verified:false,
+        automatic_dispatch:dispatch,cron_retirement_allowed:false});
     const now=Date.now();
     const age=now-Number(status.checked_ms||0);
     let stored=false,proofEventMs=0;
@@ -3908,12 +3957,13 @@ async function hubRoute(request,env){
     }
     return hubReply({...status,stale:age>900000,
       source_session_stale:age>900000,
-      scheduled_session_proven:false,
+      scheduled_session_proven:Number(status.last_scheduled_ms||0)>0&&
+        now-status.last_scheduled_ms>=0&&now-status.last_scheduled_ms<900000,
       // GitHub schedule is best effort; workflow_dispatch is not proof.
       capture_confirmed:status.last_accepted_ms>0&&now-status.last_accepted_ms<1800000,
       r2_readback_verified:stored,r2_last_observed_ms:proofEventMs||null,
       source_sample_coverage:'discontinuous_observed_windows_only',
-      cron_retirement_allowed:false});
+      automatic_dispatch:dispatch,cron_retirement_allowed:false});
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
@@ -4069,6 +4119,9 @@ export default{
       if(utc.getUTCHours()>0||(utc.getUTCHours()===0&&utc.getUTCMinutes()>=15))
         ctx.waitUntil(marketOpsDaily(env,utc.getTime()).catch(e=>console.error('market_ops_daily_failed',String(e?.message||e).slice(0,120))));
     }
+    if(controller.cron==='*/5 * * * *'&&env.LUMEX_GITHUB_DISPATCH_FALLBACK==='true')
+      ctx.waitUntil(dispatchGithubBinanceIfStale(env).catch(()=>
+        console.warn('binance_dispatch_fallback_not_ready')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
