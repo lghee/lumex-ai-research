@@ -26,7 +26,7 @@ const result=await collector.poll();
 assert.equal(result.ok,true,'successful bounded history');
 assert.equal(calls,4,'one newest and three bounded historic pages');
 assert.equal(result.backfill_complete,true);
-const status=await (await collector.fetch('https://whales/status')).json();
+const status=await (await collector.fetch(new Request('https://whales/status'))).json();
 assert.equal(status.watchlist_count,1);
 assert.equal(status.watchlist[0].backfill_complete,true);
 assert.equal(nativeWhaleWatchlistBackfillProof(status,Date.now()),true);
