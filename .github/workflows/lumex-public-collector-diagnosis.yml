@@ -17,7 +17,7 @@ jobs:
           python3 - <<'PY'
           import json,os,subprocess
           base=os.environ['BASE'].rstrip('/')
-          for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
+          for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/binance-egress-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
               try:
                   result=subprocess.run(['curl','--fail','--silent','--show-error',
                       '--location','--max-time','15',base+'/'+endpoint],
@@ -26,6 +26,12 @@ jobs:
                   x=json.loads(result.stdout[:100000])
                   if endpoint.endswith('live-health'):
                       x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','route','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
+                  elif endpoint.endswith('binance-egress-health'):
+                      x={'ok':x.get('ok'),'status':x.get('status'),'checked_ms':x.get('checked_ms'),
+                         'handshake_http_status':x.get('handshake_http_status'),'cached':x.get('cached'),
+                         'reason':x.get('reason'),'stale':x.get('stale'),
+                         'cron_retirement_allowed':x.get('cron_retirement_allowed'),
+                         'usable_as_liquidation_feed':x.get('usable_as_liquidation_feed')}
                   elif endpoint.endswith('whale-health'):
                       x={'ok':x.get('ok'),'enabled':x.get('enabled'),'source':x.get('source'),'last_run_ms':x.get('last_run_ms'),'last_success_ms':x.get('last_success_ms'),'last_error':x.get('last_error'),'watchlist':[{'backfill_complete':z.get('backfill_complete'),'gap_possible':z.get('gap_possible'),'last_checked_ms':z.get('last_checked_ms'),'error':z.get('error')} for z in (x.get('watchlist') or []) if isinstance(z,dict)]}
                   elif endpoint.endswith('legacy-backfill-health'):
