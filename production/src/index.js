@@ -2491,7 +2491,7 @@ function observedAnalyticView(sql, u, now=Date.now()) {
     summary[e.side+'_count']++;
     buckets.set(k,b);
   }
-  const max=500,limited=events.length>max;
+  const max=2000,limited=events.length>max;
   return hubReply({...common,schema:'lumex_observed_replay_v1',
     events:events.slice(0,max),events_total_in_hot_window:events.length,
     bins_5m:[...buckets.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms),
