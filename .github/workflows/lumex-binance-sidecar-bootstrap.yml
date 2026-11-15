@@ -1,0 +1,37 @@
+name: LUMEX Binance sidecar initial activation (once)
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/lumex-binance-sidecar-bootstrap.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  bootstrap:
+    if: github.repository == 'lghee/lumex-ai-research' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Launch an authenticated first Binance sampled observation window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # workflow_dispatch emitted by GITHUB_TOKEN legitimately triggers
+          # the separate source collector; its own OIDC token is scoped to main.
+          # No Binance credentials, Cloudflare secrets or private keys required.
+          for attempt in 1 2 3; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/workflows/lumex-binance-public-sidecar.yml/dispatches" -f ref=main; then
+              echo "Dispatched Binance public sampler (workflow_dispatch, main)"
+              exit 0
+            fi
+            if [ "${attempt}" = 3 ]; then
+              echo "::error::Initial Binance sampler dispatch failed; inspect Actions workflow state and permissions"
+              exit 1
+            fi
+            sleep 5
+          done
