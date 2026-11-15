@@ -41,7 +41,30 @@ jobs:
         run: npm run check:js
       - name: Deploy existing production Worker name and bindings
         working-directory: production
-        run: npx wrangler deploy --config wrangler.jsonc
+        shell: bash
+        env:
+          LUMEX_GITHUB_DISPATCH_TOKEN: ${{ secrets.LUMEX_GITHUB_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Optional one-step upload of a repository-scoped Actions:write
+          # dispatch token into the same Cloudflare Worker release.
+          # Keep the existing manual-only production approval gate.
+          if [[ -n "${LUMEX_GITHUB_DISPATCH_TOKEN:-}" ]]; then
+            umask 077
+            secrets_file="$(mktemp "${RUNNER_TEMP}/lumex-secret.XXXXXX.json")"
+            trap 'rm -f "$secrets_file"' EXIT
+            python3 - "$secrets_file" <<'PY'
+          import json, os, sys
+          token = os.environ.get('LUMEX_GITHUB_DISPATCH_TOKEN', '')
+          if len(token) < 30:
+              raise SystemExit('Dispatch secret is too short')
+          with open(sys.argv[1], 'w', encoding='utf-8') as output:
+              json.dump({'LUMEX_GITHUB_DISPATCH_TOKEN': token}, output)
+          PY
+            npx wrangler deploy --config wrangler.jsonc --secrets-file "$secrets_file"
+          else
+            npx wrangler deploy --config wrangler.jsonc
+          fi
       - name: Verify public Worker versions from deployed endpoint
         shell: bash
         run: |
