@@ -2725,6 +2725,20 @@ async function hubRoute(request,env){
     try{return hubReply(await marketOpsReadiness(env));}
     catch{return hubReply({ok:false,error:'release_readiness_unavailable'},503);}
   }
+  if(path==='/market-hub/v1/quality-proof-retry'&&method==='POST'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    if(env.AUTO_MARKET_QA_DAILY!=='true'||!env.MARKET_DATA)
+      return hubReply({ok:false,error:'qa_daily_disabled_or_r2_missing'},503);
+    try{
+      const result=await marketOpsDaily(env);
+      return hubReply({...result,scope:'current_utc_date_only',
+        safe_to_disable_wordpress_crons:false},result.ok?200:503);
+    }catch(e){
+      console.error('market_ops_manual_retry_failed',String(e?.message||e).slice(0,120));
+      return hubReply({ok:false,error:'qa_daily_write_failed',
+        safe_to_disable_wordpress_crons:false},503);
+    }
+  }
   if(path==='/market-hub/v1/quality-history'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     try{return hubReply(await marketOpsHistory(env));}
