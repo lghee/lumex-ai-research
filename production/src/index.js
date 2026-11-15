@@ -2318,8 +2318,14 @@ export async function marketOpsDaily(env,now=Date.now()){
     return {ok:false,disabled:true};
   const date=new Date(now).toISOString().slice(0,10);
   const key=OPS_PREFIX+'daily/'+date.replaceAll('-','')+'.json';
-  const existing=await env.MARKET_DATA.head(key);
-  if(existing)return {ok:true,already_saved:true,date};
+  const existing=await opsReadR2(env,key);
+  if(existing?.schema==='lumex_ops_daily_v1'&&existing.date===date&&
+     Number.isSafeInteger(existing.passed)&&Number.isSafeInteger(existing.enabled_checks)&&
+     typeof existing.ready==='boolean'&&
+     typeof existing.liquidation_r2_sample_verified==='boolean')
+    return {ok:true,already_saved:true,date};
+  // A partial or malformed R2 object must not block the daily retry.
+  // Only replace the current UTC date; never fabricate historical proof.
   const readiness=await marketOpsReadiness(env,now);
   const doc={schema:'lumex_ops_daily_v1',date,observed_at_unix:readiness.checked_unix,
     passed:readiness.passed,enabled_checks:readiness.enabled_checks,
@@ -2348,13 +2354,16 @@ export async function marketOpsHistory(env,now=Date.now()){
     if(x?.schema!=='lumex_ops_daily_v1'||x?.date!==date||
        !Number.isSafeInteger(x.passed)||!Number.isSafeInteger(x.enabled_checks)||
        typeof x.ready!=='boolean'||typeof x.liquidation_r2_sample_verified!=='boolean')
-      return {date,status:'missing'};
+      return {date,status:x?'invalid':'missing'};
     return {date,status:'recorded',passed:x.passed,enabled_checks:x.enabled_checks,
       ready:x.ready,r2_liquidation_verified:x.liquidation_r2_sample_verified,
       r2_list_errors:Number.isSafeInteger(x.r2_list_errors)?x.r2_list_errors:null};
   }));
   return {ok:true,schema:'lumex_market_ops_history_v1',days:7,items:results,
-    incomplete_days:results.filter(x=>x.status==='missing').length,
+    incomplete_days:results.filter(x=>x.status!=='recorded').length,
+    qa_daily_enabled:env.AUTO_MARKET_QA_DAILY==='true',
+    r2_binding_present:!!env.MARKET_DATA,
+    current_utc_date:new Date(now).toISOString().slice(0,10),
     safe_to_disable_wordpress_crons:false};
 }
 
