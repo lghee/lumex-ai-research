@@ -1862,10 +1862,23 @@ export class BtcReserveCollector extends DurableObject{
       const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
       const newest=await this.fetchPage(a.address);state.requests++;
       const pages=[newest];
-      // One bounded historic page per poll to build a 35-day history.
-      const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
-      if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
-        pages.push(await this.fetchPage(a.address,cursor));state.requests++;
+      // Up to three historical pages per 5-minute collector slot.
+      // This never contacts WordPress and never calls private exchange APIs.
+      // Keep the last successful cursor so high-activity addresses finish
+      // their 35-day Esplora scan instead of requiring 30 wall-clock days.
+      const prevHead=prior.head;
+      const gap=Boolean(prevHead&&newest.length===25&&
+        !newest.some(tx=>tx.txid===prevHead));
+      const wasComplete=prior.backfill_complete===true&&!gap;
+      let cursor=prior.backfill_cursor||
+        ((!wasComplete&&newest.length===25)?newest.at(-1)?.txid:'');
+      for(let step=0;step<3&&cursor&&/^[0-9a-fA-F]{64}$/.test(cursor);step++){
+        const page=await this.fetchPage(a.address,cursor);
+        state.requests++;pages.push(page);
+        const oldest=page.at(-1),next=oldest?.txid;
+        if(page.length<25||Number(oldest?.status?.block_time||0)*1000<now-35*86400000||
+          !next||next===cursor)break;
+        cursor=next;
       }
       const unique=new Map();
       for(const page of pages)for(const tx of page){
@@ -1885,11 +1898,12 @@ export class BtcReserveCollector extends DurableObject{
       prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
       // Historic pagination ends when the last page has <25 rows or older than 35 days.
       const lastPage=pages.at(-1),oldest=lastPage.at(-1);
-      prior.backfill_complete=lastPage.length<25||
+      prior.backfill_complete=wasComplete||lastPage.length<25||
         (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
       prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
-      // There may be >25 newly confirmed transactions between polls.
-      prior.gap_possible=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
+      // A gap never becomes verified simply by receiving newer data.
+      // Clear the gap flag only after a complete historical rescan.
+      prior.gap_possible=gap&&!prior.backfill_complete;
       prior.head=newest[0]?.txid||prior.head||null;
       prior.error=null;state.addresses[a.address]=prior;
       state.accepted+=accepted;state.last_success_ms=now;state.error=null;
