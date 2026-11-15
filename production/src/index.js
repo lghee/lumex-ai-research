@@ -2354,7 +2354,7 @@ export async function marketOpsHistory(env,now=Date.now()){
     if(x?.schema!=='lumex_ops_daily_v1'||x?.date!==date||
        !Number.isSafeInteger(x.passed)||!Number.isSafeInteger(x.enabled_checks)||
        typeof x.ready!=='boolean'||typeof x.liquidation_r2_sample_verified!=='boolean')
-      return {date,status:x?'invalid':'missing'};
+      return {date,status:'missing',reason:x?'invalid_record':'absent_record'};
     return {date,status:'recorded',passed:x.passed,enabled_checks:x.enabled_checks,
       ready:x.ready,r2_liquidation_verified:x.liquidation_r2_sample_verified,
       r2_list_errors:Number.isSafeInteger(x.r2_list_errors)?x.r2_list_errors:null};
