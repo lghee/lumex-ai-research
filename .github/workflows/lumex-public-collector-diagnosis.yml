@@ -1,0 +1,40 @@
+name: LUMEX public collector diagnosis (read only)
+on:
+  pull_request:
+    paths:
+      - .github/workflows/lumex-public-collector-diagnosis.yml
+      - production/src/index.js
+  workflow_dispatch:
+jobs:
+  public-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Inspect deployed public collector metadata (never print secrets)
+        env:
+          BASE: https://lumex-ai-research2.kpiplus195.workers.dev
+        run: |
+          python3 - <<'PY'
+          import json,os,subprocess
+          base=os.environ['BASE'].rstrip('/')
+          for endpoint in ['health','market-hub/v1/health','market-hub/v1/live-health','market-hub/v1/whale-health','market-hub/v1/legacy-backfill-health','market-hub/v1/archive-health']:
+              try:
+                  result=subprocess.run(['curl','--fail','--silent','--show-error',
+                      '--location','--max-time','15',base+'/'+endpoint],
+                      capture_output=True,text=True,timeout=20)
+                  if result.returncode!=0: raise ValueError('curl_http_or_network_error_'+str(result.returncode))
+                  x=json.loads(result.stdout[:100000])
+                  if endpoint.endswith('live-health'):
+                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'feeds':{k:{f:v.get(f) for f in ('connected','state','error','last_received_ms','packets','restarts') if f in v} for k,v in (x.get('feeds') or {}).items() if isinstance(v,dict)}}
+                  elif endpoint.endswith('whale-health'):
+                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'source':x.get('source'),'last_run_ms':x.get('last_run_ms'),'last_success_ms':x.get('last_success_ms'),'last_error':x.get('last_error'),'watchlist':[{'backfill_complete':z.get('backfill_complete'),'gap_possible':z.get('gap_possible'),'error':z.get('error')} for z in (x.get('watchlist') or []) if isinstance(z,dict)]}
+                  elif endpoint.endswith('legacy-backfill-health'):
+                      x={'ok':x.get('ok'),'enabled':x.get('enabled'),'sources':[{'source':z.get('source'),'caught_up':z.get('caught_up'),'last_error':z.get('last_error'),'records_archived':z.get('records_archived'),'last_success_ms':z.get('last_success_ms')} for z in (x.get('sources') or []) if isinstance(z,dict)]}
+                  elif endpoint.endswith('archive-health'):
+                      x={'ok':x.get('ok'),'recent_liquidation_sample_verified':x.get('recent_liquidation_sample_verified'),'recent_whale_sample_verified':x.get('recent_whale_sample_verified'),'kinds':{k:{f:v.get(f) for f in ('sample_verified','reason','hours_with_object')} for k,v in (x.get('kinds') or {}).items() if isinstance(v,dict)}}
+                  else:
+                      x={'ok':x.get('ok'),'version':x.get('version')}
+                  print(endpoint, json.dumps(x,ensure_ascii=False,separators=(',',':')))
+              except Exception as e:
+                  print(endpoint,'UNAVAILABLE',type(e).__name__,str(e)[:100])
+          PY

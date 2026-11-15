@@ -1761,6 +1761,7 @@ export class BtcReserveCollector extends DurableObject{
           observed_confirmed:v.observed||0,gap_possible:!!v.gap_possible,error:v.error||null}));
       return hubReply({ok:true,enabled:this.env.AUTO_WHALE_FETCH==='true',source:state.watchlist_source,
         last_run_ms:state.last_run_ms,last_success_ms:state.last_success_ms,
+        watchlist_count:Number(state.watchlist_count||0),
         accepted:state.accepted,requests:state.requests,errors:state.errors,
         last_error:state.error,watchlist:watch,coverage:state.coverage,orders_enabled:false});
     }
@@ -1861,10 +1862,23 @@ export class BtcReserveCollector extends DurableObject{
       const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
       const newest=await this.fetchPage(a.address);state.requests++;
       const pages=[newest];
-      // One bounded historic page per poll to build a 35-day history.
-      const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
-      if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
-        pages.push(await this.fetchPage(a.address,cursor));state.requests++;
+      // Up to three historical pages per 5-minute collector slot.
+      // This never contacts WordPress and never calls private exchange APIs.
+      // Keep the last successful cursor so high-activity addresses finish
+      // their 35-day Esplora scan instead of requiring 30 wall-clock days.
+      const prevHead=prior.head;
+      const gap=Boolean(prevHead&&newest.length===25&&
+        !newest.some(tx=>tx.txid===prevHead));
+      const wasComplete=prior.backfill_complete===true&&!gap;
+      let cursor=prior.backfill_cursor||
+        ((!wasComplete&&newest.length===25)?newest.at(-1)?.txid:'');
+      for(let step=0;step<3&&cursor&&/^[0-9a-fA-F]{64}$/.test(cursor);step++){
+        const page=await this.fetchPage(a.address,cursor);
+        state.requests++;pages.push(page);
+        const oldest=page.at(-1),next=oldest?.txid;
+        if(page.length<25||Number(oldest?.status?.block_time||0)*1000<now-35*86400000||
+          !next||next===cursor)break;
+        cursor=next;
       }
       const unique=new Map();
       for(const page of pages)for(const tx of page){
@@ -1884,11 +1898,12 @@ export class BtcReserveCollector extends DurableObject{
       prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
       // Historic pagination ends when the last page has <25 rows or older than 35 days.
       const lastPage=pages.at(-1),oldest=lastPage.at(-1);
-      prior.backfill_complete=lastPage.length<25||
+      prior.backfill_complete=wasComplete||lastPage.length<25||
         (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
       prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
-      // There may be >25 newly confirmed transactions between polls.
-      prior.gap_possible=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
+      // A gap never becomes verified simply by receiving newer data.
+      // Clear the gap flag only after a complete historical rescan.
+      prior.gap_possible=gap&&!prior.backfill_complete;
       prior.head=newest[0]?.txid||prior.head||null;
       prior.error=null;state.addresses[a.address]=prior;
       state.accepted+=accepted;state.last_success_ms=now;state.error=null;
@@ -1904,6 +1919,17 @@ export class BtcReserveCollector extends DurableObject{
   }
 }
 
+/** Documented public Binance USD-M and merged UM/CM liquidation sources.
+ * The decoder accepts only st=1 USD-M samples; trading is never enabled. */
+export function binancePublicLiqEndpoint(restarts=0){
+  const urls=[
+    'wss://fstream.binance.com/market/ws/!forceOrder@arr',
+    'wss://fstream.binance.com/market/stream?streams=!forceOrder@arr',
+    'wss://dstream.binance.com/ws/!forceOrder@arr'
+  ];
+  const idx=Number.isSafeInteger(restarts)&&restarts>=0?restarts%urls.length:0;
+  return {url:urls[idx],route:['usd_market_raw','usd_market_combined','merged_coin_raw'][idx]};
+}
 export class MarketLiveCollector extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -1923,6 +1949,7 @@ export class MarketLiveCollector extends DurableObject{
       const m=this.metrics[kind];
       feeds[kind]={enabled:kind!=='binance'||BINANCE_LIQ_ENABLED(this.env),state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
         packets:m.packets,restarts:m.restarts,error:m.error,
+         route:kind==='binance'?(m.route||'not_attempted'):undefined,
         connected:Boolean(this.streams.get(kind)?.readyState===1)};
     }
     return {ok:true,enabled:LIVE_ENABLED(this.env),feeds,buffered:this.metrics.pending,
@@ -1961,9 +1988,10 @@ export class MarketLiveCollector extends DurableObject{
     if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+5000);
   }
   connect(source){
+    const binance=source==='binance'?binancePublicLiqEndpoint(this.metrics.binance.restarts):null;
     const url=source==='gate'?'wss://fx-ws.gateio.ws/v4/ws/usdt':
-      source==='bybit'?'wss://stream.bybit.com/v5/public/linear':
-      'wss://fstream.binance.com/market/ws/!forceOrder@arr';
+      source==='bybit'?'wss://stream.bybit.com/v5/public/linear':binance.url;
+    if(binance)this.metrics.binance.route=binance.route;
     this.metrics[source].state='connecting';
     let ws;
     try{ws=new WebSocket(url)}catch(error){this.disconnected(source,'connect_failed');return;}
@@ -2782,6 +2810,25 @@ export function observedLegacySummary(sql,hours,now=Date.now()){
     events,coverage:'hot_index_no_disconnection_backfill'};
 }
 
+/** A recent and complete scan of EVERY configured BTC address can prove
+ * historic coverage earlier than a 30-day waiting period. This is NOT
+ * exchange-wide BTC flow coverage or a complete market transaction history. */
+export function nativeWhaleWatchlistBackfillProof(status,now=Date.now()){
+  const count=Number(status?.watchlist_count),watch=status?.watchlist;
+  const latest=Number(status?.last_success_ms);
+  if(status?.enabled!==true||status?.source!=='wordpress_configured'||
+     !Number.isSafeInteger(count)||count<1||count>20||
+     !Array.isArray(watch)||watch.length!==count||
+     !Number.isSafeInteger(latest)||latest>now+120000||now-latest>1200000)
+    return false;
+  const maxAge=Math.max(1800000,count*8*60000);
+  return watch.every(entry=>entry?.backfill_complete===true&&
+    entry?.gap_possible===false&&!entry?.error&&
+    Number.isSafeInteger(Number(entry.last_checked_ms))&&
+    Number(entry.last_checked_ms)<=now+120000&&
+    now-Number(entry.last_checked_ms)<=maxAge);
+}
+
 /** Native confirmed BTC reserve observation adapter.
  * Uses the existing 35-day public event hot ledger plus 60-minute verified
  * BTC futures close solely to estimate USD, not to infer exchange balances.
@@ -3030,7 +3077,19 @@ export class MarketEventHub extends DurableObject{
     }
     if(u.pathname==='/native-whales-30d'&&request.method==='GET'){
       const now=Date.now(),since=this.longHistoryStart();
-      if(now-since<30*86400000)return hubReply({ok:false,error:'native_whale_30d_not_warm'},503);
+      if(now-since<30*86400000){
+        // Trust only a full, fresh per-address Esplora history scan, never
+        // the existence or age of any single event.
+        if(!this.env.BTC_RESERVE_COLLECTOR)
+          return hubReply({ok:false,error:'native_whale_watchlist_binding_missing'},503);
+        let verified=false;
+        try{
+          const response=await this.env.BTC_RESERVE_COLLECTOR
+            .getByName('reserve-btc').fetch('https://whales/status');
+          verified=response.ok&&nativeWhaleWatchlistBackfillProof(await response.json(),now);
+        }catch{}
+        if(!verified)return hubReply({ok:false,error:'native_whale_30d_backfill_not_ready'},503);
+      }
       try{
         const rows=this.ctx.storage.sql.exec(
           "SELECT ts,source,payload FROM hub_events WHERE kind='whale_transfer' AND source='blockstream' AND ts>=? ORDER BY ts DESC LIMIT 5001",
@@ -3478,10 +3537,7 @@ async function hubRoute(request,env){
     if(!status.ok)return hubReply({ok:false,error:'watchlist_health_unavailable'},503);
     const report=await status.json(),now=Date.now();
     const watch=report.watchlist||[];
-    if(report.enabled!==true||report.source!=='wordpress_configured'||
-       !Array.isArray(watch)||watch.length<1||watch.length>20||
-       watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
-       now-Number(report.last_success_ms||0)>1200000)
+    if(!nativeWhaleWatchlistBackfillProof(report,now))
        return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
     const upstream=await env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
     if(!upstream.ok)return upstream;
