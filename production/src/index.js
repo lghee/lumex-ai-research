@@ -4,7 +4,6 @@
  * No exchange credentials, trading endpoints or customer portfolios.
  */
 import { DurableObject } from 'cloudflare:workers';
-import { collectExchangeCompare, serveExchangeCompare } from './exchange-compare.mjs';
 
 
 
@@ -3597,7 +3596,7 @@ async function hubRoute(request,env){
   // PRO-only via WordPress, server-side Bearer; no public customer access to Worker R2.
   if(path==='/market-hub/v1/exchange-compare'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
-    return serveExchangeCompare(request,env);
+    return (await import('./exchange-compare.mjs')).serveExchangeCompare(request,env);
   }
   if(path==='/market-hub/v1/oi-health'&&method==='GET'){
     try{const obj=await env.MARKET_DATA?.get(OI_PREFIX+'health.json');
@@ -4132,7 +4131,7 @@ export default{
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
-      ctx.waitUntil(collectExchangeCompare(env).catch(e=>
+      ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
         console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
