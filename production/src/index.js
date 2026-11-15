@@ -1951,6 +1951,7 @@ export class MarketLiveCollector extends DurableObject{
       const m=this.metrics[kind];
       feeds[kind]={enabled:kind!=='binance'||BINANCE_LIQ_ENABLED(this.env),state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
         packets:m.packets,restarts:m.restarts,error:m.error,
+         retry_after_seconds:Math.max(0,Math.ceil(((this.retryAt[kind]||0)-now)/1000)),
          route:kind==='binance'?(m.route||'not_attempted'):undefined,
         connected:Boolean(this.streams.get(kind)?.readyState===1)};
     }
@@ -2073,7 +2074,15 @@ export class MarketLiveCollector extends DurableObject{
   disconnected(source,reason){
     const ws=this.streams.get(source);if(ws){this.streams.delete(source);try{ws.close()}catch{}}
     const m=this.metrics[source];m.state='reconnecting';m.restarts++;m.error=reason;
-    this.retryAt[source]=Date.now()+Math.min(60000,2000*Math.pow(2,Math.min(m.restarts,5)));
+    // 403/451 are explicit HTTP access denials, not short-lived feed silence.
+    // Avoid hammering Binance's WAF from a shared Cloudflare egress.
+    const blocked=source==='binance'&&/^upgrade_http_(403|451)$/.test(reason);
+    const denied451=source==='binance'&&reason==='upgrade_http_451';
+    const repeated=source==='binance'&&m.restarts>=3;
+    const delay=blocked?(denied451?3600000:1800000):
+      repeated?Math.max(300000,Math.min(900000,30000*Math.pow(2,Math.min(m.restarts-3,5)))):
+      Math.min(60000,2000*Math.pow(2,Math.min(m.restarts,5)));
+    this.retryAt[source]=Date.now()+delay;
   }
 
   async publishCandles(items){
@@ -2458,6 +2467,39 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     trading_enabled:false,orders_enabled:false,market_total_estimate:false,
     sections,quality:{available,fresh,total:5,all_sources_fresh:available===5&&fresh===5},
     disclaimer:'Bybit 계정비율, Binance 체결비율, Gate OI, 거래소별 청산 표본은 각기 다른 모집단입니다. 값의 합산이나 자동매매 신호 생성에 사용하지 않습니다.'};
+}
+
+const BINANCE_EGRESS_PROOF_KEY='market-hub/diagnostics/binance-container-egress-v1.json';
+/** Once-per-30min container egress handshake proof. Never executes trades or
+ * polls private Binance endpoints, never treats HTTP 403 as empty market data.
+ * This is a capability diagnostic, NOT a data source or Cron retirement proof. */
+export async function probeBinanceContainerEgress(env,now=Date.now()){
+  if(env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE!=='true'||
+    !env.MARKET_DATA||!env.RESEARCH_CONTAINER||!env.LUMEX_CONTAINER_KEY)
+    return {ok:false,enabled:false,reason:'probe_disabled_or_bindings_missing'};
+  const previous=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
+  if(previous?.schema==='lumex_binance_egress_proof_v1'&&
+     Number.isSafeInteger(previous.checked_ms)&&previous.checked_ms<=now+60000&&
+     now-previous.checked_ms<1800000)return {...previous,cached:true};
+  let proof={schema:'lumex_binance_egress_proof_v1',ok:false,checked_ms:now,
+    source:'cloudflare_existing_research_container',scope:'handshake_only',
+    status:'unavailable',handshake_http_status:null,trading_enabled:false,
+    does_not_prove_feed_capture:true};
+  try{
+    const response=await invokeContainer(env,'/binance-egress-probe',{scope:'public_usdm_forceOrder'});
+    const body=await response.json();
+    const code=Number(body?.handshake_http_status);
+    proof={...proof,ok:body?.ok===true,handshake_http_status:
+        Number.isSafeInteger(code)&&code>=100&&code<=599?code:null,
+      status:body?.ok===true&&code===101?'upgrade_accepted':
+        body?.error_code==='upstream_http_forbidden'?'upstream_403':
+        body?.error_code==='upstream_unavailable'?'upstream_unavailable':'handshake_rejected'};
+  }catch(error){
+    console.warn('binance_container_proof_unavailable',safeError(error).slice(0,75));
+  }
+  await env.MARKET_DATA.put(BINANCE_EGRESS_PROOF_KEY,JSON.stringify(proof),
+    {httpMetadata:{contentType:'application/json'}});
+  return proof;
 }
 
 const OPS_PREFIX='market-hub/ops/v1/';
@@ -3619,6 +3661,16 @@ async function hubRoute(request,env){
         'access-control-allow-origin':'https://lumexbot.com','vary':'Origin'}});
     }catch{return hubReply({ok:false,error:'derivatives_read_unavailable'},503)}
   }
+  if(path==='/market-hub/v1/binance-egress-health'&&method==='GET'){
+    try{
+      const x=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
+      if(x?.schema!=='lumex_binance_egress_proof_v1')
+        return hubReply({ok:false,checked:false,reason:'no_container_probe_yet',
+          source:'existing_research_container',trading_enabled:false});
+      return hubReply({...x,stale:Date.now()-x.checked_ms>3600000,
+        usable_as_liquidation_feed:false,cron_retirement_allowed:false});
+    }catch{return hubReply({ok:false,reason:'egress_proof_read_unavailable'},503)}
+  }
   if(path==='/market-hub/v1/live-health'&&method==='GET'){
     if(!LIVE_ENABLED(env))return hubReply({ok:true,enabled:false,reason:'collector_disabled',order_execution:false});
     if(!env.MARKET_LIVE_COLLECTOR)return hubReply({ok:false,error:'live_collector_binding_missing'},503);
@@ -3816,6 +3868,9 @@ export default{
       if(utc.getUTCHours()>0||(utc.getUTCHours()===0&&utc.getUTCMinutes()>=15))
         ctx.waitUntil(marketOpsDaily(env,utc.getTime()).catch(e=>console.error('market_ops_daily_failed',String(e?.message||e).slice(0,120))));
     }
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
+      ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
+        console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
