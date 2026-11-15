@@ -2469,6 +2469,124 @@ export async function marketTerminalSummary(env,symbol,now=Date.now()){
     disclaimer:'Bybit 계정비율, Binance 체결비율, Gate OI, 거래소별 청산 표본은 각기 다른 모집단입니다. 값의 합산이나 자동매매 신호 생성에 사용하지 않습니다.'};
 }
 
+/** Optional source-isolated GitHub Actions Binance public liquidation sampler.
+ * GitHub-hosted runners previously connected to Binance while Cloudflare egress
+ * was rejected (403). This captures OBSERVED windows only; not continuous feed.
+ * No permanent secrets: verify GitHub OIDC RS256 signature, immutable repo ID,
+ * owner ID, exact main-branch workflow ref, event type and custom audience.
+ */
+const GH_BINANCE_AUD='lumex-binance-public-liquidation-v1';
+const GH_BINANCE_STATUS_KEY='market-hub/diagnostics/binance-github-sidecar-v1.json';
+let ghJwksCache=null;
+function ghJwtBytes(s){
+  if(typeof s!=='string'||s.length<1||s.length>10000||!/^[A-Za-z0-9_-]+$/.test(s))throw Error('jwt_b64_invalid');
+  const b=atob(s.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-s.length%4)%4));
+  return Uint8Array.from(b,c=>c.charCodeAt(0));
+}
+async function ghTrustedJwks(){
+  if(ghJwksCache&&ghJwksCache.until>Date.now())return ghJwksCache.keys;
+  const r=await fetch('https://token.actions.githubusercontent.com/.well-known/jwks',{
+    headers:{accept:'application/json'},signal:AbortSignal.timeout(6000)});
+  if(!r.ok)throw Error('github_oidc_jwks_unavailable');
+  const j=await r.json();
+  if(!Array.isArray(j?.keys)||j.keys.length<1||j.keys.length>24)throw Error('github_oidc_jwks_invalid');
+  ghJwksCache={until:Date.now()+600000,keys:j.keys};
+  return j.keys;
+}
+export async function verifyGithubBinanceOidc(token,now=Date.now(),jwksLoader=ghTrustedJwks){
+  try{
+    if(typeof token!=='string'||token.length>15000||token.length<100)return null;
+    const segments=token.split('.');
+    if(segments.length!==3)return null;
+    const h=JSON.parse(new TextDecoder().decode(ghJwtBytes(segments[0])));
+    const c=JSON.parse(new TextDecoder().decode(ghJwtBytes(segments[1])));
+    const t=Math.floor(now/1000);
+    if(h?.alg!=='RS256'||typeof h.kid!=='string'||h.kid.length>160||
+      c?.iss!=='https://token.actions.githubusercontent.com'||
+      c?.aud!==GH_BINANCE_AUD||
+      c?.repository!=='lghee/lumex-ai-research'||
+      String(c?.repository_id)!=='1455460180'||
+      String(c?.repository_owner_id)!=='123610810'||
+      c?.sub!=='repo:lghee/lumex-ai-research:ref:refs/heads/main'||
+      c?.ref!=='refs/heads/main'||
+      c?.workflow_ref!=='lghee/lumex-ai-research/.github/workflows/lumex-binance-public-sidecar.yml@refs/heads/main'||
+      !['schedule','workflow_dispatch'].includes(c?.event_name)||
+      c?.runner_environment!=='github-hosted'||
+      !/^\d{5,16}$/.test(String(c?.run_id||''))||
+      !Number.isSafeInteger(c.iat)||!Number.isSafeInteger(c.exp)||
+      c.iat>t+30||c.exp<=t||c.exp>t+900||t-c.iat>480||
+      (c.nbf!==undefined&&(!Number.isSafeInteger(c.nbf)||c.nbf>t+30)))return null;
+    const keys=await jwksLoader();
+    const jwk=Array.isArray(keys)?keys.find(k=>k.kid===h.kid&&k.kty==='RSA'&&k.n&&k.e):null;
+    if(!jwk)return null;
+    const key=await crypto.subtle.importKey('jwk',{kty:'RSA',n:jwk.n,e:jwk.e},
+      {name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['verify']);
+    const ok=await crypto.subtle.verify('RSASSA-PKCS1-v1_5',key,
+      ghJwtBytes(segments[2]),new TextEncoder().encode(segments[0]+'.'+segments[1]));
+    return ok?{run_id:String(c.run_id),event_name:c.event_name,issued_at:c.iat}:null;
+  }catch{return null}
+}
+export async function normalizeGithubBinanceFrames(frames,now=Date.now()){
+  if(!Array.isArray(frames)||frames.length>30)return null;
+  const results=[],ids=new Set();
+  for(const f of frames){
+    if(!f||typeof f!=='object'||Array.isArray(f)||JSON.stringify(f).length>4000)return null;
+    for(const e of decodeBinanceLiquidations(f,now)){
+      const id=await binanceLiquidationId(e);
+      if(ids.has(id))continue;
+      ids.add(id);results.push({...e,id});
+    }
+  }
+  return results;
+}
+async function githubBinanceSidecarRoute(request,env){
+  const bearer=request.headers.get('authorization')||'';
+  if(!bearer.startsWith('Bearer ')||!env.MARKET_EVENT_HUB||!env.MARKET_DATA)
+    return hubReply({ok:false,error:'unauthorized_or_bindings_missing'},401);
+  const claim=await verifyGithubBinanceOidc(bearer.slice(7));
+  if(!claim)return hubReply({ok:false,error:'github_oidc_not_authorized'},401);
+  const bodyText=await request.text();
+  if(bodyText.length>56000)return hubReply({ok:false,error:'oversize'},413);
+  let body;try{body=JSON.parse(bodyText)}catch{return hubReply({ok:false,error:'invalid_json'},400)}
+  if(body?.schema!=='lumex_binance_public_sidecar_v1'||
+    String(body.run_id)!==claim.run_id||body.route!=='binance_usdm_forceorder_ws'||
+    typeof body.connected!=='boolean'||!Number.isSafeInteger(body.started_ms)||
+    body.started_ms>Date.now()+120000||body.started_ms<Date.now()-3600000)
+    return hubReply({ok:false,error:'bad_sidecar_envelope'},400);
+  const acceptedRows=await normalizeGithubBinanceFrames(body.frames,Date.now());
+  if(acceptedRows===null)return hubReply({ok:false,error:'invalid_frames'},400);
+  let accepted=0,invalid=0;
+  for(const symbol of HUB_SYMBOLS){
+    const events=acceptedRows.filter(x=>x.symbol===symbol);
+    if(!events.length)continue;
+    const response=await env.MARKET_EVENT_HUB.getByName(symbol).fetch(new Request('https://hub/ingest',{
+      method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({symbol,events})}));
+    if(!response.ok)return hubReply({ok:false,error:'hub_ingest_failed'},503);
+    const out=await response.json();accepted+=Number(out.accepted||0);invalid+=Number(out.invalid||0);
+  }
+  // This status records observed session attempts; only R2 JSONL readback
+  // proves durable historical event capture.
+  const old=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
+  const current=Date.now();
+  const health={schema:'lumex_binance_github_public_sidecar_v1',
+    ok:true,source:'github_actions_public_ws_observation',checked_ms:current,
+    run_id:claim.run_id,connected:body.connected,
+    provider_messages_accepted:Number.isSafeInteger(body.provider_messages)&&body.provider_messages>=0?
+      Math.min(body.provider_messages,100000):0,
+    last_accepted_ms:accepted>0?current:Number(old?.last_accepted_ms||0),
+    accepted_this_request:accepted,invalid_this_request:invalid,
+    total_accepted:Number(old?.total_accepted||0)+accepted,
+    coverage:'scheduled_observation_windows_only_not_continuous',
+    remote_egress:true,complete_market_capture:false,
+    r2_archive:'pending_hub_alarm',cron_retirement_allowed:false,
+    trading_enabled:false};
+  await env.MARKET_DATA.put(GH_BINANCE_STATUS_KEY,JSON.stringify(health),
+    {httpMetadata:{contentType:'application/json'}});
+  return hubReply({ok:true,accepted,invalid,archive:'pending_r2_flush',
+    observed_window_only:true,run_id:claim.run_id},200);
+}
+
 const BINANCE_EGRESS_PROOF_KEY='market-hub/diagnostics/binance-container-egress-v1.json';
 /** Once-per-30min container egress handshake proof. Never executes trades or
  * polls private Binance endpoints, never treats HTTP 403 as empty market data.
@@ -3713,6 +3831,17 @@ async function hubRoute(request,env){
         sample_not_total:true,order_execution:false,
         safe_to_disable_wordpress_crons:false});
     }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/github-binance-ingest'&&method==='POST')
+    return githubBinanceSidecarRoute(request,env);
+  if(path==='/market-hub/v1/github-binance-health'&&method==='GET'){
+    const status=await opsReadR2(env,GH_BINANCE_STATUS_KEY);
+    if(status?.schema!=='lumex_binance_github_public_sidecar_v1')
+      return hubReply({ok:false,reason:'no_signed_github_sidecar_session',
+        capture_confirmed:false,cron_retirement_allowed:false});
+    return hubReply({...status,stale:Date.now()-status.checked_ms>900000,
+      capture_confirmed:status.last_accepted_ms>0&&Date.now()-status.last_accepted_ms<1800000,
+      cron_retirement_allowed:false});
   }
   if(path==='/market-hub/v1/radar'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
