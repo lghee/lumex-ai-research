@@ -1905,6 +1905,17 @@ export class BtcReserveCollector extends DurableObject{
   }
 }
 
+/** Documented public Binance USD-M and merged UM/CM liquidation sources.
+ * The decoder accepts only st=1 USD-M samples; trading is never enabled. */
+export function binancePublicLiqEndpoint(restarts=0){
+  const urls=[
+    'wss://fstream.binance.com/market/ws/!forceOrder@arr',
+    'wss://fstream.binance.com/market/stream?streams=!forceOrder@arr',
+    'wss://dstream.binance.com/ws/!forceOrder@arr'
+  ];
+  const idx=Number.isSafeInteger(restarts)&&restarts>=0?restarts%urls.length:0;
+  return {url:urls[idx],route:['usd_market_raw','usd_market_combined','merged_coin_raw'][idx]};
+}
 export class MarketLiveCollector extends DurableObject{
   constructor(ctx,env){
     super(ctx,env);
@@ -1924,6 +1935,7 @@ export class MarketLiveCollector extends DurableObject{
       const m=this.metrics[kind];
       feeds[kind]={enabled:kind!=='binance'||BINANCE_LIQ_ENABLED(this.env),state:m.state,last_received_ms:m.last_received_ms,age_seconds:m.last_received_ms?Math.round((now-m.last_received_ms)/1000):null,
         packets:m.packets,restarts:m.restarts,error:m.error,
+         route:kind==='binance'?(m.route||'not_attempted'):undefined,
         connected:Boolean(this.streams.get(kind)?.readyState===1)};
     }
     return {ok:true,enabled:LIVE_ENABLED(this.env),feeds,buffered:this.metrics.pending,
@@ -1962,9 +1974,10 @@ export class MarketLiveCollector extends DurableObject{
     if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+5000);
   }
   connect(source){
+    const binance=source==='binance'?binancePublicLiqEndpoint(this.metrics.binance.restarts):null;
     const url=source==='gate'?'wss://fx-ws.gateio.ws/v4/ws/usdt':
-      source==='bybit'?'wss://stream.bybit.com/v5/public/linear':
-      'wss://fstream.binance.com/market/ws/!forceOrder@arr';
+      source==='bybit'?'wss://stream.bybit.com/v5/public/linear':binance.url;
+    if(binance)this.metrics.binance.route=binance.route;
     this.metrics[source].state='connecting';
     let ws;
     try{ws=new WebSocket(url)}catch(error){this.disconnected(source,'connect_failed');return;}
