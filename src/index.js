@@ -2778,7 +2778,7 @@ export function normalizeArchivedWhales30d(documents,now=Date.now()){
   result.sort((a,b)=>b.event_ts-a.event_ts||a.transaction_hash.localeCompare(b.transaction_hash));
   return {rows:result,archived_total:allCount,highest_id:maxId,provider_rows:validEsplora};
 }
-async function hubWhales30dArchive(env,now=Date.now()){
+export async function hubWhales30dArchive(env,now=Date.now()){
   if(!env.MARKET_DATA||!env.BTC_RESERVE_COLLECTOR)
     return hubReply({ok:false,error:'whale_archive_bindings_missing'},503);
   const endpoint=env.BTC_RESERVE_COLLECTOR.getByName('reserve-btc');
