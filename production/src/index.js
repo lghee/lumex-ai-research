@@ -2507,7 +2507,10 @@ export async function verifyGithubBinanceOidc(token,now=Date.now(),jwksLoader=gh
       c?.repository!=='lghee/lumex-ai-research'||
       String(c?.repository_id)!=='1455460180'||
       String(c?.repository_owner_id)!=='123610810'||
-      c?.sub!=='repo:lghee/lumex-ai-research:ref:refs/heads/main'||
+      // GitHub allows per-repository OIDC subject templates. The signed
+      // immutable repository_id + owner_id and exact main workflow/ref below
+      // are the trust boundary; never rely on a particular customizable sub.
+      typeof c?.sub!=='string'||c.sub.length<1||c.sub.length>1024||
       c?.ref!=='refs/heads/main'||
       c?.workflow_ref!=='lghee/lumex-ai-research/.github/workflows/lumex-binance-public-sidecar.yml@refs/heads/main'||
       !['schedule','workflow_dispatch'].includes(c?.event_name)||

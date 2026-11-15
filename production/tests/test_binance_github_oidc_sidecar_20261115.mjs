@@ -33,6 +33,12 @@ const wrongChecks=oidcClaimChecks(await sign({...claims,workflow_ref:'wrong'}),c
 assert.equal(wrongChecks.workflow_ref,false,'workflow ref mismatch must be surfaced');
 assert.equal(oidcClaimChecks(token,'111',now).run,false,'run id mismatch must be surfaced');
 assert.equal((await verifyGithubBinanceOidc(token,now,async()=>[jwk]))?.run_id,claims.run_id);
+const customizedSub=await sign({...claims,sub:'repository_id:1455460180:ref:refs/heads/main'});
+assert.equal((await verifyGithubBinanceOidc(customizedSub,now,async()=>[jwk]))?.run_id,claims.run_id,
+  'custom GitHub OIDC subject remains valid with signed immutable repo/owner/ref/workflow identity');
+assert.equal(oidcClaimChecks(customizedSub,claims.run_id,now).subject,true);
+assert.equal(await verifyGithubBinanceOidc(await sign({...claims,sub:''}),now,async()=>[jwk]),null);
+assert.equal(await verifyGithubBinanceOidc(await sign({...claims,sub:'x'.repeat(1025)}),now,async()=>[jwk]),null);
 for(const changed of [
  {ref:'refs/heads/dev'},{repository_id:'1'},{repository_owner_id:'2'},{event_name:'pull_request'},
  {runner_environment:'self-hosted'},{aud:'not-our-audience'},
