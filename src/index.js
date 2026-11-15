@@ -1622,7 +1622,7 @@ export function validateHistoricalLiquidationArchive(doc){
   }
   return result;
 }
-async function runLegacyLiqIndex(env,storage,now=Date.now()){
+export async function runLegacyLiqIndex(env,storage,now=Date.now()){
   if(!storage?.sql||!env.MARKET_DATA?.list)return {ok:false,code:'index_unavailable'};
   liqIndexSchema(storage);
   const prev=await storage.get(LIQ_INDEX_KEY)||{cursor:null,cycles:0};
