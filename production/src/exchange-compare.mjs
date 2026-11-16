@@ -227,6 +227,34 @@ export async function collectExchangeCompare(env,{now=Date.now(),fetchImpl=fetch
     const exchanges=await Promise.all(readers.map(fn=>fn(c,fetchImpl,now).catch(()=>null)));
     const rows=exchanges.map((r,i)=>r||row(EX_NAMES[i],now));
     rows.forEach((r,i)=>r.symbol||=(EX_NAMES[i]==='Gate'?c+'_USDT':EX_NAMES[i]==='OKX'?c+'-USDT-SWAP':c+'USDT'));
+    // Explicitly licensed Coinalyze provider: independently verifies the real
+    // Binance USDT perpetual before accepting source-attributed account/OI.
+    // Missing secret or commercial-display permission => never fetch.
+    if(rows[0] && (rows[0].account===null||rows[0].open_interest===null||
+       rows[0].funding===null) && env.COINALYZE_API_KEY &&
+       env.COINALYZE_COMMERCIAL_USE_APPROVED==='true'){
+      try{
+        const mod=await import('./coinalyze-binance.mjs');
+        const backup=await mod.coinalyzeBinanceBackup(c,env,{now,fetchImpl});
+        if(backup?.enabled){
+          let attached=0;
+          for(const kind of ['account','open_interest','funding']){
+            if(rows[0][kind]===null&&backup[kind]){
+              rows[0][kind]=backup[kind];attached++;
+            }
+          }
+          rows[0].errors.push(...(backup.errors||[]).map(e=>
+            'coinalyze:'+String(e).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,85)));
+          if(attached){
+            rows[0].backup_provider='Coinalyze';
+            rows[0].backup_venue='Binance';
+            rows[0].attribution='Data by Coinalyze · Binance';
+            rows[0].attribution_url='https://coinalyze.net/';
+            finish(rows[0],now);
+          }
+        }
+      }catch(e){rows[0].errors.push('coinalyze:collector_error');}
+    }
     const snapshot=buildExchangeComparison(c,rows,now);
     // Last verified values are strictly historical and NEVER counted in current coverage.
     // Preserve them only for an explicitly labeled 'previous reading' UI.
