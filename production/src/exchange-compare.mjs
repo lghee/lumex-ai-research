@@ -125,16 +125,38 @@ export async function readBybit(coin,fetchImpl=fetch,now=Date.now()){
 }
 export async function readOKX(coin,fetchImpl=fetch,now=Date.now()){
   const x=row('OKX',now),sym=coin+'-USDT-SWAP',base='https://www.okx.com';x.symbol=sym;
-  const [a,b,c]=await Promise.all([
-    safeFetch(base+'/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy='+coin+'&period=5m',fetchImpl),
-    safeFetch(base+'/api/v5/public/open-interest?instType=SWAP&instId='+sym,fetchImpl),
-    safeFetch(base+'/api/v5/public/funding-rate?instId='+sym,fetchImpl)]);
+  // Contract-specific account ratio: BTC-USDT-SWAP, NOT the aggregate
+  // ccy=BTC series that mixes expiry futures and other margin contracts.
+  // Official endpoint rate limit is IP + instrument, 5 requests / 2 sec.
+  const accountUrl=base+'/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId='+
+    encodeURIComponent(sym)+'&period=5m&limit=2';
+  const paths=[accountUrl,
+    base+'/api/v5/public/open-interest?instType=SWAP&instId='+sym,
+    base+'/api/v5/public/funding-rate?instId='+sym];
+  const response=await Promise.all(paths.map(url=>safeFetch(url,fetchImpl)));
+  const fields=['accounts','oi','funding'];
+  // OKX public endpoints occasionally HTTP 429 from shared Cloudflare egress.
+  // Respect the limit: one bounded retry per failed field after a 2.3s
+  // backoff, with further requests staggered. No retry storm or fake values.
+  const limited=fields.map((_,i)=>i).filter(i=>!response[i].ok&&response[i].error==='http_429');
+  if(limited.length){
+    await new Promise(resolve=>setTimeout(resolve,2300));
+    for(let n=0;n<limited.length;n++){
+      if(n)await new Promise(resolve=>setTimeout(resolve,600));
+      const i=limited[n],retried=await safeFetch(paths[i],fetchImpl);
+      if(retried.ok)response[i]=retried;
+      else x.errors.push(fields[i]+'_retry:'+retried.error);
+    }
+  }
+  const [a,b,c]=response;
   rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);
   if(a.ok&&a.body?.code==='0'){
     const d=Array.isArray(a.body.data)?a.body.data:[];
-    const v=d.find(z=>Array.isArray(z)&&z.length>=2)||d[0];
-    if(Array.isArray(v))x.account=accountFromRatio(v[1],v[0],now,'okx_rubik_contract_account_ratio_5m');
-    else if(v&&typeof v==='object')x.account=accountFromRatio(v.ratio||v.longShortRatio,v.ts,now,'okx_rubik_contract_account_ratio_5m');
+    const v=d.filter(z=>Array.isArray(z)&&z.length>=2).sort((p,q)=>Number(q[0])-Number(p[0]))[0];
+    const source='okx_rubik_usdt_swap_account_ratio_5min';
+    if(Array.isArray(v))x.account=accountFromRatio(v[1],v[0],now,source);
+    else if(v&&typeof v==='object')x.account=accountFromRatio(v.ratio||v.longShortRatio,v.ts,now,source);
+    if(x.account)x.account.market_scope='single_usdt_swap_contract';
   }
   if(b.ok&&b.body?.code==='0'){
     const v=b.body?.data?.find(z=>z.instId===sym);if(v)x.open_interest=oi(v.oiUsd,'USD',v.ts,now,'okx_public_open_interest_usd');
