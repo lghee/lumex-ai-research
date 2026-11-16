@@ -1,0 +1,32 @@
+name: LUMEX public production data audit (read only)
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-public-data-audit.yml'
+      - 'production/scripts/public-data-audit.py'
+  schedule:
+    - cron: '19 0,6,12,18 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: lumex-public-data-audit
+  cancel-in-progress: false
+jobs:
+  public-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect publicly visible market, radar, liquidation, whales and paid-access boundaries
+        run: python production/scripts/public-data-audit.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumex-public-data-audit
+          path: public-data-audit.json
+          if-no-files-found: ignore
+          retention-days: 7
