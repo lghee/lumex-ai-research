@@ -32,6 +32,24 @@ const rows=await Promise.all([readBinance('BTC',fake,NOW),readBybit('BTC',fake,N
 assert.deepEqual(rows.map(x=>x.exchange),EX_NAMES);
 assert.deepEqual(rows.map(x=>x.account?.long_pct),[61,65,60,60,64]);
 for(const r of rows){assert.equal(r.status,'ok');assert(r.open_interest?.value>0);assert(r.funding?.rate_pct>0);}
+const bybitMirrorMock=async(url,options)=>{
+  if(url.includes('api.bybit.com'))return {ok:false,status:502,text:async()=>''};
+  if(url.includes('api.bytick.com')){
+    const mapped=url.replace('api.bytick.com','api.bybit.com');
+    return fake(mapped,options);
+  }
+  throw Error('unexpected_source');
+};
+const bybitFromOfficialMirror=await readBybit('BTC',bybitMirrorMock,NOW);
+assert.equal(bybitFromOfficialMirror.status,'ok');
+assert.equal(bybitFromOfficialMirror.account.long_pct,65);
+assert.equal(bybitFromOfficialMirror.source_hosts.account,'api.bytick.com');
+const bothDenied=async()=>({ok:false,status:403,text:async()=>''});
+const bybitDenied=await readBybit('BTC',bothDenied,NOW);
+assert.equal(bybitDenied.status,'unavailable');
+assert.equal(bybitDenied.account,null);
+assert(bybitDenied.errors.some(e=>e.startsWith('accounts_secondary:'))); 
+
 const report=buildExchangeComparison('BTC',rows,NOW);
 assert.equal(report.coverage.long_dominant,5);
 assert.equal(report.aggregation,'none');assert.equal(report.missing_as_zero,false);assert.equal(report.order_execution,false);
