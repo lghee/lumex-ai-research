@@ -9,6 +9,7 @@ tasks=[
 ('scanner',WP+'market/scanner'),
 ('whales',WP+'onchain/whales?days=30&min_btc=10'),
 ('ai-bots',WP+'public/ai-bots'),
+('alt-rotation',WP+'market/alt-rotation'),
 ('worker-live',W+'live-health'),
 ('worker-pulse',W+'public-pulse-health'),
 ('worker-archive',W+'archive-health'),
@@ -23,6 +24,7 @@ for coin in ('BTC','ETH','SOL','XRP'):
  for name,path in [
  ('intelligence','market/intelligence?coin='+coin),
  ('oi','market/liquidation-lab?coin='+coin+'&days=7'),
+ ('oi30','market/liquidation-lab?coin='+coin+'&days=30'),
  ('derivatives','market-hub/derivatives?symbol='+coin+'USDT'),
  ('liquidation','market/liquidation-observed?coin='+coin+'&hours=1'),
  ('pressure','market/liquidation-pressure?coin='+coin),
@@ -30,6 +32,13 @@ for coin in ('BTC','ETH','SOL','XRP'):
  ('timeline','market/flow-timeline?coin='+coin+'&days=7'),
  ('convergence','market/convergence?coin='+coin)]:
   tasks.append((name+'-'+coin,WP+path))
+# Previous completed 4-hour KST session, not the future or an unfilled 24h.
+kst=datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=9)
+kst_start=kst.replace(hour=(kst.hour//4)*4,minute=0,second=0,microsecond=0)
+prior=kst_start-datetime.timedelta(hours=4)
+for coin in ('BTC','ETH','SOL','XRP'):
+ tasks.append(('replay-'+coin,WP+'market/liquidation-replay?coin='+coin+
+  '&date='+prior.strftime('%Y-%m-%d')+'&slot='+str(prior.hour//4)+'&exchange=all'))
 def num(x):
  return isinstance(x,(int,float)) and not isinstance(x,bool)
 def age(s):
@@ -70,6 +79,13 @@ def run(task):
   summary={'bots':len(rows),'verified_forward_equity':verified}
   if len(rows)<5:issues.append('bot_catalog_incomplete')
   if verified<1:issues.append('no_verified_forward_equity')
+ elif name=='alt-rotation':
+  summary={'quality':data.get('quality'),
+           'observed_quotes':(data.get('coverage') or {}).get('quote_coins'),
+           'OI_covered':(data.get('coverage') or {}).get('oi_coins'),
+           'taker_covered':(data.get('coverage') or {}).get('taker_coins')}
+  if summary['observed_quotes']!=4:issues.append('source_matched_quotes_missing')
+  if summary['quality']!='comparable':issues.append('relative_strength_incomplete')
  elif name=='pulse':
   summary['feeds']={k:(data.get('feeds',{}).get(k) or {}).get('status') for k in ('tickers','ratio','sentiment')}
   if any(x not in ('fresh','delayed') for x in summary['feeds'].values()):issues.append('pulse_missing')
@@ -83,11 +99,36 @@ def run(task):
    if not num(summary[key]):issues.append(key+'_missing')
   if summary['technical']!='ok':issues.append('technical_missing')
   if summary['oi']!='ok':issues.append('oi_missing')
- elif name.startswith('oi-'):
+ elif name.startswith(('oi-','oi30-')):
   summary={'price_present':num(data.get('price')),'oi_present':num(data.get('oi_usd')),
     'history_rows':len(data.get('history') or [])}
   if not summary['price_present'] or not summary['oi_present']:issues.append('oi_current_missing')
   if summary['history_rows']<24:issues.append('oi_history_short')
+ elif name.startswith('derivatives-'):
+  price=data.get('price') or {}
+  oi=data.get('open_interest') or {}
+  summary={'has_price':isinstance(price,dict) and num(price.get('mark_price')),
+   'has_oi':isinstance(oi,dict) and any(num(v) for v in oi.values())}
+  if not summary['has_price']:issues.append('mark_price_missing')
+  if not summary['has_oi']:issues.append('open_interest_missing')
+ elif name.startswith('exchanges-'):
+  providers=data.get('providers') or {}
+  summary={'providers':list(providers.keys()) if isinstance(providers,dict) else []}
+  if not all(k in summary['providers'] for k in ('Bybit','Binance')):issues.append('venue_comparison_missing')
+ elif name.startswith('replay-'):
+  summary={'rows':len(data.get('events') or []),'bins_5m':len(data.get('bins_5m') or []),
+      'source':data.get('source'),'truncated':data.get('truncated')}
+  if summary['bins_5m']!=48:issues.append('replay_timeline_missing')
+  if summary['rows']==0:issues.append('replay_recent_events_unobserved')
+ elif name.startswith('timeline-'):
+  summary={'rows':len(data.get('events') or []),'total_observed':data.get('total_observed'),
+      'limited':data.get('limited')}
+  if summary['rows']==0:issues.append('timeline_no_observations_7d')
+ elif name.startswith('convergence-'):
+  summary={'quality':data.get('quality'),'rows':len(data.get('rows') or []),
+      'observed_count':data.get('observed_count')}
+  if summary['rows']!=4:issues.append('four_coin_convergence_incomplete')
+  if summary['quality']!='comparable':issues.append('convergence_not_comparable')
  elif name.startswith('liquidation-'):
   rows=data.get('events') or [];summary={'events':len(rows),
       'bybit':sum(x.get('exchange')=='Bybit' for x in rows),
