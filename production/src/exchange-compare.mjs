@@ -130,17 +130,25 @@ export async function readOKX(coin,fetchImpl=fetch,now=Date.now()){
   // Official endpoint rate limit is IP + instrument, 5 requests / 2 sec.
   const accountUrl=base+'/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId='+
     encodeURIComponent(sym)+'&period=5m&limit=2';
-  let [a,b,c]=await Promise.all([
-    safeFetch(accountUrl,fetchImpl),
-    safeFetch(base+'/api/v5/public/open-interest?instType=SWAP&instId='+sym,fetchImpl),
-    safeFetch(base+'/api/v5/public/funding-rate?instId='+sym,fetchImpl)]);
-  if(!a.ok && a.error==='http_429'){
-    // One respectful bounded retry. Never issue tight loops against OKX.
+  const paths=[accountUrl,
+    base+'/api/v5/public/open-interest?instType=SWAP&instId='+sym,
+    base+'/api/v5/public/funding-rate?instId='+sym];
+  const response=await Promise.all(paths.map(url=>safeFetch(url,fetchImpl)));
+  const fields=['accounts','oi','funding'];
+  // OKX public endpoints occasionally HTTP 429 from shared Cloudflare egress.
+  // Respect the limit: one bounded retry per failed field after a 2.3s
+  // backoff, with further requests staggered. No retry storm or fake values.
+  const limited=fields.map((_,i)=>i).filter(i=>!response[i].ok&&response[i].error==='http_429');
+  if(limited.length){
     await new Promise(resolve=>setTimeout(resolve,2300));
-    const retried=await safeFetch(accountUrl,fetchImpl);
-    if(retried.ok)a=retried;
-    else x.errors.push('accounts_retry:'+retried.error);
+    for(let n=0;n<limited.length;n++){
+      if(n)await new Promise(resolve=>setTimeout(resolve,600));
+      const i=limited[n],retried=await safeFetch(paths[i],fetchImpl);
+      if(retried.ok)response[i]=retried;
+      else x.errors.push(fields[i]+'_retry:'+retried.error);
+    }
   }
+  const [a,b,c]=response;
   rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);
   if(a.ok&&a.body?.code==='0'){
     const d=Array.isArray(a.body.data)?a.body.data:[];
