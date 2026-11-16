@@ -1249,6 +1249,44 @@ export function hubRsi14(closedCandles){
   const rsi=losses===0?(gains===0?50:100):100-100/(1+gains/losses);
   return Number(rsi.toFixed(1));
 }
+/** Strict, source-preserving hourly reconstruction from R2 verified 15m closes.
+ * Never invent missing hours or align bars across a timestamp gap.
+ */
+export function verifiedHourlyFromQuarter(bars,now=Date.now()){
+  if(!Array.isArray(bars)||bars.length<4)return [];
+  const groups=new Map();
+  for(const bar of bars){
+    const t=Number(bar?.t),o=Number(bar?.o),h=Number(bar?.h),
+      l=Number(bar?.l),c=Number(bar?.c),v=Number(bar?.v);
+    if(!Number.isSafeInteger(t)||t<1500000000000||t%900000!==0||
+       t+900000>now||!(o>0)||!(h>0)||!(l>0)||!(c>0)||
+       h<Math.max(o,c,l)||l>Math.min(o,c,h)||
+       !Number.isFinite(v)||v<0)continue;
+    const hour=Math.floor(t/3600000)*3600000;
+    const bucket=groups.get(hour)||[];
+    bucket.push({t,o,h,l,c,v});groups.set(hour,bucket);
+  }
+  const completed=[];
+  for(const [hour,segment] of groups){
+    segment.sort((a,b)=>a.t-b.t);
+    if(segment.length!==4||segment[0].t!==hour||
+       segment[1].t!==hour+900000||segment[2].t!==hour+1800000||
+       segment[3].t!==hour+2700000||hour+3600000>now)continue;
+    completed.push({t:hour,o:segment[0].o,c:segment[3].c,
+      h:Math.max(...segment.map(x=>x.h)),
+      l:Math.min(...segment.map(x=>x.l)),
+      v:segment.reduce((sum,x)=>sum+x.v,0)});
+  }
+  completed.sort((a,b)=>a.t-b.t);
+  if(!completed.length)return [];
+  const out=[completed.at(-1)];
+  for(let i=completed.length-2;i>=0;i--){
+    if(completed[i].t!==out[0].t-3600000)break;
+    out.unshift(completed[i]);
+  }
+  return out.slice(-160);
+}
+
 async function hubRadar(env){
   const items=await Promise.all(HUB_SYMBOLS.map(async symbol=>{
     const r={symbol,change_24h_pct:null,turnover_24h_usdt:null,
@@ -1260,12 +1298,39 @@ async function hubRadar(env){
         r[name].age_seconds=v.age_seconds;r[name].stale=v.stale;
         r[name].last_candle_open_ms=v.last_candle_open_ms;
         r[name].source_scope=v.source_scope||'cloudflare_r2_verified_closed_candles';
+        if(frame===60&&(v.stale===true||r[name].status!=='ok'))
+          throw Error('hourly_r2_stale_or_insufficient');
         if(frame===15)r[name].rsi=hubRsi14(v.candles);
         if(frame===15&&v.candles.length>=97){
           const c=v.candles,rtn=(c.at(-1).c/c.at(-97).c-1)*100;
           r.change_24h_pct=Number(rtn.toFixed(3));
         }
-      }catch(e){r[name]={status:'unavailable',trend:null,atr_pct:null,error:safeError(e)};}
+      }catch(e){
+        // An hourly R2 object can be missing while the exact same market's
+        // verified 15-minute R2 closes are healthy. Do not return a blank
+        // 1-hour technical card if >=51 *consecutive* verified hours exist.
+        if(frame===60){
+          try{
+            const base=await hubGetCandles(env,symbol,15,850);
+            if(base.stale===true||base.data_quality!=='verified'||
+               base.feed_mode!=='cloudflare_r2_verified_closed_candles')
+              throw Error('quarter_source_unverified');
+            const hourly=verifiedHourlyFromQuarter(base.candles);
+            if(hourly.length<51)throw Error('verified_hourly_history_insufficient');
+            const last=hourly.at(-1).t;
+            const age=Math.max(0,Date.now()-last-3600000);
+            r[name]={...hubTrend(hourly),
+              age_seconds:Math.floor(age/1000),stale:age>7200000,
+              last_candle_open_ms:last,
+              source_scope:'cloudflare_r2_verified_closed_candles',
+              derivation:'four_consecutive_verified_15m_closed_bars'};
+          }catch(derivedError){
+            r[name]={status:'unavailable',trend:null,atr_pct:null,
+              error:'hourly_and_verified_15m_projection_unavailable'};
+          }
+        } else r[name]={status:'unavailable',trend:null,atr_pct:null,
+          error:'verified_closed_candles_unavailable'};
+      }
     }
     return r;
   }));
