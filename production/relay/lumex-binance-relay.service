@@ -1,0 +1,21 @@
+[Unit]
+Description=LUMEX Binance public liquidation relay (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lumex
+WorkingDirectory=/opt/lumex-binance-relay
+EnvironmentFile=/etc/lumex/binance-relay.env
+ExecStart=/usr/bin/node /opt/lumex-binance-relay/binance-public-relay.mjs
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
