@@ -1239,6 +1239,16 @@ async function derivativesHistory(env,symbol,period){
     missing_intervals_not_filled:true,generated_at_ms:now,orders_enabled:false};
 }
 
+export function hubRsi14(closedCandles){
+  if(!Array.isArray(closedCandles)||closedCandles.length<15)return null;
+  const tail=closedCandles.slice(-15),close=tail.map(x=>Number(x?.c));
+  if(close.some(x=>!Number.isFinite(x)||x<=0))return null;
+  let gains=0,losses=0;
+  for(let i=1;i<15;i++){const delta=close[i]-close[i-1];
+    gains+=Math.max(0,delta);losses+=Math.max(0,-delta);}
+  const rsi=losses===0?(gains===0?50:100):100-100/(1+gains/losses);
+  return Number(rsi.toFixed(1));
+}
 async function hubRadar(env){
   const items=await Promise.all(HUB_SYMBOLS.map(async symbol=>{
     const r={symbol,change_24h_pct:null,turnover_24h_usdt:null,
@@ -1248,6 +1258,9 @@ async function hubRadar(env){
       try{
         const v=await hubGetCandles(env,symbol,frame,160);r[name]=hubTrend(v.candles);
         r[name].age_seconds=v.age_seconds;r[name].stale=v.stale;
+        r[name].last_candle_open_ms=v.last_candle_open_ms;
+        r[name].source_scope=v.source_scope||'cloudflare_r2_verified_closed_candles';
+        if(frame===15)r[name].rsi=hubRsi14(v.candles);
         if(frame===15&&v.candles.length>=97){
           const c=v.candles,rtn=(c.at(-1).c/c.at(-97).c-1)*100;
           r.change_24h_pct=Number(rtn.toFixed(3));
