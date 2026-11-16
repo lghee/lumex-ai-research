@@ -40,7 +40,7 @@ for(const venue of ['binance','bybit','bitget']){
   assert.equal(r.errors.length,0);
 }
 assert.equal((await swolechartsBinanceBackup('BTC',{now,fetchImpl:fetchMock})).account.long_pct,74.2);
-assert.throws(()=>swolechartsVenueBackup('okx','BTC'));
+await assert.rejects(()=>swolechartsVenueBackup('okx','BTC'));
 const wrongMarket=await swolechartsVenueBackup('bybit','BTC',{now,
  fetchImpl:async u=>json({market:'binance:perp:BTCUSDT',metric:new URL(u).pathname.split('/').pop(),
   db:true,t:[ts],v:[.5]})});
