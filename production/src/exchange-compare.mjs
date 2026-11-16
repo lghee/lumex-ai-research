@@ -93,12 +93,29 @@ export async function readBinance(coin,fetchImpl=fetch,now=Date.now()){
   if(c.ok && !Array.isArray(c.body)){const v=c.body;x.funding=funding(v.lastFundingRate,null,v.time||now,now,'binance_premium_index_last_funding_rate');}
   return finish(x,now);
 }
+/** Both mainnet API domains are officially documented by Bybit. No private APIs.
+ * The second domain is a supported mainnet host, not a substitute exchange.
+ * True IP/region restrictions remain failures; never conceal them with Gate data.
+ */
+async function bybitPublic(path,fetchImpl){
+  const primary=await safeFetch('https://api.bybit.com/v5/market/'+path,fetchImpl);
+  if(primary.ok)return primary;
+  // Do not turn geographic restriction into fake values; an allowed official
+  // hostname may be more reliable during ordinary DNS, routing or CDN incidents.
+  const secondary=await safeFetch('https://api.bytick.com/v5/market/'+path,fetchImpl);
+  return secondary.ok?{...secondary,source_host:'api.bytick.com'}:
+    {ok:false,error:primary.error,secondary_error:secondary.error};
+}
 export async function readBybit(coin,fetchImpl=fetch,now=Date.now()){
-  const x=row('Bybit',now),sym=coin+'USDT',base='https://api.bybit.com/v5/market/';x.symbol=sym;
+  const x=row('Bybit',now),sym=coin+'USDT';x.symbol=sym;
   const [a,b]=await Promise.all([
-    safeFetch(base+'account-ratio?category=linear&symbol='+sym+'&period=5min&limit=2',fetchImpl),
-    safeFetch(base+'tickers?category=linear&symbol='+sym,fetchImpl)]);
+    bybitPublic('account-ratio?category=linear&symbol='+sym+'&period=5min&limit=2',fetchImpl),
+    bybitPublic('tickers?category=linear&symbol='+sym,fetchImpl)]);
+  if(a.source_host)x.source_hosts={...(x.source_hosts||{}),account:a.source_host};
+  if(b.source_host)x.source_hosts={...(x.source_hosts||{}),ticker:b.source_host};
   rerr(x,'accounts',a);rerr(x,'ticker',b);
+  if(!a.ok&&a.secondary_error)x.errors.push('accounts_secondary:'+a.secondary_error);
+  if(!b.ok&&b.secondary_error)x.errors.push('ticker_secondary:'+b.secondary_error);
   if(a.ok&&a.body?.retCode===0){const v=stampLatest(a.body?.result?.list,now,'timestamp');if(v)x.account=account(v.buyRatio,v.sellRatio,v.timestamp,now,'bybit_long_short_account_ratio_5min');}
   if(b.ok&&b.body?.retCode===0){const v=b.body?.result?.list?.find(z=>z.symbol===sym);if(v){
     x.open_interest=oi(v.openInterestValue,'USDT',now,now,'bybit_linear_ticker_open_interest_value');
