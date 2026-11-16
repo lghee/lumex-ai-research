@@ -1,0 +1,52 @@
+name: LUMEX Binance REST egress proof (read-only)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-binance-rest-proof.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  official-public-binance-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Binance REST source only — status and schema, no private data
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          const sources = [
+            ['account_ratio','https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=2'],
+            ['open_interest','https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=2'],
+            ['funding','https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'],
+          ];
+          let ok=0;
+          for(const [kind,url] of sources){
+            try{
+              const resp=await fetch(url,{signal:AbortSignal.timeout(9500),headers:{accept:'application/json'}});
+              const raw=(await resp.text()).slice(0,3500);
+              let v;try{v=JSON.parse(raw)}catch{}
+              const isRows=Array.isArray(v)&&v.length>0;
+              const rows=isRows?v:v&&typeof v==='object'?[v]:[];
+              let shape=false,time=null;
+              if(kind==='account_ratio')shape=isRows&&rows[0]?.symbol==='BTCUSDT'&&rows[0]?.longAccount!==undefined&&rows[0]?.shortAccount!==undefined;
+              if(kind==='open_interest')shape=isRows&&rows[0]?.symbol==='BTCUSDT'&&rows[0]?.sumOpenInterestValue!==undefined;
+              if(kind==='funding')shape=!isRows&&v?.symbol==='BTCUSDT'&&v?.lastFundingRate!==undefined;
+              if(shape){ok++;time=kind==='funding'?v?.time:rows[rows.length-1]?.timestamp;}
+              const err=shape?'none':String(v?.msg||v?.message||v?.code||'invalid_response').slice(0,105);
+              console.log(JSON.stringify({kind,http_status:resp.status,valid_source_schema:shape,
+                observation_timestamp_ms:Number.isSafeInteger(Number(time))?Number(time):null,
+                provider_error_kind:err}));
+            }catch(e){
+              console.log(JSON.stringify({kind,transport_error:String(e?.name||'fetch_failed').slice(0,45)}));
+            }
+          }
+          console.log(JSON.stringify({proof:'binance_public_rest_github_hosted',source_ok:ok,total:3,
+            no_exchange_credentials:true,does_not_deploy:true,does_not_bypass_provider_terms:true}));
+          JS
