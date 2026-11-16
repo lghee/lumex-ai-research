@@ -2043,7 +2043,7 @@ export class MarketLiveCollector extends DurableObject{
     super(ctx,env);
     this.ctx=ctx;this.env=env;
     this.streams=new Map();this.pending=new Map();this.flushRunning=false;
-    this.lastSample=new Map();this.lastCandleSent=new Map();this.gateMultipliers={};this.retryAt={gate:0,bybit:0,binance:0};
+    this.lastSample=new Map();this.lastCandleSent=new Map();this.gateMultipliers={};this.lastGateMultiplierFetch=0;this.gateMultiplierRefreshPromise=null;this.retryAt={gate:0,bybit:0,binance:0};
     this.metrics={gate:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       bybit:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       binance:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
@@ -2098,7 +2098,33 @@ export class MarketLiveCollector extends DurableObject{
       if(Date.now()<this.retryAt[source])continue;
       this.connect(source);
     }
+    if(this.streams.get('gate')?.readyState===1 &&
+       Object.keys(this.gateMultipliers).length<4 &&
+       Date.now()-this.lastGateMultiplierFetch>300000)
+      this.ctx.waitUntil(this.refreshGateMultipliers());
     if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+5000);
+  }
+  /** Gate public REST contract specification, no keys. A contract count is
+   * never converted into coins without official, matched quanto_multiplier.
+   */
+  async refreshGateMultipliers(){
+    if(this.gateMultiplierRefreshPromise)return this.gateMultiplierRefreshPromise;
+    this.lastGateMultiplierFetch=Date.now();
+    this.gateMultiplierRefreshPromise=Promise.allSettled(LIVE_GATE_CONTRACTS.map(async contract=>{
+      const response=await fetch('https://api.gateio.ws/api/v4/futures/usdt/contracts/'+contract,{
+        headers:{accept:'application/json'},signal:AbortSignal.timeout(9000)});
+      if(!response.ok)throw Error('gate_contract_http_'+response.status);
+      const body=await response.text();
+      if(body.length>60000)throw Error('gate_contract_response_oversize');
+      const json=JSON.parse(body);
+      if(json?.name!==contract||json?.type!=='direct')throw Error('gate_contract_identity_mismatch');
+      const rows=decodeGateContractInfo({
+        channel:'futures.contract_info',event:'all',
+        result:{contract:json.name,quanto_multiplier:json.quanto_multiplier}});
+      if(rows.length!==1)throw Error('gate_contract_multiplier_invalid');
+      this.gateMultipliers[rows[0].symbol]=rows[0].multiplier;
+    })).finally(()=>{this.gateMultiplierRefreshPromise=null;});
+    return this.gateMultiplierRefreshPromise;
   }
   connect(source){
     const binance=source==='binance'?binancePublicLiqEndpoint(this.metrics.binance.restarts):null;
@@ -2141,8 +2167,9 @@ export class MarketLiveCollector extends DurableObject{
       this.metrics[source].state='connected';this.metrics[source].error=null;
       try{
         if(source==='gate'){
-          this.gateMultipliers={};
+          this.gateMultipliers={};this.lastGateMultiplierFetch=0;
           this.metrics.gate_public_liquidations.subscription_ack=false;
+          this.ctx.waitUntil(this.refreshGateMultipliers());
           const time=Math.floor(Date.now()/1000);
           for(const channel of ['futures.trades','futures.tickers','futures.contract_info','futures.public_liquidates'])
             ws.send(JSON.stringify({time,channel,event:'subscribe',payload:LIVE_GATE_CONTRACTS}));
