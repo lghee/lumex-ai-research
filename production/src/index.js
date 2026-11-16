@@ -1341,6 +1341,54 @@ export function decodeGatePublic(raw){
   return output.slice(0,200);
 }
 
+/** Independent Gate USDT-futures PUBLIC liquidation stream.
+ * Gate's size is contracts; only a verified contract_info quanto_multiplier
+ * allows normalization to coin quantity. Never treat a missing multiplier as
+ * 1 coin/contract, and never label an order price as a fill price.
+ */
+export function decodeGateContractInfo(raw){
+  if(raw?.channel!=='futures.contract_info'||
+     !['all','update'].includes(raw?.event))return [];
+  const out=[];
+  for(const item of Array.isArray(raw?.result)?raw.result:[raw?.result]){
+    const symbol=liveSymbolFromGate(item?.contract);
+    const multiplier=Number(item?.quanto_multiplier);
+    if(symbol&&item?.quanto_multiplier!==null&&item?.quanto_multiplier!==undefined&&
+       item?.quanto_multiplier!==''&&Number.isFinite(multiplier)&&multiplier>0&&multiplier<=100)
+      out.push({symbol,multiplier});
+  }
+  return out;
+}
+export function decodeGateLiquidations(raw,multipliers,now=Date.now()){
+  if(raw?.channel!=='futures.public_liquidates'||raw?.event!=='update'||
+     !Array.isArray(raw?.result))return [];
+  const out=[];
+  for(const item of raw.result.slice(0,200)){
+    const symbol=liveSymbolFromGate(item?.contract);
+    const multiplier=Number(multipliers?.[symbol]??NaN),price=Number(item?.price);
+    const contracts=Number(item?.size),ts=Number(item?.time_ms??item?.time);
+    if(!symbol||!Number.isFinite(multiplier)||multiplier<=0||multiplier>100||
+       !Number.isSafeInteger(ts)||ts<now-600000||ts>now+120000||
+       !Number.isFinite(price)||price<=0||price>1000000000||
+       !Number.isFinite(contracts)||contracts===0||Math.abs(contracts)>1000000000)continue;
+    const quantity=Math.abs(contracts)*multiplier;
+    if(!(quantity>0)||!Number.isFinite(quantity)||quantity>1000000000)continue;
+    out.push({kind:'liquidation',source:'gateio',symbol,ts,price,quantity,
+      side:contracts>0?'buy':'sell',position_side:contracts>0?'short':'long',
+      capture:'public_stream',price_type:'unspecified',
+      gate_contract_size:Math.abs(contracts)});
+  }
+  return out;
+}
+export async function gatePublicLiquidationId(e){
+  const tuple=['gateio_public_liquidates_v1',e.symbol,e.ts,e.side,
+    Number(e.price).toPrecision(14),Number(e.quantity).toPrecision(14),
+    Number(e.gate_contract_size).toPrecision(14)].join('|');
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(tuple));
+  return 'gateio:liq:'+e.symbol+':'+Array.from(new Uint8Array(digest).slice(0,16),
+    b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 const LIVE_CANDLE_INTERVALS=Object.freeze({'5m':5,'15m':15,'1h':60,'4h':240,'1d':1440});
 export function decodeGateCandles(raw){
   if(raw?.channel!=='futures.candlesticks'||raw?.event!=='update')return [];
@@ -1995,12 +2043,13 @@ export class MarketLiveCollector extends DurableObject{
     super(ctx,env);
     this.ctx=ctx;this.env=env;
     this.streams=new Map();this.pending=new Map();this.flushRunning=false;
-    this.lastSample=new Map();this.lastCandleSent=new Map();this.retryAt={gate:0,bybit:0,binance:0};
+    this.lastSample=new Map();this.lastCandleSent=new Map();this.gateMultipliers={};this.retryAt={gate:0,bybit:0,binance:0};
     this.metrics={gate:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       bybit:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       binance:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       pending:0,accepted:0,rejected:0,flush_errors:0,last_flush_ms:0,
       preview_sent:0,preview_errors:0,last_preview_ms:0,
+      gate_public_liquidations:{subscription_ack:false,contracts_ready:0,updates_received:0,events_decoded:0,last_update_ms:0,last_event_ms:0},
       coverage:'only_observed_messages;past_disconnects_not_backfilled'};
   }
   safeStatus(){
@@ -2016,7 +2065,10 @@ export class MarketLiveCollector extends DurableObject{
     return {ok:true,enabled:LIVE_ENABLED(this.env),feeds,buffered:this.metrics.pending,
       accepted:this.metrics.accepted,rejected:this.metrics.rejected,flush_errors:this.metrics.flush_errors,
       preview_sent:this.metrics.preview_sent,preview_errors:this.metrics.preview_errors,last_preview_ms:this.metrics.last_preview_ms,
-      last_flush_ms:this.metrics.last_flush_ms,coverage:this.metrics.coverage,
+      last_flush_ms:this.metrics.last_flush_ms,
+      gate_public_liquidations:{...this.metrics.gate_public_liquidations,
+        contracts_ready:Object.keys(this.gateMultipliers).length},
+      coverage:this.metrics.coverage,
       sink:'MarketEventHub_R2_archive',order_execution:false,ts:new Date(now).toISOString()};
   }
   async fetch(request){
@@ -2089,8 +2141,10 @@ export class MarketLiveCollector extends DurableObject{
       this.metrics[source].state='connected';this.metrics[source].error=null;
       try{
         if(source==='gate'){
+          this.gateMultipliers={};
+          this.metrics.gate_public_liquidations.subscription_ack=false;
           const time=Math.floor(Date.now()/1000);
-          for(const channel of ['futures.trades','futures.tickers'])
+          for(const channel of ['futures.trades','futures.tickers','futures.contract_info','futures.public_liquidates'])
             ws.send(JSON.stringify({time,channel,event:'subscribe',payload:LIVE_GATE_CONTRACTS}));
           // Gate publishes in-progress futures OHLCV; do not mark these candles confirmed.
           for(const tf of Object.keys(LIVE_CANDLE_INTERVALS)){
@@ -2109,6 +2163,22 @@ export class MarketLiveCollector extends DurableObject{
       this.metrics[source].last_received_ms=Date.now();this.metrics[source].packets++;
       try{
         const raw=JSON.parse(message.data),items=source==='gate'?decodeGatePublic(raw):source==='bybit'?decodeBybitLiquidations(raw):decodeBinanceLiquidations(raw);
+        if(source==='gate'){
+          const state=this.metrics.gate_public_liquidations;
+          if(raw.channel==='futures.public_liquidates'&&raw.event==='subscribe'&&raw.result?.status==='success')
+            state.subscription_ack=true;
+          for(const info of decodeGateContractInfo(raw))this.gateMultipliers[info.symbol]=info.multiplier;
+          if(raw.channel==='futures.public_liquidates'&&raw.event==='update'){
+            state.updates_received++;
+            state.last_update_ms=Date.now();
+            const observed=decodeGateLiquidations(raw,this.gateMultipliers);
+            if(observed.length){
+              state.events_decoded+=observed.length;
+              state.last_event_ms=Date.now();
+              this.ctx.waitUntil(this.ingestItems(observed));
+            }
+          }
+        }
         if(items.length)this.ctx.waitUntil(this.ingestItems(items));
         if(source==='gate'){
           const previews=decodeGateCandles(raw);
@@ -2177,7 +2247,7 @@ export class MarketLiveCollector extends DurableObject{
   async ingestItems(items){
     for(const item of items){
       // No exchange secrets or account metadata; all events publicly observed.
-      if(item.kind==='liquidation')item.id=item.source==='binance'?await binanceLiquidationId(item):await liveLiquidationId(item);
+      if(item.kind==='liquidation')item.id=item.source==='binance'?await binanceLiquidationId(item):item.source==='gateio'?await gatePublicLiquidationId(item):await liveLiquidationId(item);
       else{
         const previous=this.lastSample.get(item.kind+':'+item.symbol)||0;
         const minDelay=item.kind==='trade'?1000:2000;
