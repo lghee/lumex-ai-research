@@ -19,5 +19,8 @@ assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),ent
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),{...entry(),error:'esplora_http_429'},entry(),entry()]},now),false);
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),entry(true,false,now-4000000),entry(),entry()]},now),false);
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist_count:0},now),false);
+const expanded={...report,watchlist_count:63,watchlist:Array.from({length:63},()=>entry())};
+assert.equal(nativeWhaleWatchlistBackfillProof(expanded,now),true,'63 checked addresses can be ready');
+assert.equal(nativeWhaleWatchlistBackfillProof({...expanded,watchlist_count:151,watchlist:Array.from({length:151},()=>entry())},now),false,'151 addresses fail closed');
 assert(raw.includes("native_whale_30d_backfill_not_ready"),'gate must deny incomplete scan even when previously warm');
 console.log('PASS full BTC watchlist history replaces only wall-clock wait, negative proofs fail closed');
