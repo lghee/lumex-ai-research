@@ -4019,7 +4019,12 @@ async function hubRoute(request,env){
   if(path==='/market-hub/v1/candles'&&method==='GET'){
     const interval=hubFrame(u.searchParams.get('interval'));
     if(!interval)return hubReply({ok:false,error:'unsupported_interval'},400);
-    try{return hubReply(await hubGetCandles(env,symbol,interval,500))}
+    // Public-market historical candles for the read-only $10k AI paper
+    // observer. Existing chart clients keep default 500; only explicit 850
+    // selects the bounded R2 extended window (never grants orders).
+    const requested=u.searchParams.get('limit')||'500';
+    if(!['500','850'].includes(requested))return hubReply({ok:false,error:'invalid_candle_limit'},400);
+    try{return hubReply(await hubGetCandles(env,symbol,interval,Number(requested)))}
     catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
   }
   if((path==='/market-hub/v1/observed-pressure'||path==='/market-hub/v1/observed-replay')&&method==='GET') {
