@@ -155,6 +155,22 @@ export async function readBitget(coin,fetchImpl=fetch,now=Date.now()){
     const d=Array.isArray(a.body?.data)?a.body.data:[];
     const v=stampLatest(d,now,'ts');if(v)x.account=account(v.longAccountRatio,v.shortAccountRatio,v.ts,now,'bitget_futures_account_long_short_5m');
   }
+  // Bitget's Classic futures public v2 API publishes the exact same
+  // account-holder ratios. Use only when v3 is missing or rejected.
+  // Never substitute futures-position ratio or taker-volume ratio.
+  if(!x.account&&a.error!=='provider_region_restricted'&&a.error!=='http_451'){
+    await new Promise(resolve=>setTimeout(resolve,1100)); // 1 public account statistics request / second / IP.
+    const alt=await safeFetch('https://api.bitget.com/api/v2/mix/market/account-long-short?symbol='+
+      sym+'&productType=USDT-FUTURES&period=5m',fetchImpl);
+    if(alt.ok&&alt.body?.code==='00000'){
+      const d=Array.isArray(alt.body?.data)?alt.body.data:[];
+      const v=stampLatest(d,now,'ts');
+      if(v)x.account=account(v.longAccountRatio,v.shortAccountRatio,v.ts,now,
+        'bitget_v2_public_account_long_short_5m');
+    }
+    if(!alt.ok)x.errors.push('accounts_secondary:'+alt.error);
+    if(alt.ok&&!x.account)x.errors.push('accounts_secondary:stale_or_invalid');
+  }
   if(b.ok&&b.body?.code==='00000'){
     const d=Array.isArray(b.body?.data?.list)?b.body.data.list:[];
     const v=stampLatest(d.filter(z=>z.symbol===sym),now,'timestamp');if(v)x.open_interest=oi(v.openInterestValue,'USDT',v.timestamp,now,'bitget_open_interest_hist_5m_quote');
