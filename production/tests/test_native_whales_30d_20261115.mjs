@@ -14,6 +14,9 @@ const obs=nativeWhales30d([ev('a',now-120000),ev('b',now-3600000,'out',7.5)],can
 assert.equal(obs.schema,'lumex_cf_native_whales_30d_v1');
 assert.equal(obs.source,'cloudflare_native_confirmed_btc_watchlist');
 assert.equal(obs.rows.length,2);
+const newItem=ev('e',now-240000);
+const converted={...newItem,payload:JSON.stringify({...JSON.parse(newItem.payload),id:'btc:exchangeflow:'+'e'.repeat(64)+':Binance'})};
+assert.equal(nativeWhales30d([converted],candles,now).rows.length,1,'new exchange-net identity accepted');
 assert.equal(obs.rows[0].amount_coin,12.5);
 assert.equal(obs.rows[1].transfer_direction,'out');
 assert.equal(obs.legacy_sql_read,false);
