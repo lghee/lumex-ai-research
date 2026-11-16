@@ -5,12 +5,16 @@ on:
     paths:
       - '.github/workflows/lumex-five-exchange-r2-audit.yml'
   workflow_dispatch:
+  workflow_run:
+    workflows: ["LUMEX Worker production deploy (manual only)"]
+    types: [completed]
 permissions:
   contents: read
 jobs:
   inspect:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -22,6 +26,9 @@ jobs:
       - name: Install existing Wrangler
         working-directory: production
         run: npm install --no-audit --no-fund
+      - name: Allow one full BTC/ETH and SOL/XRP Cron rotation after production deploy
+        if: github.event_name == 'workflow_run'
+        run: sleep 630
       - name: Read only public market measurements from R2
         working-directory: production
         shell: bash
