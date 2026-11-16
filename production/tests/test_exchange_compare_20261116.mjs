@@ -50,6 +50,22 @@ assert.equal(bybitDenied.status,'unavailable');
 assert.equal(bybitDenied.account,null);
 assert(bybitDenied.errors.some(e=>e.startsWith('accounts_secondary:'))); 
 
+const bitgetLegacyMock=async(url,options)=>{
+  if(url.includes('/api/v3/market/futures-account-long-short'))return {ok:false,status:403,text:async()=>''};
+  if(url.includes('/api/v2/mix/market/account-long-short'))return ok({code:'00000',
+    data:[{longAccountRatio:'0.62',shortAccountRatio:'0.38',ts:ms}]});
+  return fake(url,options);
+};
+const bitgetLegacy=await readBitget('BTC',bitgetLegacyMock,NOW);
+assert.equal(bitgetLegacy.account.long_pct,62);
+assert.equal(bitgetLegacy.account.source,'bitget_v2_public_account_long_short_5m');
+assert(bitgetLegacy.open_interest?.value>0);
+const bitgetBothBlocked=await readBitget('BTC',async(url)=>
+  url.includes('futures-account-long-short')||url.includes('account-long-short')
+    ?{ok:false,status:403,text:async()=>''}:fake(url),NOW);
+assert.equal(bitgetBothBlocked.account,null);
+assert(bitgetBothBlocked.errors.some(v=>v.startsWith('accounts_secondary:')));
+
 const report=buildExchangeComparison('BTC',rows,NOW);
 assert.equal(report.coverage.long_dominant,5);
 assert.equal(report.aggregation,'none');assert.equal(report.missing_as_zero,false);assert.equal(report.order_execution,false);
