@@ -1,0 +1,77 @@
+name: LUMEX five-exchange R2 audit (read only)
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/lumex-five-exchange-r2-audit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install existing Wrangler
+        working-directory: production
+        run: npm install --no-audit --no-fund
+      - name: Read only public market measurements from R2
+        working-directory: production
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p ../r2-market-audit
+          for coin in BTC ETH SOL XRP; do
+            key="market-hub/exchange-compare/v1/latest/$coin.json"
+            if ! npx wrangler r2 object get "lumex-ai-data/$key" --remote --file "../r2-market-audit/$coin.json" >/dev/null 2>&1; then
+              echo "Read unavailable for $coin (missing or permission denied)"
+            fi
+          done
+          npx wrangler r2 object get "lumex-ai-data/market-hub/exchange-compare/v1/health.json" --remote --file "../r2-market-audit/health.json" >/dev/null 2>&1 || true
+      - name: Show diagnostic source and freshness only
+        working-directory: production
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,pathlib,datetime
+          root=pathlib.Path('../r2-market-audit')
+          now=datetime.datetime.now(datetime.timezone.utc).timestamp()*1000
+          def minutes(v):
+            try:return round((now-int(v))/60000,1)
+            except:return None
+          for coin in ['BTC','ETH','SOL','XRP']:
+            f=root/(coin+'.json')
+            if not f.exists():continue
+            try:
+              d=json.loads(f.read_text())
+              rows=[]
+              for r in d.get('exchanges',[]):
+                data={'venue':r.get('exchange'),'status':r.get('status'),
+                  'provider':r.get('backup_provider'),
+                  'error_codes':[str(x)[:72] for x in r.get('errors',[])[:12]]}
+                for kind in ('account','open_interest','funding'):
+                  v=r.get(kind)
+                  data[kind]={'present':bool(v),'age_minutes':minutes(v.get('asof_ms')) if v else None,
+                    'source':v.get('source') if v else None}
+                rows.append(data)
+              print('R2_PROOF '+json.dumps({'coin':coin,'snapshot_age_minutes':minutes(d.get('generated_at_ms')),
+                'coverage':d.get('coverage'),'sources':rows},separators=(',',':')))
+            except Exception as e: print('R2_PROOF_INVALID',coin,type(e).__name__)
+          f=root/'health.json'
+          if f.exists():
+            try:
+              d=json.loads(f.read_text())
+              print('R2_COLLECTOR '+json.dumps({'last_run_age_minutes':minutes(d.get('last_run_ms')),
+                'results':len(d.get('results',[])),'coins':d.get('coins')}))
+            except Exception:print('R2_COLLECTOR_INVALID')
+          PY
+      - name: Delete downloaded snapshots
+        if: always()
+        run: rm -rf r2-market-audit
