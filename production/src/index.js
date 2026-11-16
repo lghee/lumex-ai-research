@@ -2049,7 +2049,7 @@ export class MarketLiveCollector extends DurableObject{
       binance:{state:'idle',last_received_ms:0,packets:0,restarts:0,error:null},
       pending:0,accepted:0,rejected:0,flush_errors:0,last_flush_ms:0,
       preview_sent:0,preview_errors:0,last_preview_ms:0,
-      gate_public_liquidations:{subscription_ack:false,contracts_ready:0,updates_received:0,events_decoded:0,last_update_ms:0,last_event_ms:0},
+      gate_public_liquidations:{subscription_ack:false,contracts_ready:0,updates_received:0,events_decoded:0,last_update_ms:0,last_event_ms:0,metadata_attempt_ms:0,metadata_success_count:0,metadata_error_count:0,metadata_last_error:null,collector_revision:'rest-repair-20261116'},
       coverage:'only_observed_messages;past_disconnects_not_backfilled'};
   }
   safeStatus(){
@@ -2110,6 +2110,8 @@ export class MarketLiveCollector extends DurableObject{
   async refreshGateMultipliers(){
     if(this.gateMultiplierRefreshPromise)return this.gateMultiplierRefreshPromise;
     this.lastGateMultiplierFetch=Date.now();
+    const meta=this.metrics.gate_public_liquidations;
+    meta.metadata_attempt_ms=this.lastGateMultiplierFetch;
     this.gateMultiplierRefreshPromise=Promise.allSettled(LIVE_GATE_CONTRACTS.map(async contract=>{
       const response=await fetch('https://api.gateio.ws/api/v4/futures/usdt/contracts/'+contract,{
         headers:{accept:'application/json'},signal:AbortSignal.timeout(9000)});
@@ -2123,7 +2125,13 @@ export class MarketLiveCollector extends DurableObject{
         result:{contract:json.name,quanto_multiplier:json.quanto_multiplier}});
       if(rows.length!==1)throw Error('gate_contract_multiplier_invalid');
       this.gateMultipliers[rows[0].symbol]=rows[0].multiplier;
-    })).finally(()=>{this.gateMultiplierRefreshPromise=null;});
+    })).then(results=>{
+      const rejected=results.filter(r=>r.status==='rejected');
+      meta.metadata_success_count=results.length-rejected.length;
+      meta.metadata_error_count=rejected.length;
+      meta.metadata_last_error=rejected.length?
+        String(rejected[0].reason?.message||'request_error').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,80):null;
+    }).finally(()=>{this.gateMultiplierRefreshPromise=null;});
     return this.gateMultiplierRefreshPromise;
   }
   connect(source){
