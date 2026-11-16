@@ -3,7 +3,8 @@ import {readFile} from 'node:fs/promises';
 // Local Node QA cannot import Cloudflare's virtual workers module.
 const source=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
  .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {}');
-const workerModule=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));\nconst handler=workerModule.default;
+const workerModule=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const handler=workerModule.default;
 const env={LUMEX_SITE_URL:'https://lumexbot.com',LUMEX_ADMIN_API_TOKEN:'x'.repeat(48),
  AUTO_FETCH:'false',AUTO_RESEARCH:'false',AUTO_AI:'false'};
 async function get(path,headers={}){return handler.fetch(new Request('https://example.workers.dev'+path,{headers}),env);}
