@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 const s=(await readFile(new URL('../src/index.js',import.meta.url),'utf8'))
  .replace("import { DurableObject } from 'cloudflare:workers';",'class DurableObject {}');
 const mod=await import('data:text/javascript;base64,'+Buffer.from(s).toString('base64'));
-const {decodeBtcAddressFlow,BtcReserveCollector,default:handler}=mod;
+const {decodeBtcAddressFlow,decodeBtcTrackedNet,BtcReserveCollector,default:handler}=mod;
 const address='34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo';
 const now=Math.floor(Date.now()/1000),txid='a'.repeat(64);
 const tx={txid,status:{confirmed:true,block_time:now},
@@ -49,6 +49,15 @@ assert.equal(archiveStatus.safe_to_disable_wordpress_crons,false);
 forceWpStatus=403;
 result=await (await collector.fetch(new Request('https://test/poll'))).json();
 assert.equal(result.ok,false);assert.equal(result.error,'wordpress_watchlist_http_403');
-assert.equal(blockCalls,1,'WP 403 must not trigger public fallback');
+assert.equal(blockCalls,4,'WP 403 must not trigger public fallback; four seed addresses polled in one cycle');
 globalThis.fetch=orig;
+const addrB='3M219KR5vEneNb47ewrPfWyb5jQ2DjxRP6';
+const wl=[{address,label:'Binance'},{address:addrB,label:'Binance'}];
+const internal={txid:'b'.repeat(64),status:{confirmed:true,block_time:now},vin:[{prevout:{scriptpubkey_address:address,value:100000000}}],vout:[{scriptpubkey_address:addrB,value:100000000}]};
+assert.equal(decodeBtcTrackedNet(internal,wl),null,'internal reserve transfer is not an exchange deposit');
+const externalDeposit={...internal,txid:'c'.repeat(64),vin:[{prevout:{scriptpubkey_address:'external',value:500000000}}],vout:[{scriptpubkey_address:addrB,value:500000000}]};
+assert.equal(decodeBtcTrackedNet(externalDeposit,wl)?.quantity,5);
+assert.equal(decodeBtcTrackedNet(externalDeposit,wl)?.side,'in');
+const outbound={...internal,txid:'d'.repeat(64),vout:[{scriptpubkey_address:'external',value:100000000}]};
+assert.equal(decodeBtcTrackedNet(outbound,wl)?.side,'out');
 console.log('PASS 1.2.2 BTC confirmed address net flows, watchlist fallback only on 404, 403 blocked, R2 audit');
