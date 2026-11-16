@@ -3322,7 +3322,12 @@ export class MarketEventHub extends DurableObject{
         const found=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE id=?',event.id).toArray();
         if(found.length)continue;
         if(event.kind==='whale_transfer'&&event.source==='blockstream'&&/^[a-f0-9]{64}$/.test(event.txhash||'')&&event.id.startsWith('btc:exchangeflow:')){
-          const old=this.ctx.storage.sql.exec("SELECT id FROM hub_events WHERE kind='whale_transfer' AND id LIKE ? LIMIT 1",'btc:addressflow:'+event.txhash+':%').toArray();
+          const prefix='btc:addressflow:'+event.txhash+':';
+          // Durable Object SQLite may reject 64-byte wildcard LIKE scans.
+          // The primary-key B-tree prefix range is exact and index-backed.
+          const old=this.ctx.storage.sql.exec(
+            "SELECT id FROM hub_events WHERE kind='whale_transfer' AND id>=? AND id<? LIMIT 1",
+            prefix,prefix+'~').toArray();
           if(old.length)continue;
         }
         this.ctx.storage.sql.exec('INSERT INTO hub_events(id,kind,source,ts,payload,archived) VALUES (?,?,?,?,?,0)',
