@@ -2996,6 +2996,17 @@ export class MarketEventHub extends DurableObject{
         if(!event){invalid.push('invalid_event');continue;}
         const found=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE id=?',event.id).toArray();
         if(found.length)continue;
+        // During migration, a previously observed BTC tx may already have
+        // the old per-address id. Do not count the same tx a second time just
+        // because the new per-exchange id differs. The public on-chain hash
+        // is stable and contains no untrusted SQL wildcard characters.
+        if(event.kind==='whale_transfer'&&event.source==='blockstream'&&
+           /^[a-f0-9]{64}$/.test(event.txhash||'')){
+          const legacy='btc:addressflow:'+event.txhash+':%';
+          const prior=this.ctx.storage.sql.exec(
+            "SELECT id FROM hub_events WHERE kind='whale_transfer' AND id LIKE ? LIMIT 1",legacy).toArray();
+          if(prior.length)continue;
+        }
         this.ctx.storage.sql.exec('INSERT INTO hub_events(id,kind,source,ts,payload,archived) VALUES (?,?,?,?,?,0)',
           event.id,event.kind,event.source,event.ts,JSON.stringify(event));
         accepted.push(event);
