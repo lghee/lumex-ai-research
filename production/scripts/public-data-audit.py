@@ -63,6 +63,13 @@ def run(task):
    if not num(row.get('funding_rate_pct')):issues.append(coin+'_funding_null')
    delay=age(row.get('observed_at_utc') or '')
    if delay is None or delay>1200:issues.append(coin+'_quote_stale')
+ elif name=='ai-bots':
+  rows=data.get('bots') or []
+  verified=sum(isinstance(x.get('performance'),dict) and
+      x['performance'].get('provenance')=='continuous_paper_carry_v3' for x in rows)
+  summary={'bots':len(rows),'verified_forward_equity':verified}
+  if len(rows)<5:issues.append('bot_catalog_incomplete')
+  if verified<1:issues.append('no_verified_forward_equity')
  elif name=='pulse':
   summary['feeds']={k:(data.get('feeds',{}).get(k) or {}).get('status') for k in ('tickers','ratio','sentiment')}
   if any(x not in ('fresh','delayed') for x in summary['feeds'].values()):issues.append('pulse_missing')
