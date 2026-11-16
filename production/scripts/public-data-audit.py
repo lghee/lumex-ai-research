@@ -64,7 +64,7 @@ def run(task):
    delay=age(row.get('observed_at_utc') or '')
    if delay is None or delay>1200:issues.append(coin+'_quote_stale')
  elif name=='ai-bots':
-  rows=data.get('items') or []
+  rows=data.get('bots') or []
   verified=sum(isinstance(x.get('performance'),dict) and
       x['performance'].get('provenance')=='continuous_paper_carry_v3' for x in rows)
   summary={'bots':len(rows),'verified_forward_equity':verified}
