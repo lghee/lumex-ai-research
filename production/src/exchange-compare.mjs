@@ -48,14 +48,34 @@ async function fetchJson(url,fetchImpl){
   if(!response.ok)throw Error('http_'+response.status);
   const text=await response.text();
   if(text.length<2||text.length>420000)throw Error('invalid_size');
-  try{return JSON.parse(text);}catch{throw Error('invalid_json');}
+  let payload;try{payload=JSON.parse(text);}catch{throw Error('invalid_json');}
+  // Some exchanges return HTTP 200 even when their API refuses a location.
+  // Never silently classify this as a valid zero/empty market observation.
+  if(payload&&typeof payload==='object'&&!Array.isArray(payload)){
+    const msg=String(payload.msg||payload.message||'').toLowerCase();
+    if(/restricted location|restricted region|not available in your region|not eligible/.test(msg))
+      throw Error('provider_region_restricted');
+    if(payload.code!==undefined&&!['0','00000',0].includes(payload.code))
+      throw Error('provider_business_error');
+    if(payload.retCode!==undefined&&payload.retCode!==0)
+      throw Error('provider_business_error');
+  }
+  return payload;
 }
 async function safeFetch(url,fetchImpl){try{return {ok:true,body:await fetchJson(url,fetchImpl)};}catch(e){return {ok:false,error:String(e?.message||e).replace(/[^a-zA-Z0-9_-]/g,'').slice(0,35)};}}
 function row(name,now){return {exchange:name,symbol:null,observed_at_ms:now,status:'unavailable',
   account:null,open_interest:null,funding:null,missing:[],errors:[],market_scope:'usdt_perpetual_public'};}
 function finish(x,now){
+  for(const k of ['account','open_interest','funding']){
+    const v=x[k];
+    if(v && (!Number.isFinite(v.asof_ms)||v.asof_ms>now+120000||now-v.asof_ms>25*60000)){
+      x[k]=null;x.errors.push(k+':source_stale');
+    }
+  }
   x.missing=['account','open_interest','funding'].filter(k=>x[k]===null);
-  for(const k of ['account','open_interest','funding'])if(x[k]&&now-x[k].asof_ms>25*60000){x[k]=null;if(!x.missing.includes(k))x.missing.push(k);}
+  // A 200 response with a wrong schema is NOT evidence of a current metric.
+  for(const k of x.missing)if(!x.errors.some(e=>e.startsWith(k+':')))
+    x.errors.push(k+':missing_or_invalid');
   x.status=x.missing.length===0?'ok':x.missing.length===3?'unavailable':'partial';
   return x;
 }
@@ -120,7 +140,7 @@ export async function readBitget(coin,fetchImpl=fetch,now=Date.now()){
   }
   if(b.ok&&b.body?.code==='00000'){
     const d=Array.isArray(b.body?.data?.list)?b.body.data.list:[];
-    const v=stampLatest(d,now,'timestamp');if(v)x.open_interest=oi(v.openInterestValue,'USDT',v.timestamp,now,'bitget_open_interest_hist_5m_quote');
+    const v=stampLatest(d.filter(z=>z.symbol===sym),now,'timestamp');if(v)x.open_interest=oi(v.openInterestValue,'USDT',v.timestamp,now,'bitget_open_interest_hist_5m_quote');
   }
   if(c.ok&&c.body?.code==='00000'){
     const v=c.body?.data?.find(z=>z.symbol===sym);if(v)x.funding=funding(v.fundingRate,v.fundingRateInterval,now,now,'bitget_current_funding_rate');
@@ -175,12 +195,32 @@ export async function collectExchangeCompare(env,{now=Date.now(),fetchImpl=fetch
     const rows=exchanges.map((r,i)=>r||row(EX_NAMES[i],now));
     rows.forEach((r,i)=>r.symbol||=(EX_NAMES[i]==='Gate'?c+'_USDT':EX_NAMES[i]==='OKX'?c+'-USDT-SWAP':c+'USDT'));
     const snapshot=buildExchangeComparison(c,rows,now);
+    // Last verified values are strictly historical and NEVER counted in current coverage.
+    // Preserve them only for an explicitly labeled 'previous reading' UI.
+    try{
+      const previous=await env.MARKET_DATA.get(EX_PREFIX+'latest/'+c+'.json');
+      const old=previous?await previous.json():null;
+      if(old?.schema===schema&&old.symbol===c+'USDT'&&Array.isArray(old.exchanges)){
+        for(let i=0;i<rows.length;i++){
+          const prior=old.exchanges.find(r=>r.exchange===rows[i].exchange);
+          if(!prior)continue;
+          for(const kind of ['account','open_interest','funding']){
+            if(rows[i][kind]!==null)continue;
+            const v=prior[kind]||prior.last_verified?.[kind];
+            if(!v||!Number.isFinite(v.asof_ms)||v.asof_ms>now||now-v.asof_ms>2*3600000)continue;
+            rows[i].last_verified??={};rows[i].last_verified[kind]=v;
+          }
+        }
+      }
+    }catch{/* Previous readings are best effort; never block current sampling. */}
     const date=new Date(now).toISOString().slice(0,10).replace(/-/g,'/');
     await env.MARKET_DATA.put(EX_PREFIX+'latest/'+c+'.json',JSON.stringify(snapshot),{httpMetadata:{contentType:'application/json'}});
     await env.MARKET_DATA.put(EX_PREFIX+'history/'+date+'/'+c+'-'+now+'.json',JSON.stringify(snapshot),{httpMetadata:{contentType:'application/json'}});
-    results.push({symbol:c+'USDT',coverage:snapshot.coverage});
+    results.push({symbol:c+'USDT',coverage:snapshot.coverage,errors:rows.map(r=>({exchange:r.exchange,codes:r.errors||[]}))});
   }
-  await env.MARKET_DATA.put(EX_PREFIX+'health.json',JSON.stringify({ok:true,schema:'lumex_exchange_compare_health_v1',last_run_ms:now,coins:selection,results,
+  await env.MARKET_DATA.put(EX_PREFIX+'health.json',JSON.stringify({ok:true,schema:'lumex_exchange_compare_health_v2',last_run_ms:now,coins:selection,results,
+    // Aggregated source diagnostics; no secret keys or full provider responses.
+    error_codes:Object.fromEntries(selection.map(c=>[c,results.find(r=>r.symbol===c+'USDT')?.errors||[]])),
     cron_step_minutes:5,coin_update_target_minutes:10,order_execution:false}));
   return {ok:true,results};
 }
@@ -194,8 +234,19 @@ export async function serveExchangeCompare(request,env){
     if(data?.schema!==schema||data.symbol!==coin+'USDT'||data.order_execution!==false||!Array.isArray(data.exchanges)||data.exchanges.length!==5)
       throw Error('schema');
     const age=Date.now()-data.generated_at_ms;
-    const safeAge=Number.isFinite(age)&&age>=-120000&&age<=900000;
+    const safeAge=Number.isFinite(age)&&age>=-120000&&age<=30*60000;
     if(!safeAge)return new Response(JSON.stringify({ok:false,error:'snapshot_stale',generated_at_ms:data.generated_at_ms}),{status:503,headers:{'content-type':'application/json','cache-control':'no-store'}});
-    return new Response(JSON.stringify({...data,age_ms:Math.max(0,age)}),{headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'}});
+    return new Response(JSON.stringify({...data,age_ms:Math.max(0,age),collection_delayed:age>12*60000}),{headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'}});
   }catch{return new Response(JSON.stringify({ok:false,error:'snapshot_read_error'}),{status:503,headers:{'content-type':'application/json'}});}
+}
+
+/** Bearer-protected diagnostics. Never return auth keys, IPs or provider bodies. */
+export async function serveExchangeCompareHealth(env){
+  try{
+    const item=await env.MARKET_DATA?.get(EX_PREFIX+'health.json');
+    if(!item)return new Response(JSON.stringify({ok:false,error:'collector_not_started'}),{status:503,headers:{'content-type':'application/json','cache-control':'no-store'}});
+    const health=await item.json();
+    if(health?.schema!=='lumex_exchange_compare_health_v2')throw Error('invalid_health');
+    return new Response(JSON.stringify(health),{headers:{'content-type':'application/json','cache-control':'no-store'}});
+  }catch{return new Response(JSON.stringify({ok:false,error:'collector_health_unavailable'}),{status:503,headers:{'content-type':'application/json'}});}
 }
