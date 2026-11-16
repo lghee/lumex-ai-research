@@ -3541,7 +3541,7 @@ async function hubRoute(request,env){
     const report=await status.json(),now=Date.now();
     const watch=report.watchlist||[];
     if(report.enabled!==true||report.source!=='wordpress_configured'||
-       !Array.isArray(watch)||watch.length<1||watch.length>20||
+       !Array.isArray(watch)||watch.length<1||watch.length>150||
        watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
        now-Number(report.last_success_ms||0)>1200000)
        return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
