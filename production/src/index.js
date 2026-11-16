@@ -1914,6 +1914,29 @@ export function archivedLiqReplay(sql,coin,start,end,now=Date.now()){
     summary_estimate:{source:'public_archive_only'},events,market_samples:[],market_samples_status:'not_included'};
 }
 
+/** Preserve four bounded public reads/minute while giving one incomplete
+ * 35-day reserve backfill a fair priority. No extra provider budget.
+ */
+export function chooseWhalePollAddresses(items,records,nextIndex=0,now=Date.now()){
+  if(!Array.isArray(items)||items.length===0)return {selected:[],nextIndex:0};
+  const take=Math.min(4,items.length),from=Number(nextIndex||0)%items.length;
+  const selected=Array.from({length:take},(_,i)=>items[(from+i)%items.length]);
+  if(take>1){
+    const incomplete=items.filter(item=>{
+      const v=records?.[item.address]||{};
+      if(v.backfill_complete===true&&!v.gap_possible&&!v.error)return false;
+      // Explicit provider failures get at least five minutes of backoff.
+      if(v.error&&Number(v.last_attempt_ms)>now-300000)return false;
+      return true;
+    }).sort((a,b)=>
+      Number(records?.[a.address]?.checked_ms||0)-
+      Number(records?.[b.address]?.checked_ms||0));
+    if(incomplete.length&&!selected.some(v=>v.address===incomplete[0].address))
+      selected[take-1]=incomplete[0];
+  }
+  return {selected,nextIndex:(from+take)%items.length};
+}
+
 export class BtcReserveCollector extends DurableObject{
   constructor(ctx,env){super(ctx,env);this.ctx=ctx;this.env=env;this.legacyBackfillRun=null;this.pollRun=null;}
   async state(){
@@ -2034,10 +2057,11 @@ export class BtcReserveCollector extends DurableObject{
       state.watchlist_sha256=fingerprint.sha256;
       state.watchlist_checked_ms=now;
       state.active_addresses=items.map(x=>x.address);
-      // Four independent reserve addresses per minute, bounded public Esplora I/O.
-      const take=Math.min(4,items.length),from=Number(state.nextIndex||0)%items.length;
-      const selected=Array.from({length:take},(_,i)=>items[(from+i)%items.length]);
-      state.nextIndex=(from+take)%items.length;
+      // Keep the same four bounded public reads/minute; prioritize one
+      // unfinished 35-day address without starving the rotating watchlist.
+      const {selected,nextIndex}=chooseWhalePollAddresses(items,state.addresses,state.nextIndex,now);
+      const take=selected.length;
+      state.nextIndex=nextIndex;
       const seenInPoll=new Set();
       const results=await Promise.all(selected.map(async a=>{
         const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
