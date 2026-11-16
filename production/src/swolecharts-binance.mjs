@@ -1,4 +1,4 @@
-/** LUMEX free Binance exact-USDT-perpetual third-party backup.
+/** LUMEX free exchange-specific USDT-perpetual third-party backup.
  * Public Swolecharts API: https://swolecharts.com/developers
  * Published charts/data require a linked attribution. No API key.
  * Source collects Binance's public venue data independently; never label
@@ -7,6 +7,7 @@
  * metrics in a dashboard only; do not expose this adapter as a bulk data API.
  */
 const COINS=new Set(['BTC','ETH','SOL','XRP']);
+const VENUES=Object.freeze({binance:'Binance',bybit:'Bybit',bitget:'Bitget'});
 const HOST='https://swolecharts.com';
 const ORIGIN='Swolecharts';
 const finite=(v,lo,hi)=>{
@@ -14,8 +15,8 @@ const finite=(v,lo,hi)=>{
   const n=Number(v);return Number.isFinite(n)&&n>=lo&&n<=hi?n:null;
 };
 const rnd=(v,d=4)=>Number(v.toFixed(d));
-function selectedMetric(coin,kind){
-  const market='binance:perp:'+coin+'USDT';
+function selectedMetric(venue,coin,kind){
+  const market=venue+':perp:'+coin+'USDT';
   const q=new URLSearchParams({market,range:'2h',step:'5m'});
   if(kind==='account')q.set('kind','accounts');
   return {market,url:HOST+'/api/series/'+
@@ -30,8 +31,8 @@ async function publicSeries(url,fetchImpl){
   if(data.length<2||data.length>200000)throw Error('swole_invalid_size');
   try{return JSON.parse(data)}catch{throw Error('swole_invalid_json')}
 }
-function pick(coin,kind,body,now){
-  const {market}=selectedMetric(coin,kind);
+function pick(venue,coin,kind,body,now){
+  const {market}=selectedMetric(venue,coin,kind);
   const expected=kind==='account'?'long-short':kind==='open_interest'?'oi':'funding';
   if(!body||body.metric!==expected||body.market!==market||
     body.db!==true||!Array.isArray(body.t)||!Array.isArray(body.v)||
@@ -48,34 +49,34 @@ function pick(coin,kind,body,now){
     if(!current||current.ts<ts)current={ts,n};
   }
   if(!current)return null;
-  const at={asof_ms:current.ts,vendor:ORIGIN,venue:'Binance',
+  const at={asof_ms:current.ts,vendor:ORIGIN,venue:VENUES[venue],
     attribution:'Data by Swolecharts',attribution_url:'https://swolecharts.com/developers',
     source_market:market};
   if(kind==='account'){
     return {...at,long_pct:rnd(current.n*100),short_pct:rnd((1-current.n)*100),
-      source:'swolecharts_binance_usdt_perp_account_share',
+      source:'swolecharts_'+venue+'_usdt_perp_account_share',
       denominator:'exchange_long_short_accounts',method:'venue_published_account_long_share'};
   }
   if(kind==='open_interest'){
     return {...at,value:rnd(current.n),unit:'USD',
-      source:'swolecharts_binance_usdt_perp_oi_usd',
+      source:'swolecharts_'+venue+'_usdt_perp_oi_usd',
       method:'exact_perpetual_contract_quote_notional'};
   }
-  return {...at,rate_pct:Number((current.n*100).toFixed(6)),interval_hours:8,
-    rate_kind:'8h_equivalent_perpetual_quote',
-    source:'swolecharts_binance_usdt_perp_funding_8h_equivalent'};
+  return {...at,rate_pct:Number((current.n*100).toFixed(6)),interval_hours:venue==='binance'?8:null,
+    rate_kind:venue==='binance'?'8h_equivalent_perpetual_quote':'provider_current_perpetual_funding',
+    source:'swolecharts_'+venue+'_usdt_perp_funding_8h_equivalent'};
 }
 /** Verified provider-only fallback, no key, no implicit market sums.
  * Returns no fake values if source is blocked or stale. */
-export async function swolechartsBinanceBackup(coin,{now=Date.now(),fetchImpl=fetch}={}){
-  if(!COINS.has(coin))throw Error('unsupported_binance_coin');
+export async function swolechartsVenueBackup(venue,coin,{now=Date.now(),fetchImpl=fetch}={}){
+  if(!Object.hasOwn(VENUES,venue)||!COINS.has(coin))throw Error('unsupported_venue_or_coin');
   const result={account:null,open_interest:null,funding:null,errors:[],
-    vendor:ORIGIN,venue:'Binance',attribution:'Data by Swolecharts',
+    vendor:ORIGIN,venue:VENUES[venue],attribution:'Data by Swolecharts',
     attribution_url:'https://swolecharts.com/developers'};
   const metrics=['account','open_interest','funding'];
   const outcomes=await Promise.all(metrics.map(async kind=>{
-    const {url}=selectedMetric(coin,kind);
-    try{return {kind,data:pick(coin,kind,await publicSeries(url,fetchImpl),now)}}
+    const {url}=selectedMetric(venue,coin,kind);
+    try{return {kind,data:pick(venue,coin,kind,await publicSeries(url,fetchImpl),now)}}
     catch(e){return {kind,error:String(e?.message||e).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60)}}
   }));
   for(const o of outcomes){
@@ -83,4 +84,9 @@ export async function swolechartsBinanceBackup(coin,{now=Date.now(),fetchImpl=fe
     else result.errors.push('swolecharts_'+o.kind+':'+(o.error||'source_stale_or_invalid'));
   }
   return result;
+}
+
+/** Backward-compatible Binance endpoint and test contract. */
+export function swolechartsBinanceBackup(coin,opts={}){
+  return swolechartsVenueBackup('binance',coin,opts);
 }
