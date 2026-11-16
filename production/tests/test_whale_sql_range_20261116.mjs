@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
+assert(source.includes("const prefix='btc:addressflow:'+event.txhash+':'"),'must key by actual immutable TX hash');
+assert(source.includes("WHERE kind='whale_transfer' AND id>=? AND id<? LIMIT 1"),'dedupe must use index range, never SQL LIKE');
+assert(source.includes("prefix,prefix+'~'"),'upper bound is exclusive and cannot collide with valid address suffix');
+assert(!source.includes("id LIKE ? LIMIT 1"),'regression: SQL LIKE on 64-byte hash broke live ingest');
+const hash='a'.repeat(64);
+const prefix='btc:addressflow:'+hash+':';
+const includes=id=>id>=prefix&&id<prefix+'~';
+assert(includes(prefix+'34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo'));
+assert(includes(prefix+'bc1qchctnvmdva5z9vrpxkkxck64v7nmzdtyxsrq64'));
+assert(!includes('btc:addressflow:'+'b'.repeat(64)+':34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo'));
+assert(!includes('btc:exchangeflow:'+hash+':Binance'));
+console.log('PASS whale legacy transaction dedupe uses exact indexed primary-key prefix range');
