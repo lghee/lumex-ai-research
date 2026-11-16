@@ -39,6 +39,17 @@ const recovered=await readOKX('BTC',rateLimitOnce,now);
 assert.equal(calls,2);
 assert.equal(recovered.account.long_pct,75);
 assert.equal(recovered.status,'ok');
+let fundingCalls=0;
+const fundingLimited=await readOKX('BTC',async url=>{
+  if(url.includes('/public/funding-rate')){
+    fundingCalls++;
+    if(fundingCalls===1)return {ok:false,status:429,text:async()=>''};
+  }
+  return okxFixture(url);
+},now);
+assert.equal(fundingCalls,2);
+assert.equal(fundingLimited.status,'ok');
+assert.equal(fundingLimited.funding.rate_pct,.0075);
 const old=await readOKX('BTC',async url=>{
   if(url.includes('long-short-account-ratio-contract'))
     return body({code:'0',data:[[String(now-35*60000),'2.7']]});
