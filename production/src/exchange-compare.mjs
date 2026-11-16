@@ -227,6 +227,29 @@ export async function collectExchangeCompare(env,{now=Date.now(),fetchImpl=fetch
     const exchanges=await Promise.all(readers.map(fn=>fn(c,fetchImpl,now).catch(()=>null)));
     const rows=exchanges.map((r,i)=>r||row(EX_NAMES[i],now));
     rows.forEach((r,i)=>r.symbol||=(EX_NAMES[i]==='Gate'?c+'_USDT':EX_NAMES[i]==='OKX'?c+'-USDT-SWAP':c+'USDT'));
+    // Free public Binance-only backup with mandatory visible attribution.
+    // Exact BTCUSDT perpetual market; no COIN-M/USDC market aggregation.
+    // Source snapshots must be no older than 25 min; no fabricated zeroes.
+    if(rows[0]&&['account','open_interest','funding'].some(k=>rows[0][k]===null)){
+      try{
+        const mod=await import('./swolecharts-binance.mjs');
+        const backup=await mod.swolechartsBinanceBackup(c,{now,fetchImpl});
+        let accepted=0;
+        for(const kind of ['account','open_interest','funding']){
+          if(rows[0][kind]===null&&backup[kind]){
+            rows[0][kind]=backup[kind];accepted++;
+          }
+        }
+        if(accepted){
+          rows[0].backup_provider='Swolecharts';
+          rows[0].backup_venue='Binance';
+          rows[0].attribution='Data by Swolecharts';
+          rows[0].attribution_url='https://swolecharts.com/developers';
+          finish(rows[0],now);
+        }
+        rows[0].errors.push(...backup.errors.map(v=>v.slice(0,95)));
+      }catch(e){rows[0].errors.push('swolecharts:backup_source_unavailable');}
+    }
     // Explicitly licensed Coinalyze provider: independently verifies the real
     // Binance USDT perpetual before accepting source-attributed account/OI.
     // Missing secret or commercial-display permission => never fetch.
