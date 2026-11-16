@@ -2739,6 +2739,93 @@ export async function normalizeGithubBinanceFrames(frames,now=Date.now()){
   }
   return results;
 }
+
+const EXT_BINANCE_RELAY_HEALTH='market-hub/diagnostics/binance-external-relay-v1.json';
+async function externalBinanceAuthorized(request,env){
+  const expected=env.LUMEX_BINANCE_RELAY_SECRET;
+  if(typeof expected!=='string'||expected.length<48||expected.length>200)return false;
+  const provided=request.headers.get('authorization')||'';
+  if(!provided.startsWith('Bearer ')||provided.length>256)return false;
+  const enc=new TextEncoder();
+  const digest=await Promise.all([provided.slice(7),expected].map(async str=>
+    new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(str)))));
+  let diff=0;
+  for(let i=0;i<32;i++)diff|=digest[0][i]^digest[1][i];
+  return diff===0;
+}
+/** Strict 24/7 external egress for *public* Binance forceOrder events.
+ * No WordPress execution, no credentials/trading, no fabricated backfill.
+ * Deploying this endpoint does NOT itself retire any cPanel cron.
+ */
+export async function externalBinanceRelayRoute(request,env,now=Date.now()){
+  if(!env.MARKET_EVENT_HUB||!env.MARKET_DATA||typeof env.LUMEX_BINANCE_RELAY_SECRET!=='string'||
+     env.LUMEX_BINANCE_RELAY_SECRET.length<48)
+    return hubReply({ok:false,error:'binance_relay_not_configured'},503);
+  if(!(await externalBinanceAuthorized(request,env)))
+    return hubReply({ok:false,error:'unauthorized'},401);
+  const raw=await request.text();
+  if(raw.length>56000)return hubReply({ok:false,error:'body_oversize'},413);
+  let body;try{body=JSON.parse(raw)}catch{return hubReply({ok:false,error:'bad_json'},400)}
+  if(body?.schema!=='lumex_binance_public_relay_v1'||
+     !/^[a-f0-9-]{30,50}$/.test(String(body.session_id||''))||
+     !Number.isSafeInteger(body.observed_ms)||Math.abs(now-body.observed_ms)>90000||
+     typeof body.connected!=='boolean'||
+     !Number.isSafeInteger(body.provider_messages)||body.provider_messages<0||
+     !Number.isSafeInteger(body.dropped_events)||body.dropped_events<0||
+     !Array.isArray(body.frames)||body.frames.length>30)
+    return hubReply({ok:false,error:'bad_relay_envelope'},400);
+  const events=await normalizeGithubBinanceFrames(body.frames,now);
+  if(events===null)return hubReply({ok:false,error:'bad_source_frames'},400);
+  let accepted=0,invalid=0;
+  for(const symbol of HUB_SYMBOLS){
+    const items=events.filter(e=>e.symbol===symbol);
+    if(!items.length)continue;
+    const r=await env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+      new Request('https://hub/ingest',{method:'POST',
+        headers:{'content-type':'application/json'},body:JSON.stringify({symbol,events:items})}));
+    if(!r.ok)return hubReply({ok:false,error:'relay_hub_ingest_failed',retry_allowed:true},503);
+    const x=await r.json();
+    accepted+=Number(x.accepted||0);invalid+=Number(x.invalid||0);
+  }
+  let proof;
+  try{proof=await persistGithubBinanceSourceProof(env,events,now);}
+  catch{return hubReply({ok:false,error:'relay_r2_readback_failed',retry_allowed:true},503)}
+  const old=await opsReadR2(env,EXT_BINANCE_RELAY_HEALTH);
+  const contiguous=body.connected&&body.dropped_events===0&&
+    old?.schema==='lumex_binance_external_relay_status_v1'&&
+    old.connected===true&&old.dropped_events===0&&
+    old.session_id===body.session_id&&now-Number(old.received_ms||0)<=90000;
+  const since=contiguous?Number(old.continuous_since_ms||now):now;
+  const health={schema:'lumex_binance_external_relay_status_v1',
+    ok:true,source:'external_public_binance_ws_relay',received_ms:now,
+    session_id:body.session_id,connected:body.connected,
+    provider_messages:body.provider_messages,dropped_events:body.dropped_events,
+    accepted_this_batch:accepted,invalid_this_batch:invalid,
+    total_accepted:Number(old?.total_accepted||0)+accepted,
+    last_event_ms:proof.last_event_ms||Number(old?.last_event_ms||0),
+    last_source_proof_key:proof.last_key||String(old?.last_source_proof_key||''),
+    source_r2_readback_verified:proof.verified>0||old?.source_r2_readback_verified===true,
+    continuous_since_ms:since,
+    observed_only:true,complete_market_capture:false,
+    cron_retirement_allowed:false};
+  await env.MARKET_DATA.put(EXT_BINANCE_RELAY_HEALTH,JSON.stringify(health),
+    {httpMetadata:{contentType:'application/json'}});
+  return hubReply({ok:true,accepted,invalid,
+    source_r2_readback_verified:proof.verified,
+    source:'binance_usdm_public_forceorder',cron_retirement_allowed:false});
+}
+export async function externalBinanceRelayHealth(env,now=Date.now()){
+  const status=await opsReadR2(env,EXT_BINANCE_RELAY_HEALTH);
+  if(status?.schema!=='lumex_binance_external_relay_status_v1')
+    return {ok:false,reason:'relay_never_connected',configured:typeof env.LUMEX_BINANCE_RELAY_SECRET==='string'&&
+      env.LUMEX_BINANCE_RELAY_SECRET.length>=48,cron_retirement_allowed:false};
+  return {...status,stale:now-Number(status.received_ms||0)>90000,
+    verified_contiguous_seconds:status.connected===true&&status.dropped_events===0&&
+      now-Number(status.received_ms||0)<=90000?
+      Math.max(0,Math.floor((now-Number(status.continuous_since_ms||now))/1000)):0,
+    cron_retirement_allowed:false};
+}
+
 async function githubBinanceSidecarRoute(request,env){
   const bearer=request.headers.get('authorization')||'';
   if(!bearer.startsWith('Bearer ')||!env.MARKET_EVENT_HUB||!env.MARKET_DATA)
@@ -4065,6 +4152,10 @@ async function hubRoute(request,env){
         safe_to_disable_wordpress_crons:false});
     }catch(error){return hubReply({ok:false,error:'archive_unavailable'},503)}
   }
+  if(path==='/market-hub/v1/binance-external-ingest'&&method==='POST')
+    return externalBinanceRelayRoute(request,env);
+  if(path==='/market-hub/v1/binance-external-health'&&method==='GET')
+    return hubReply(await externalBinanceRelayHealth(env));
   if(path==='/market-hub/v1/github-binance-ingest'&&method==='POST')
     return githubBinanceSidecarRoute(request,env);
   if(path==='/market-hub/v1/github-binance-health'&&method==='GET'){
