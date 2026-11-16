@@ -1808,7 +1808,10 @@ export class BtcReserveCollector extends DurableObject{
         last_run_ms:state.last_run_ms,last_success_ms:state.last_success_ms,
         watchlist_count:Number(state.watchlist_count||0),
         accepted:state.accepted,requests:state.requests,errors:state.errors,
-        last_error:state.error,watchlist:watch,coverage:state.coverage,orders_enabled:false});
+        active_error_count:watch.filter(w=>w.error).length,
+        pending_backfill_count:watch.filter(w=>!w.backfill_complete||w.error||w.gap_possible).length,
+        last_error:state.error||((watch.some(w=>w.error))?'active_address_failures':''),
+        watchlist:watch,coverage:state.coverage,orders_enabled:false});
     }
     if(path==='/watchlist-parity'){
       const state=await this.state(),ms=Number(state.watchlist_checked_ms)||0,now=Date.now();
@@ -1888,7 +1891,7 @@ export class BtcReserveCollector extends DurableObject{
     const response=await fetch(url,{headers:{accept:'application/json'},signal:AbortSignal.timeout(12000)});
     if(!response.ok)throw Error('esplora_http_'+response.status);
     const text=await response.text();
-    if(text.length>2400000)throw Error('esplora_response_oversize');
+    if(text.length>10000000)throw Error('esplora_response_oversize');
     const rows=JSON.parse(text);
     if(!Array.isArray(rows)||rows.length>25)throw Error('esplora_invalid_page');
     return rows;
