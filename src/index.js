@@ -1460,10 +1460,10 @@ export function decodeBtcTrackedNet(tx,items){
     known.set(i.address,String(i.label).slice(0,80));
   const nets=new Map(),touches=new Map();
   let untrackedInput=false;
-  function record(address,satoshis){
+  function record(address,satoshis,sign=1){
     if(!known.has(address))return;
     const val=sats(satoshis);if(val===null)throw Error('btc_invalid_satoshis');
-    const ex=known.get(address);nets.set(ex,(nets.get(ex)||0)+val);
+    const ex=known.get(address);nets.set(ex,(nets.get(ex)||0)+sign*val);
     if(!touches.has(ex))touches.set(ex,new Set());touches.get(ex).add(address);
   }
   try{
@@ -1475,7 +1475,7 @@ export function decodeBtcTrackedNet(tx,items){
         untrackedInput=true;continue;
       }
       const val=sats(p.value);if(val===null)return null;
-      record(p.scriptpubkey_address,-val);
+      record(p.scriptpubkey_address,val,-1);
     }
   }catch{return null;}
   if(nets.size!==1)return null;
