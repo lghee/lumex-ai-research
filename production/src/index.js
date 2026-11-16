@@ -3594,6 +3594,11 @@ export async function hubWhales30dArchive(env,now=Date.now()){
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
   // PRO-only via WordPress, server-side Bearer; no public customer access to Worker R2.
+  // Owner-only source health: enables diagnosing 403, stale source and schema mismatch.
+  if(path==='/market-hub/v1/exchange-compare-health'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./exchange-compare.mjs')).serveExchangeCompareHealth(env);
+  }
   if(path==='/market-hub/v1/exchange-compare'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-compare.mjs')).serveExchangeCompare(request,env);
