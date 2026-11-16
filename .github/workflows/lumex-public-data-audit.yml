@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/lumex-public-data-audit.yml'
       - 'production/scripts/public-data-audit.py'
+      - 'production/src/index.js'
+      - 'production/package.json'
   schedule:
     - cron: '19 0,6,12,18 * * *'
 permissions:
