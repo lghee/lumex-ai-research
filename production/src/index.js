@@ -1905,8 +1905,8 @@ export class BtcReserveCollector extends DurableObject{
       state.watchlist_sha256=fingerprint.sha256;
       state.watchlist_checked_ms=now;
       state.active_addresses=items.map(x=>x.address);
-      // Six independent reserve addresses per scheduled poll; no unbounded scan.
-      const take=Math.min(6,items.length),from=Number(state.nextIndex||0)%items.length;
+      // Four independent reserve addresses per minute, bounded public Esplora I/O.
+      const take=Math.min(4,items.length),from=Number(state.nextIndex||0)%items.length;
       const selected=Array.from({length:take},(_,i)=>items[(from+i)%items.length]);
       state.nextIndex=(from+take)%items.length;
       const seenInPoll=new Set();
@@ -1915,9 +1915,16 @@ export class BtcReserveCollector extends DurableObject{
         try{
           const newest=await this.fetchPage(a.address);state.requests++;
           const pages=[newest];
-          const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
-          if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
-            pages.push(await this.fetchPage(a.address,cursor));state.requests++;
+          const gap=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
+          const wasComplete=prior.backfill_complete===true&&!gap;
+          let cursor=prior.backfill_cursor||(!wasComplete&&newest.length===25?newest.at(-1)?.txid:'');
+          for(let step=0;step<3&&cursor&&/^[0-9a-fA-F]{64}$/.test(cursor);step++){
+            const page=await this.fetchPage(a.address,cursor);
+            state.requests++;pages.push(page);
+            const oldest=page.at(-1),next=oldest?.txid;
+            if(page.length<25||Number(oldest?.status?.block_time||0)*1000<now-35*86400000||
+               !next||next===cursor)break;
+            cursor=next;
           }
           const unique=new Map();
           for(const page of pages)for(const tx of page){
@@ -1935,13 +1942,13 @@ export class BtcReserveCollector extends DurableObject{
           }
           prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
           const lastPage=pages.at(-1),oldest=lastPage.at(-1);
-          prior.backfill_complete=lastPage.length<25||
+          prior.backfill_complete=wasComplete||lastPage.length<25||
             (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
           prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
-          prior.gap_possible=Boolean((prior.gap_possible&&!prior.backfill_complete)||(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head)));
+          prior.gap_possible=Boolean((prior.gap_possible||gap)&&!prior.backfill_complete);
           prior.head=newest[0]?.txid||prior.head||null;
           prior.error=null;state.addresses[a.address]=prior;
-          return {ok:true,accepted,events:keep.length,gap:prior.gap_possible};
+          return {ok:true,accepted,events:keep.length,gap:prior.gap_possible,backfill_complete:prior.backfill_complete};
         }catch(e){
           const code=String(e?.message||e||'unknown').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,90);
           prior.error=code;prior.last_attempt_ms=now;state.addresses[a.address]=prior;
@@ -1958,7 +1965,9 @@ export class BtcReserveCollector extends DurableObject{
         checked:take,successful:successes.length,failed:failures.length,
         accepted:successes.reduce((n,r)=>n+r.accepted,0),
         observed_events:successes.reduce((n,r)=>n+r.events,0),
-        gap_possible:successes.some(r=>r.gap),error:state.error};
+        gap_possible:successes.some(r=>r.gap),
+        backfill_complete:successes.length===take&&successes.every(r=>r.backfill_complete),
+        error:state.error};
     }catch(error){
       state.errors++;state.error=String(error?.message||error||'unknown').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,90);
       await this.ctx.storage.put('state',state);
@@ -3152,7 +3161,7 @@ export function nativeWhaleWatchlistBackfillProof(status,now=Date.now()){
      !Array.isArray(watch)||watch.length!==count||
      !Number.isSafeInteger(latest)||latest>now+120000||now-latest>1200000)
     return false;
-  const maxAge=Math.max(1800000,Math.ceil(count/6)*60000+600000);
+  const maxAge=Math.max(1800000,Math.ceil(count/4)*60000+600000);
   return watch.every(entry=>entry?.backfill_complete===true&&
     entry?.gap_possible===false&&!entry?.error&&
     Number.isSafeInteger(Number(entry.last_checked_ms))&&
