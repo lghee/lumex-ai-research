@@ -1,3 +1,4 @@
+import {loadBlsSidecar,mergeVerifiedBls} from './bls-official-sidecar.mjs';
 /** LUMEX official macro announcements — exact source headlines, never hallucinated news.
  * Public-only HTTP feeds -> verified origins -> private R2 snapshot -> public cached report.
  * This does NOT claim any announcement caused a coin price movement.
@@ -89,20 +90,26 @@ export async function collectOfficialNews(env,now=Date.now()){
    feedCoverage.push({id:f.id,agency:f.label,status:'unavailable',reason:sanitizeReason(s.reason),checked_ms:now});
   }
  }
- if(!newItems.length){
+ const sidecar=await loadBlsSidecar(bucket,now);
+ if(!newItems.length&&!sidecar){
   await put(bucket,'attempt.json',{at_ms:now,status:'failed',sources:feedCoverage});
   return {ok:false,reason:'no_verified_official_feed',previous_snapshot_preserved:true};
  }
  const unique=new Map();
  for(const e of newItems)unique.set(e.source_url,e);
  const sorted=[...unique.values()].sort((a,b)=>b.published_ms-a.published_ms).slice(0,48);
- const record={ok:true,schema:SCHEMA,source:'official_us_agency_rss_only',collected_ms:now,
+ let record={ok:true,schema:SCHEMA,source:'official_us_agency_rss_only',collected_ms:now,
   collected_utc:new Date(now).toISOString(),
   coverage:{verified_feeds:feedCoverage.filter(x=>x.status==='verified').length,
     attempted_feeds:FEEDS.length,all_sources_verified:feedCoverage.every(x=>x.status==='verified')},
   feeds:feedCoverage,items:sorted,
   reliability:'Official source headline and date verified; not an AI generated summary or causal market claim.',
   no_news_inference:true,no_order_execution:true};
+ if(sidecar)record=mergeVerifiedBls(record,sidecar,now);
+ if(!record.items.length){
+  await put(bucket,'attempt.json',{at_ms:now,status:'failed',sources:feedCoverage});
+  return {ok:false,reason:'no_verified_official_feed',previous_snapshot_preserved:true};
+ }
  const day=new Date(now).toISOString().slice(0,10);
  await put(bucket,'snapshots/'+day+'/'+new Date(now).toISOString().slice(11,16).replace(':','-')+'.json',record);
  await put(bucket,'latest.json',record);
