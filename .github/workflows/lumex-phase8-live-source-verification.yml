@@ -1,0 +1,55 @@
+name: LUMEX phase8 live public source verification
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-phase8-live-source-verification.yml'
+permissions:
+  contents: read
+jobs:
+  verify-data-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read only official macro source coverage and Binance stream status
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, json, time, datetime
+          root="https://lumex-ai-research2.kpiplus195.workers.dev/market-hub/v1/"
+          paths=["official-news","binance-external-health","github-binance-health",
+                 "lyra-paper-health","public-heatmap"]
+          for path in paths:
+              result={"endpoint":path,"at":datetime.datetime.now(datetime.timezone.utc).isoformat()}
+              for i in range(3):
+                  try:
+                      url=root+path+"?phase8read="+str(int(time.time()))
+                      req=urllib.request.Request(url,headers={"Accept":"application/json",
+                          "User-Agent":"LUMEX-phase8-official-read-only/1.0"})
+                      with urllib.request.urlopen(req,timeout=15) as r:
+                          data=json.load(r);result["http"]=r.status
+                      result["ok"]=data.get("ok")
+                      if path=="official-news":
+                          result["feed_states"]=[{"id":x.get("id"),"status":x.get("status"),"items":x.get("items")}
+                              for x in data.get("feeds",[])]
+                          result["sources"]=data.get("coverage")
+                          result["items_by_source"]={k:sum(x.get("source_id")==k for x in data.get("items",[]))
+                              for k in ("fed","bea","bls_cpi","bls_jobs")}
+                      elif path=="binance-external-health":
+                          for k in ("configured","connected","stale","verified_contiguous_seconds",
+                                    "source_r2_readback_verified","reason"):
+                              if k in data:result[k]=data[k]
+                      elif path=="github-binance-health":
+                          for k in ("reason","coverage","configured","ok"): 
+                              if k in data:result[k]=data[k]
+                      elif path=="lyra-paper-health":
+                          for k in ("initialized","state","last_observed_ms"):result[k]=data.get(k)
+                      elif path=="public-heatmap":
+                          result["n"]=len(data.get("coins",[]));result["stale"]=data.get("stale")
+                      break
+                  except urllib.error.HTTPError as e:
+                      result["http"]=e.code
+                      result["error"]="HTTP error from edge or origin"
+                  except Exception as e:
+                      result["error"]=type(e).__name__
+                  if i<2:time.sleep(6)
+              print("LUMEX_PHASE8_LIVE_PROOF "+json.dumps(result,ensure_ascii=False))
+          PY
