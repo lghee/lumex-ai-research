@@ -3298,6 +3298,13 @@ export function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
     start,end).toArray();
   if(rows.length>20000)return hubReply({ok:false,error:'observed_event_count_exceeds_safe_limit',coverage:'partial'},503);
   const bins=new Map(),events=[],bySource={Bybit:0,Binance:0};let invalid=0;
+  // Exact rolling windows are calculated before any detail-list truncation or minute bucketing.
+  const blank=()=>({usd:0,count:0,long:0,short:0});
+  const exact=Object.fromEntries(['Bybit','Binance'].map(source=>[source,{
+    windows:Object.fromEntries([5,15,60].map(m=>[m+'m',blank()])),
+    reference:Array.from({length:12},blank)
+  }]));
+  const accumulate=(cell,amount,side)=>{cell.usd+=amount;cell.count++;cell[side]+=amount;};
   for(const row of rows){
     const source=row.source==='bybit'?'Bybit':row.source==='binance'?'Binance':null;
     if(!source){invalid++;continue}
@@ -3310,6 +3317,12 @@ export function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
     if(!Number.isFinite(amount)||amount<=0||amount>1e15){invalid++;continue}
     bySource[source]++;
     if(view==='pressure'){
+      const age=now-ts;
+      for(const m of [5,15,60])if(age<m*60000)accumulate(exact[source].windows[m+'m'],amount,side);
+      if(age>=900000&&age<11700000){
+        const i=Math.floor((age-900000)/900000);
+        accumulate(exact[source].reference[i],amount,side);
+      }
       const bucket=Math.floor(ts/60000)*60000,key=bucket+'|'+source+'|'+side;
       const acc=bins.get(key)||{bucket_ms:bucket,exchange:source,side,events:0,notional_estimate_usd:0};
       acc.events++;acc.notional_estimate_usd+=amount;bins.set(key,acc);
@@ -3328,7 +3341,7 @@ export function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
     provider_comparability:'not_comparable'};
   if(view==='pressure'){
     return hubReply({...common,schema:'lumex_observed_pressure_v1',window_minutes:195,
-      bins:[...bins.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms)});
+      exact_windows:exact,bins:[...bins.values()].sort((a,b)=>a.bucket_ms-b.bucket_ms)});
   }
   // Calculate the complete four-hour pressure distribution BEFORE limiting
   // the detailed list. Never present a truncated list sum as an entire session.
