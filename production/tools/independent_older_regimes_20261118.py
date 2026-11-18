@@ -57,6 +57,8 @@ def run():
     n=len(market['BTC'])
     if n<3900 or any(len(v)!=n or not np.array_equal(v[:,0],market['BTC'][:,0]) for v in market.values()):
         raise RuntimeError('old_data_alignment_failed')
+    ROOT.mkdir(parents=True,exist_ok=True)
+    np.savez_compressed(ROOT/'observed_older_bars.npz',**market)
     d=prepare(market)
     # All model parameters remain frozen from the later-period study.
     # Only previously unseen older periods are tested; no selection.
