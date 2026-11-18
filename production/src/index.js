@@ -3085,7 +3085,14 @@ export async function probeBinanceContainerEgress(env,now=Date.now()){
         body?.error_code==='upstream_http_forbidden'?'upstream_403':
         body?.error_code==='upstream_unavailable'?'upstream_unavailable':'handshake_rejected'};
   }catch(error){
-    console.warn('binance_container_proof_unavailable',safeError(error).slice(0,75));
+    const code=safeError(error);
+    if(code.includes('container_image_contract_mismatch'))proof.status='container_image_contract_mismatch';
+    else if(code.includes('container_image_health_unavailable'))proof.status='container_image_health_unavailable';
+    else if(code.includes('container_image_rotation_failed'))proof.status='container_image_rotation_failed';
+    else if(code.includes('container_inspection_failed'))proof.status='container_inspection_failed';
+    else if(code.includes('container_start_timeout'))proof.status='container_start_timeout';
+    else if(code.includes('container_binance-egress-probe_404'))proof.status='container_endpoint_missing';
+    console.warn('binance_container_proof_unavailable',code.slice(0,75));
   }
   await env.MARKET_DATA.put(BINANCE_EGRESS_PROOF_KEY,JSON.stringify(proof),
     {httpMetadata:{contentType:'application/json'}});
@@ -4429,6 +4436,20 @@ async function hubRoute(request,env){
   }
   if(path==='/market-hub/v1/binance-cloudflare-health'&&method==='GET')
     return hubReply(await cloudflareBinanceHealth(env));
+  if(path==='/market-hub/v1/binance-container-image-health'&&method==='GET'){
+    if(!env.RESEARCH_CONTAINER)return hubReply({ok:false,reason:'container_binding_missing'},503);
+    try{
+      const response=await env.RESEARCH_CONTAINER.getByName('primary-research')
+        .fetch('https://internal.lumex/__container-image-status');
+      if(!response.ok)return hubReply({ok:false,reason:'container_image_status_unavailable'},503);
+      const info=await response.json();
+      return hubReply({ok:info.ok===true,container_running:info.container_running===true,
+        image_matches_current:info.image_matches_current,
+        image_starting:info.image_starting===true,
+        restart_policy:'on_binance_probe_if_image_outdated',
+        orders_enabled:false});
+    }catch{return hubReply({ok:false,reason:'container_image_status_unavailable'},503);}
+  }
   if(path==='/market-hub/v1/binance-egress-health'&&method==='GET'){
     try{
       const x=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
@@ -4675,10 +4696,51 @@ export class ResearchContainer extends DurableObject{
   }
   async fetch(request){
     const container=this.ctx.container;if(!container)throw Error('container_binding_missing');
+    const path=new URL(request.url).pathname;
+    // Only publicly expose booleans; never leak image digests, keys or paths.
+    if(path==='/__container-image-status'){
+      try{
+        const info=container.running?await container.inspect():null;
+        return Response.json({ok:true,container_running:!!container.running,
+          image_matches_current:info?.image?info.image===container.images.base:null,
+          image_starting:!!container.running&&!info?.image,
+          restart_policy:'on_binance_probe_if_image_outdated',
+          orders_enabled:false});
+      }catch{return Response.json({ok:false,error_code:'container_inspection_failed'},
+        {status:503});}
+    }
+    const binanceRoute=path==='/binance-egress-probe'||path==='/binance-cloudflare-capture';
+    // "durable_object" policy NEVER auto-rolls old running images on deploy.
+    // Restart only when a Binance diagnostic discovers a digest mismatch;
+    // preserve unrelated queued research paths and avoid restart loops.
+    if(binanceRoute&&container.running){
+      let info;
+      try{info=await container.inspect();}
+      catch{return Response.json({ok:false,error_code:'container_inspection_failed'},
+        {status:503});}
+      if(info?.image&&container.images?.base&&info.image!==container.images.base){
+        console.warn('research_container_binance_image_rotation_required');
+        try{await container.destroy('lumex_research_container_image_upgrade');}
+        catch{return Response.json({ok:false,error_code:'container_image_rotation_failed'},
+          {status:503});}
+      }
+    }
     this.starting??=this.startAndReady().finally(()=>{this.starting=null;});await this.starting;
+    if(binanceRoute){
+      // Fail closed when an old process is still serving /health.
+      try{
+        const res=await container.getTcpPort(PORT).fetch('http://container/health',
+          {signal:AbortSignal.timeout(3500)});
+        const health=await res.json();
+        if(!res.ok||health?.binance_image_contract!=='lumex_binance_capture_20261119_v2')
+          return Response.json({ok:false,error_code:'container_image_contract_mismatch'},
+            {status:503});
+      }catch{return Response.json({ok:false,error_code:'container_image_health_unavailable'},
+        {status:503});}
+    }
     const url=new URL(request.url);url.protocol='http:';url.host='container';
     const headers=new Headers(request.headers);headers.delete('host');headers.set('X-Lumex-Internal-Key',this.env.LUMEX_CONTAINER_KEY||'');
-    const forwarded=new Request(url,{method:request.method,headers,body:request.body});
+    const forwarded=new Request(url,{method:request.method,headers,body:request.body,duplex:'half'});
     return container.getTcpPort(PORT).fetch(forwarded);
   }
   async startAndReady(){
