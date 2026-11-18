@@ -1,0 +1,46 @@
+name: LUMEX official BLS Atom diagnosis
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-bls-atom-health.yml'
+      - 'production/src/official-news.mjs'
+      - 'production/tests/test_official_news_20261118.mjs'
+permissions:
+  contents: read
+jobs:
+  feed-diagnosis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect official Atom entry and live collector status without credentials
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.error,json,xml.etree.ElementTree as ET
+          urls={
+            'bls_cpi':'https://www.bls.gov/feed/cpi.rss',
+            'bls_jobs':'https://www.bls.gov/feed/empsit.rss'}
+          for label,url in urls.items():
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; LUMEX public research)','Accept':'application/atom+xml, application/rss+xml'})
+                  with urllib.request.urlopen(req,timeout=15) as r: raw=r.read(500000)
+                  root=ET.fromstring(raw)
+                  ns={'a':'http://www.w3.org/2005/Atom'}
+                  entries=root.findall('a:entry',ns)
+                  print('BLS_ATOM_DIAG '+json.dumps({
+                    'source':label,'response_bytes':len(raw),'root':root.tag,'entry_count':len(entries),
+                    'first_entries':[{
+                        'title':(e.findtext('a:title',default='',namespaces=ns) or '')[:110],
+                        'published':e.findtext('a:published',default='',namespaces=ns),
+                        'updated':e.findtext('a:updated',default='',namespaces=ns),
+                        'link_tags':[{ 'href':x.attrib.get('href'),'rel':x.attrib.get('rel')} for x in e.findall('a:link',ns)][:4],
+                        'text_link':e.findtext('a:link',default='',namespaces=ns)} for e in entries[:3]]
+                  },ensure_ascii=False))
+              except Exception as e:print('BLS_ATOM_ERROR '+json.dumps({'source':label,'type':type(e).__name__,'detail':str(e)[:100]}))
+          url='https://lumex-ai-research2.kpiplus195.workers.dev/market-hub/v1/official-news'
+          try:
+              with urllib.request.urlopen(url,timeout=15) as r:data=json.load(r)
+              print('BLS_PRODUCTION_FEEDS '+json.dumps({
+                  'status':data.get('status'),'feeds':data.get('feeds'),'collected_ms':data.get('collected_ms'),
+                  'count':len(data.get('items',[]))},ensure_ascii=False))
+          except Exception as e:print('BLS_PRODUCTION_ERROR '+str(e)[:150])
+          PY
