@@ -15,7 +15,7 @@ const wss=[
  'wss://fstream.binance.com/market/ws/!forceOrder@arr',
  'wss://fstream.binance.com/market/stream?streams=!forceOrder@arr'
 ];
-const session_id=randomUUID().toLowerCase();
+let session_id=randomUUID().toLowerCase();
 let socket=null,connected=false,provider_messages=0,dropped_events=0,
  buffer=[],sending=false,lastPost=0,restarts=0,shutdown=false,route=0;
 const maxBuffer=300,log=(key,v='')=>console.log(new Date().toISOString(),key,String(v).slice(0,120));
@@ -27,9 +27,9 @@ const isBinanceFrame=x=>{
   Number.isSafeInteger(Number(v.o.T));
 };
 const feedStatus=()=>socket?.readyState===1&&connected;
-async function sendBatch(){
+async function sendBatch(force=false){
  if(sending||shutdown)return;
- if(buffer.length===0&&Date.now()-lastPost<30000)return;
+ if(!force&&buffer.length===0&&Date.now()-lastPost<30000)return;
  sending=true;
  const frames=buffer.splice(0,Math.min(buffer.length,25));
  try{
@@ -60,7 +60,12 @@ function connect(){
  socket=ws;
  ws.addEventListener('open',()=>{
    if(socket!==ws)return;
-   connected=true;restarts=0;log('BINANCE_CONNECTED','usd_m_forceOrder_snapshot_1s');
+   // Every successful new socket starts a distinct continuity epoch.
+   // Old pending raw frames may still be archived, but are not proof of uninterrupted reception.
+   session_id=randomUUID().toLowerCase();
+   dropped_events=0;
+   connected=true;restarts=0;lastPost=0;log('BINANCE_CONNECTED','usd_m_forceOrder_snapshot_1s');
+   void sendBatch(true);
  });
  ws.addEventListener('message',e=>{
    if(socket!==ws||typeof e.data!=='string'||e.data.length>32000)return;
@@ -73,8 +78,8 @@ function connect(){
     if(buffer.length>=25)void sendBatch();
    }catch{log('MALFORMED_WS_JSON')}
  });
- ws.addEventListener('close',()=>{if(socket===ws){connected=false;socket=null;log('BINANCE_DISCONNECTED');reconnect()}});
- ws.addEventListener('error',()=>{if(socket===ws){connected=false;try{ws.close()}catch{} }});
+ ws.addEventListener('close',()=>{if(socket===ws){connected=false;socket=null;log('BINANCE_DISCONNECTED');void sendBatch(true);reconnect()}});
+ ws.addEventListener('error',()=>{if(socket===ws){connected=false;void sendBatch(true);try{ws.close()}catch{} }});
 }
 function reconnect(){
  if(shutdown)return;
