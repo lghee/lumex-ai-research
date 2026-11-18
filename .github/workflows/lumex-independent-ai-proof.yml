@@ -5,6 +5,7 @@ on:
       - 'production/tools/independent_ai_research_20261118.py'
       - 'production/tools/independent_holding_cost_study_20261118.py'
       - 'production/tools/independent_older_regimes_20261118.py'
+      - 'production/tools/independent_older_regimes_20261118.py'
       - '.github/workflows/lumex-independent-ai-proof.yml'
 permissions:
   contents: read
