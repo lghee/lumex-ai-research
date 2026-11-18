@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict';
-import {normalizeTickers,collectPublicHeatmap,heatmapPublicRoute} from '../src/public-heatmap.mjs';
+import {CRYPTO_BASES,normalizeTickers,collectPublicHeatmap,heatmapPublicRoute} from '../src/public-heatmap.mjs';
 const NOW=Date.parse('2026-11-18T11:00:00Z');
 const tick=(i)=>({
-  contract:(i===0?'BTC':i===1?'ETH':i===2?'SOL':i===3?'XRP':'COIN'+i)+'_USDT',
+  contract:CRYPTO_BASES[i]+'_USDT',
   last:String(100+i),change_percentage:String((i%3===0?-1:1)*(1+i/10)),
   volume_24h_quote:String(1000000000-i*1000000),funding_rate:'0.0001'
 });
-const raw=Array.from({length:65},(_,i)=>tick(i));
+const raw=[...Array.from({length:65},(_,i)=>tick(i)),{...tick(66),contract:'SOXL_USDT',volume_24h_quote:'99999999999'},{...tick(67),contract:'SNDK_USDT',volume_24h_quote:'99999999999'}];
 const d=normalizeTickers(raw,NOW);
 assert.equal(d.schema,'lumex_public_heatmap_v1');
 assert.equal(d.coins.length,50);
 assert.equal(d.breadth.up+d.breadth.down+d.breadth.flat,50);
 assert.equal(d.coins[0].coin,'BTC');
-assert.equal(d.coins[49].coin,'COIN49');
+assert.equal(d.coins[49].coin,CRYPTO_BASES[49]);
+assert.ok(!d.coins.some(x=>['SOXL','SNDK'].includes(x.coin)));
+assert.equal(d.coverage.excludes_unclassified_contracts,true);
 assert.equal(d.coins[0].funding_rate_pct,.01);
 assert.equal(d.collected_ms,NOW);
 assert.equal(d.interpretation.mood,'혼조');
