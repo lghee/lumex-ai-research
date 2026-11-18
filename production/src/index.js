@@ -4483,6 +4483,7 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
+    if(url.pathname==='/market-hub/v1/btc-onchain')return import('./btc-onchain.mjs').then(m=>m.btcOnchainRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(['/market-hub/v1/hyperliquid-whales','/market-hub/v1/hyperliquid-whale-profile','/market-hub/v1/hyperliquid-whales-health'].includes(url.pathname))
       return import('./hyperliquid-whales.mjs').then(m=>m.hyperWhalesRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
@@ -4527,6 +4528,8 @@ export default{
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
     if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
+      ctx.waitUntil(import('./btc-onchain.mjs').then(m=>m.collectBtcOnchain(env)).catch(()=>console.error('btc_onchain_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(collectPublicPulse(env).catch(()=>console.error('public_pulse_collect_failed')));
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
