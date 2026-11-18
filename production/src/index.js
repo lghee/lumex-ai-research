@@ -4512,7 +4512,7 @@ export default{
         console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
-    if(controller.cron==='*/5 * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
+    if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(collectPublicPulse(env).catch(()=>console.error('public_pulse_collect_failed')));

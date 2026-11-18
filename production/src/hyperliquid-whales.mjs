@@ -111,17 +111,18 @@ export async function collectHyperWhales(env,now=Date.now()){
   }catch(e){boardError=String(e.message||e).slice(0,100);list=previous}
  }
  if(!list?.rows?.length){await put(bucket,'health.json',{ok:false,checked_ms:now,reason:boardError||'no_leaderboard'});return}
- // Six accounts per five-minute tick, bounded to public info reads. No
+ // Three accounts per minute, bounded to six concurrent public info reads. No
  // upstream calls are ever driven by a page visitor. Fill/position failures
  // are isolated, and last successful values retain their original time.
- let count=0,errors=0;
- const indices=Array.from({length:Math.min(6,list.rows.length)},(_,i)=>(Number(list.cursor||0)+i)%list.rows.length);
+ let count=0,errors=0;const errorKinds={};
+ const indices=Array.from({length:Math.min(3,list.rows.length)},(_,i)=>(Number(list.cursor||0)+i)%list.rows.length);
  await Promise.all(indices.map(async i=>{
   const row=list.rows[i],old=await get(bucket,'profiles/'+row.address+'.json').catch(()=>null);
   const [positions,fills]=await Promise.allSettled([
    info('clearinghouseState',row.address).then(normalizePositions),
-   info('userFillsByTime',row.address,{startTime:now-7*86400000,endTime:now,aggregateByTime:true}).then(x=>normalizeFills(x,now))
+   info('userFills',row.address,{aggregateByTime:true}).then(x=>normalizeFills(x,now))
   ]);
+  for(const [type,result] of [['positions',positions],['fills',fills]])if(result.status==='rejected'){const code=type+'_'+String(result.reason?.message||'unavailable').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,70);errorKinds[code]=(errorKinds[code]||0)+1;}
   if(positions.status!=='fulfilled'&&fills.status!=='fulfilled'){errors++;return}
   const detail={ok:true,schema:'lumex_hyperliquid_profile_v1',address:row.address,
    positions:positions.status==='fulfilled'?positions.value:old?.positions??null,
@@ -137,7 +138,7 @@ export async function collectHyperWhales(env,now=Date.now()){
  }));
  list.cursor=(Number(list.cursor||0)+indices.length)%list.rows.length;
  await put(bucket,'latest.json',list);
- await put(bucket,'health.json',{ok:true,checked_ms:now,leaderboard_at_ms:list.leaderboard_at_ms,rows:list.rows.length,profiles:list.rows.filter(r=>r.profile?.positions_at_ms).length,updated:count,errors,leaderboard_error:boardError});
+ await put(bucket,'health.json',{ok:true,checked_ms:now,leaderboard_at_ms:list.leaderboard_at_ms,rows:list.rows.length,profiles:list.rows.filter(r=>r.profile?.positions_at_ms).length,updated:count,errors,error_kinds:errorKinds,leaderboard_error:boardError});
 }
 export async function hyperWhalesRoute(request,env){
  const u=new URL(request.url),bucket=env.MARKET_DATA;
