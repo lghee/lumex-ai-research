@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - name: Read only official macro source coverage and Binance stream status
         run: |
           python3 - <<'PY'
@@ -53,3 +54,24 @@ jobs:
                   if i<2:time.sleep(6)
               print("LUMEX_PHASE8_LIVE_PROOF "+json.dumps(result,ensure_ascii=False))
           PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lumex-phase8-collector-sources
+          path: |
+            production/src/official-news.mjs
+            production/src/bls-official-sidecar.mjs
+            production/src/index.js
+            production/scripts/bls-official-sidecar.py
+            production/tests/test_bls_atom_sidecar.py
+            production/tests/test_bls_official_oidc_20261119.mjs
+            production/relay/binance-public-relay.mjs
+            production/relay/relay-healthcheck.mjs
+            production/relay/Dockerfile
+            production/relay/compose.yml
+            production/relay/.env.example
+            production/relay/README_KO.md
+            production/relay/.gitignore
+            production/tests/test_binance_relay_deploy_20261119.mjs
+            .github/workflows/lumex-official-bls-sidecar.yml
+          retention-days: 14
