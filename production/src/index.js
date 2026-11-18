@@ -2863,6 +2863,40 @@ export async function verifyGithubBinanceOidc(token,now=Date.now(),jwksLoader=gh
     return ok?{run_id:String(c.run_id),event_name:c.event_name,issued_at:c.iat}:null;
   }catch{return null}
 }
+/** Separate OIDC audience and exact workflow, never authorized as Binance sidecar. */
+export async function verifyGithubOfficialBlsOidc(token,now=Date.now(),jwksLoader=ghTrustedJwks){
+  try{
+    if(typeof token!=='string'||token.length<100||token.length>15000)return null;
+    const p=token.split('.');if(p.length!==3)return null;
+    const h=JSON.parse(new TextDecoder().decode(ghJwtBytes(p[0])));
+    const c=JSON.parse(new TextDecoder().decode(ghJwtBytes(p[1])));
+    const t=Math.floor(now/1000);
+    if(h?.alg!=='RS256'||typeof h.kid!=='string'||h.kid.length>160||
+      c?.iss!=='https://token.actions.githubusercontent.com'||
+      c?.aud!=='lumex-official-bls-v1'||
+      c?.repository!=='lghee/lumex-ai-research'||
+      String(c?.repository_id)!=='1455460180'||
+      String(c?.repository_owner_id)!=='123610810'||
+      typeof c?.sub!=='string'||c.sub.length<1||c.sub.length>1024||
+      c?.ref!=='refs/heads/main'||
+      c?.workflow_ref!=='lghee/lumex-ai-research/.github/workflows/lumex-official-bls-sidecar.yml@refs/heads/main'||
+      !['schedule','workflow_dispatch'].includes(c?.event_name)||
+      c?.runner_environment!=='github-hosted'||
+      !/^\d{5,16}$/.test(String(c?.run_id||''))||
+      !Number.isSafeInteger(c.iat)||!Number.isSafeInteger(c.exp)||
+      c.iat>t+30||c.exp<=t||c.exp>t+900||t-c.iat>480||
+      (c.nbf!==undefined&&(!Number.isSafeInteger(c.nbf)||c.nbf>t+30)))return null;
+    const jwks=await jwksLoader();
+    const keyData=Array.isArray(jwks)?jwks.find(k=>k.kid===h.kid&&k.kty==='RSA'&&k.n&&k.e):null;
+    if(!keyData)return null;
+    const key=await crypto.subtle.importKey('jwk',{kty:'RSA',n:keyData.n,e:keyData.e},
+      {name:'RSASSA-PKCS1-v1_5',hash:'SHA-256'},false,['verify']);
+    const ok=await crypto.subtle.verify('RSASSA-PKCS1-v1_5',key,
+      ghJwtBytes(p[2]),new TextEncoder().encode(p[0]+'.'+p[1]));
+    return ok?{run_id:String(c.run_id),event_name:c.event_name,issued_at:c.iat}:null;
+  }catch{return null}
+}
+
 export async function normalizeGithubBinanceFrames(frames,now=Date.now()){
   if(!Array.isArray(frames)||frames.length>30)return null;
   const results=[],ids=new Set();
@@ -4519,6 +4553,9 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
+    if(url.pathname==='/market-hub/v1/bls-oidc-ingest')
+      return import('./bls-official-sidecar.mjs').then(m=>m.ingestBlsOidc(request,env,verifyGithubOfficialBlsOidc))
+        .catch(()=>respond({ok:false,error:'bls_official_ingest_unavailable'},503));
     if(url.pathname==='/market-hub/v1/official-news')
       return import('./official-news.mjs').then(m=>m.officialNewsPublicRoute(request,env))
         .catch(()=>respond({ok:false,error:'official_news_unavailable'},503));
