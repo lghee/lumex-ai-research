@@ -22,19 +22,21 @@ function makeContainer(oldImage='sha256:old',goodContract=true){
     setInactivityTimeout:async()=>{},
     getTcpPort:()=>{
       return {fetch:async(url,opts={})=>{
-        if(url==='http://container/health'){
+        const target=typeof url==='string'?url:url.url;
+        const req=url instanceof Request?url:null;
+        if(target==='http://container/health'){
           healthReads++;
           return Response.json({ok:true,binance_image_contract:goodContract?
             'lumex_binance_capture_20261119_v2':'missing'});
         }
-        if(url.endsWith('/binance-egress-probe')){
+        if(target.endsWith('/binance-egress-probe')){
           posts++;
-          assert.equal(opts.method,'POST');
-          assert.equal(opts.headers.get('X-Lumex-Internal-Key'),'secret'.repeat(8));
+          assert.equal(req?.method,'POST');
+          assert.equal(req?.headers.get('X-Lumex-Internal-Key'),'secret'.repeat(8));
           return Response.json({ok:false,handshake_http_status:403,
             error_code:'upstream_http_forbidden'});
         }
-        if(url.endsWith('/fetch')){
+        if(target.endsWith('/fetch')){
           posts++;
           return Response.json({ok:true,legacy:true});
         }
