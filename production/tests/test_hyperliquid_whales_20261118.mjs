@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import {readLeaderboard,normalizeLeader,normalizePositions,normalizeFills,collectHyperWhales,hyperWhalesRoute} from '../src/hyperliquid-whales.mjs';
+const now=Date.now(),addresses=Array.from({length:14},(_,i)=>'0x'+(i+1).toString(16).padStart(40,'0'));
+const fixture={leaderboardRows:addresses.map((ethAddress,i)=>({ethAddress,displayName:'name } " quoted',accountValue:'250000',windowPerformances:['day','week','month','allTime'].map(w=>[w,{roi:String(i/10),pnl:String(i*100),vlm:'100000'}])}))};
+const raw=JSON.stringify(fixture),chunks=raw.match(/.{1,31}/gs).map(s=>new TextEncoder().encode(s));
+const resp=new Response(new ReadableStream({start(c){for(const bytes of chunks)c.enqueue(bytes);c.close()}}));
+const stats=await readLeaderboard(resp);assert.equal(stats.scanned,14);assert.equal(stats.candidates.length,14);assert.equal(stats.candidates[0].windows.month.roi_pct,130);
+assert.equal(normalizeLeader({...fixture.leaderboardRows[0],accountValue:'0'}),null);
+const positions={assetPositions:[{position:{coin:'BTC',szi:'-2',entryPx:'60000',positionValue:'120000',unrealizedPnl:'1000',leverage:{value:5},liquidationPx:null,returnOnEquity:'0.05'}}]};
+assert.equal(normalizePositions(positions)[0].side,'short');
+const fills=[{coin:'BTC',time:now-1000,px:'60000',sz:'0.1',tid:1,dir:'Open Short',side:'A',closedPnl:'0',fee:'2'}];
+assert.equal(normalizeFills(fills,now)[0].value_usd,6000);
+const store=new Map(),bucket={async get(k){return store.has(k)?{json:async()=>JSON.parse(store.get(k))}:null},async put(k,v){store.set(k,v)}};
+const env={MARKET_DATA:bucket},original=globalThis.fetch;
+let info=0,board=0;
+globalThis.fetch=async(url,options)=>{
+ if(url.includes('stats-data')){board++;return new Response(raw)}
+ const b=JSON.parse(options.body);info++;
+ assert(addresses.includes(b.user));assert(['clearinghouseState','userFillsByTime'].includes(b.type));
+ return new Response(JSON.stringify(b.type==='clearinghouseState'?positions:fills));
+};
+await collectHyperWhales(env,now);
+const u='https://unit.test/market-hub/v1/';
+const list=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whales'),env)).json();
+assert.equal(list.rows.length,14);assert.equal(list.rows.filter(r=>r.profile).length,6);
+const a=list.rows[0].address;
+const detail=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whale-profile?address='+a),env)).json();
+assert.equal(detail.positions[0].entry_price,60000);assert.equal(detail.fills[0].direction,'Open Short');
+assert.equal((await hyperWhalesRoute(new Request(u+'hyperliquid-whale-profile?address=../../secret'),env)).status,404);
+assert.equal(info,12);assert.equal(board,1);
+await collectHyperWhales(env,now+300000);
+assert.equal(board,1);assert.equal(info,24);
+globalThis.fetch=async()=>new Response('{}',{status:503});
+await collectHyperWhales(env,now+600000);
+const retained=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whales'),env)).json();
+assert.equal(retained.rows[0].profile.positions_at_ms,now);
+globalThis.fetch=original;
+console.log('PASS public whale leaderboard streaming, source numeric validation, cache-only customer reads, position side/fills, bounded scheduling, outage retention');
