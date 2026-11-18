@@ -4458,6 +4458,16 @@ export class LyraPaperRunner extends DurableObject{
   constructor(ctx,env){super(ctx,env);this.inflight=null;}
   async fetch(request){
     const path=new URL(request.url).pathname;
+    if(path==='/health'&&request.method==='GET'){
+      try{
+        const state=await this.ctx.storage.get('lyra_paper_state_v2');
+        return Response.json({ok:true,paper_only:true,orders_enabled:false,initialized:Boolean(state),
+          state:state?.status||'not_started',last_observed_ms:state?.last_ms||null,
+          latest_closed_4h_unix:state?.last_bar_t||null,
+          measurement:'public_futures_HTTP_observed_approximately_each_minute'},
+          {headers:{'cache-control':'no-store','x-content-type-options':'nosniff'}});
+      }catch{return Response.json({ok:false,error:'paper_health_unavailable'},{status:503});}
+    }
     if(path==='/report'&&request.method==='GET'){
       try{
         const data=await import('./lyra-paper.mjs').then(m=>m.report(this.ctx.storage));
@@ -4511,6 +4521,12 @@ export default{
     const url=new URL(request.url);
     if(url.pathname==='/market-hub/v1/btc-onchain-price')return import('./btc-onchain.mjs').then(m=>m.btcOnchainDailyRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname==='/market-hub/v1/btc-onchain')return import('./btc-onchain.mjs').then(m=>m.btcOnchainRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
+    if(url.pathname==='/market-hub/v1/lyra-paper-health'){
+      if(request.method!=='GET')return respond({ok:false,error:'method_not_allowed'},405);
+      if(!env.LYRA_PAPER_RUNNER)return respond({ok:false,error:'paper_runner_not_bound'},503);
+      try{return await env.LYRA_PAPER_RUNNER.getByName('lyra-paper-primary').fetch('https://lyra/health');}
+      catch{return respond({ok:false,error:'paper_health_unavailable'},503);}
+    }
     if(url.pathname==='/market-hub/v1/lyra-paper-report')
       return import('./lyra-paper.mjs').then(m=>m.privateReport(request,env))
         .catch(()=>respond({ok:false,error:'paper_report_unavailable'},503));
