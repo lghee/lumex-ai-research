@@ -4453,6 +4453,32 @@ async function hubRoute(request,env){
   return hubReply({ok:false,error:'not_found'},404);
 }
 
+/** Independent LYRA paper-only single-flight Durable Object. No order actions. */
+export class LyraPaperRunner extends DurableObject{
+  constructor(ctx,env){super(ctx,env);this.inflight=null;}
+  async fetch(request){
+    const path=new URL(request.url).pathname;
+    if(path==='/report'&&request.method==='GET'){
+      try{
+        const data=await import('./lyra-paper.mjs').then(m=>m.report(this.ctx.storage));
+        return Response.json(data,{headers:{'cache-control':'no-store'}});
+      }catch{return Response.json({ok:false,error:'paper_read_unavailable'},{status:503});}
+    }
+    if(path==='/tick'&&request.method==='POST'){
+      if(!this.inflight)this.inflight=import('./lyra-paper.mjs')
+        .then(m=>m.runPaperTick(this.ctx.storage,this.env))
+        .finally(()=>{this.inflight=null});
+      try{
+        return Response.json(await this.inflight,{headers:{'cache-control':'no-store'}});
+      }catch(e){
+        console.warn('lyra_paper_tick_failed',String(e?.message||'unavailable').replace(/[^A-Za-z0-9_-]/g,'_').slice(0,64));
+        return Response.json({ok:false,error:'paper_tick_unavailable',orders_enabled:false},{status:503});
+      }
+    }
+    return Response.json({ok:false,error:'not_found'},{status:404});
+  }
+}
+
 export class ResearchContainer extends DurableObject{
   constructor(ctx,env){super(ctx,env);this.starting=null;
     if(ctx.container?.running)void ctx.blockConcurrencyWhile(()=>ctx.container.setInactivityTimeout(120000));
@@ -4485,6 +4511,9 @@ export default{
     const url=new URL(request.url);
     if(url.pathname==='/market-hub/v1/btc-onchain-price')return import('./btc-onchain.mjs').then(m=>m.btcOnchainDailyRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname==='/market-hub/v1/btc-onchain')return import('./btc-onchain.mjs').then(m=>m.btcOnchainRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
+    if(url.pathname==='/market-hub/v1/lyra-paper-report')
+      return import('./lyra-paper.mjs').then(m=>m.privateReport(request,env))
+        .catch(()=>respond({ok:false,error:'paper_report_unavailable'},503));
     if(url.pathname==='/market-hub/v1/regime-research-report')
       return import('./regime-research.mjs').then(m=>m.privateRegimeReport(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(['/market-hub/v1/hyperliquid-whales','/market-hub/v1/hyperliquid-whale-profile','/market-hub/v1/hyperliquid-whales-health'].includes(url.pathname))
@@ -4533,6 +4562,14 @@ export default{
         console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OI_MIRROR_FETCH==='true')
       ctx.waitUntil(collectOiMirror(env).catch(()=>console.error('oi_mirror_collect_failed')));
+    if(controller.cron==='* * * * *'&&env.AUTO_LYRA_SHADOW_PAPER==='true'&&env.LYRA_PAPER_RUNNER){
+      ctx.waitUntil(env.LYRA_PAPER_RUNNER.getByName('lyra-paper-primary')
+        .fetch('https://lyra/tick',{method:'POST'})
+        .then(async r=>{
+          if(!r.ok)console.warn('lyra_shadow_paper_unavailable',r.status);
+          await r.body?.cancel();
+        }).catch(()=>console.warn('lyra_shadow_paper_observer_unavailable')));
+    }
     if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')

@@ -32,6 +32,10 @@
       {
         "name": "BTC_RESERVE_COLLECTOR",
         "class_name": "BtcReserveCollector"
+      },
+      {
+        "name": "LYRA_PAPER_RUNNER",
+        "class_name": "LyraPaperRunner"
       }
     ]
   },
@@ -49,6 +53,10 @@
       "storage": "sqlite"
     },
     "BtcReserveCollector": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "LyraPaperRunner": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -98,7 +106,8 @@
     "AUTO_BINANCE_LIQUIDATIONS": "true",
     "AUTO_BINANCE_CONTAINER_EGRESS_PROBE": "true",
     "LUMEX_GITHUB_DISPATCH_FALLBACK": "true",
-    "AUTO_BINANCE_TAKER_FETCH": "false"
+    "AUTO_BINANCE_TAKER_FETCH": "false",
+    "AUTO_LYRA_SHADOW_PAPER": "true"
   },
   "keep_vars": true,
   "observability": {
