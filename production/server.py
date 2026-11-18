@@ -73,6 +73,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(arg,dict) or arg!={'scope':'public_usdm_forceOrder'}:
                     raise ResearchError('invalid_public_probe_scope')
                 return self.send(200,probe_binance_public_handshake())
+            if self.path=='/regime-research':
+                if arg!={'mode':'daily_research_only'}:raise ResearchError('bad_research_scope')
+                from engine.regime_meta_lab import run_daily
+                return self.send(200,run_daily())
             if self.path=='/fetch':
                 sym=arg.get('symbol');interval=int(arg.get('interval_min',0))
                 if sym not in SUPPORTED or interval not in FRAMES:raise ResearchError('bad_market')
