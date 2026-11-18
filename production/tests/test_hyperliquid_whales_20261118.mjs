@@ -16,20 +16,20 @@ let info=0,board=0;
 globalThis.fetch=async(url,options)=>{
  if(url.includes('stats-data')){board++;return new Response(raw)}
  const b=JSON.parse(options.body);info++;
- assert(addresses.includes(b.user));assert(['clearinghouseState','userFillsByTime'].includes(b.type));
+ assert(addresses.includes(b.user));assert(['clearinghouseState','userFills'].includes(b.type));
  return new Response(JSON.stringify(b.type==='clearinghouseState'?positions:fills));
 };
 await collectHyperWhales(env,now);
 const u='https://unit.test/market-hub/v1/';
 const list=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whales'),env)).json();
-assert.equal(list.rows.length,14);assert.equal(list.rows.filter(r=>r.profile).length,6);
+assert.equal(list.rows.length,14);assert.equal(list.rows.filter(r=>r.profile).length,3);
 const a=list.rows[0].address;
 const detail=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whale-profile?address='+a),env)).json();
 assert.equal(detail.positions[0].entry_price,60000);assert.equal(detail.fills[0].direction,'Open Short');
 assert.equal((await hyperWhalesRoute(new Request(u+'hyperliquid-whale-profile?address=../../secret'),env)).status,404);
-assert.equal(info,12);assert.equal(board,1);
+assert.equal(info,6);assert.equal(board,1);
 await collectHyperWhales(env,now+300000);
-assert.equal(board,1);assert.equal(info,24);
+assert.equal(board,1);assert.equal(info,12);
 globalThis.fetch=async()=>new Response('{}',{status:503});
 await collectHyperWhales(env,now+600000);
 const retained=await (await hyperWhalesRoute(new Request(u+'hyperliquid-whales'),env)).json();
