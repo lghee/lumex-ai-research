@@ -4519,6 +4519,9 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
+    if(url.pathname==='/market-hub/v1/official-news')
+      return import('./official-news.mjs').then(m=>m.officialNewsPublicRoute(request,env))
+        .catch(()=>respond({ok:false,error:'official_news_unavailable'},503));
     if(url.pathname==='/market-hub/v1/public-heatmap')
       return import('./public-heatmap.mjs').then(m=>m.heatmapPublicRoute(request,env))
         .catch(()=>respond({ok:false,error:'heatmap_unavailable'},503));
@@ -4591,6 +4594,10 @@ export default{
     }
     if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_OFFICIAL_NEWS==='true')
+      ctx.waitUntil(import('./official-news.mjs').then(m=>m.collectOfficialNews(env))
+        .then(r=>{if(r?.ok===false)console.warn('official_news_partial',String(r.reason||'unavailable').slice(0,55));})
+        .catch(()=>console.warn('official_news_r2_or_feed_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_HEATMAP==='true')
       ctx.waitUntil(import('./public-heatmap.mjs').then(m=>m.collectPublicHeatmap(env))
         .then(r=>{if(r?.ok===false)console.warn('public_heatmap_collect_limited',String(r.reason||'unknown').slice(0,60));})
