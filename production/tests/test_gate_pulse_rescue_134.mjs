@@ -76,10 +76,15 @@ assert.equal(snap.sections.pulse.values.taker_exchange,'Gate');
 assert.equal(snap.sections.pulse.values.source_status.bybit_account_ratio,'unavailable');
 assert.equal(snap.sections.pulse.values.source_status.gate_account_ratio,'available');
 assert(!written.some(x=>x.includes('orders')||x.includes('private')));
-const before=store.get('market-hub/public-pulse/v1/latest.json');
+const before=JSON.parse(store.get('market-hub/public-pulse/v1/latest.json'));
 gateDown=true;await tick();
-assert.equal(store.get('market-hub/public-pulse/v1/latest.json'),before,
-  'existing valid R2 snapshot retained if Bybit and Gate unavailable');
+const after=JSON.parse(store.get('market-hub/public-pulse/v1/latest.json'));
+// The independent sentiment feed can update the envelope clock. Provider
+// values AND their original observation timestamps must remain unchanged.
+for(const key of ['tickers','ratio','ratios','takers'])
+  assert.deepEqual(after.feeds[key],before.feeds[key],
+    'last valid source observation retained during dual provider outage');
+assert(after.collected_at_unix>=before.collected_at_unix);
 const failed=JSON.parse(store.get('market-hub/public-pulse/v1/health.json'));
 assert.equal(failed.updated,1,'only independent FNG survives dual provider outage');
 assert.equal(failed.sources.ratio_BTC.ok,false);
