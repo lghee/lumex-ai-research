@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '.github/workflows/lumex-official-bls-sidecar.yml'
+      - 'production/scripts/bls-official-sidecar.py'
   schedule:
     - cron: '23 */2 * * *'
   workflow_dispatch:
