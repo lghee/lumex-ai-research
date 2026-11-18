@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const root=new URL('../relay/',import.meta.url);
+const read=p=>readFileSync(new URL(p,root),'utf8');
+const docker=read('Dockerfile'),compose=read('compose.yml'),script=read('binance-public-relay.mjs'),
+      example=read('.env.example'),health=read('relay-healthcheck.mjs'),ignore=read('.gitignore');
+assert.match(docker,/FROM node:22-alpine/);
+assert.match(docker,/USER node/);
+assert.match(compose,/restart: unless-stopped/);
+assert.match(compose,/read_only: true/);
+assert.match(compose,/no-new-privileges:true/);
+assert.match(compose,/max-size: "5m"/);
+assert.doesNotMatch(compose,/ports:/);
+assert.match(script,/!forceOrder@arr/);
+assert.match(script,/LUMEX_RELAY_SECRET/);
+assert.doesNotMatch(script,/binance.*(?:private|api_key|order_place)|tradeOrder/i);
+assert.match(example,/LUMEX_RELAY_ENDPOINT=https:/);
+assert.match(example,/LUMEX_RELAY_SECRET=CHANGE_ME/);
+assert.match(ignore,/\.env\.binance-relay/);
+assert.match(health,/binance-external-health/);
+assert.match(health,/d\?\.connected!==true|d\.connected!==true/);
+console.log('PASS external Binance relay packaging: no open ports, no trading API, fail-closed credential, unattended restart, R2 health');

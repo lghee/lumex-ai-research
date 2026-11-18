@@ -1,0 +1,30 @@
+name: lumex-binance-public-stream
+services:
+  binance-liquidation-relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    image: lumex-binance-public-relay:1.0
+    restart: unless-stopped
+    env_file:
+      - .env.binance-relay
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    mem_limit: 192m
+    tmpfs:
+      - /tmp:size=16m
+    init: true
+    healthcheck:
+      test: ["CMD","node","/app/relay-healthcheck.mjs"]
+      interval: 65s
+      timeout: 12s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
