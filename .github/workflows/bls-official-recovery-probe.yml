@@ -1,0 +1,37 @@
+name: Verify reachable BLS official macro sources
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bls-official-recovery-probe.yml'
+permissions:
+  contents: read
+jobs:
+  official-feed-availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe official BLS RSS and release pages with no data forwarding
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.error,json,datetime
+          sources={
+            "bls_cpi_rss":"https://www.bls.gov/feed/cpi.rss",
+            "bls_jobs_rss":"https://www.bls.gov/feed/empsit.rss",
+            "bls_cpi_news":"https://www.bls.gov/news.release/cpi.toc.htm",
+            "bls_jobs_news":"https://www.bls.gov/news.release/empsit.toc.htm",
+            "bls_public_api":"https://api.bls.gov/publicAPI/v1/timeseries/data/CUUR0000SA0"
+          }
+          for name,url in sources.items():
+            for ua in ["LUMEXPublicMacroResearch/1.0","Mozilla/5.0 (compatible; public data research)"]:
+              req=urllib.request.Request(url,headers={'User-Agent':ua,'Accept':'application/rss+xml, text/html, application/json'})
+              try:
+                with urllib.request.urlopen(req,timeout=12) as r:
+                  data=r.read(4096)
+                  result={'source':name,'status':r.status,'content_type':r.headers.get('content-type','')[:80],
+                    'prefix':data[:80].decode('utf-8','replace').replace('\n',' ')}
+              except urllib.error.HTTPError as e:
+                result={'source':name,'status':e.code,'reason':'HTTP error'}
+              except Exception as e:
+                result={'source':name,'reason':type(e).__name__}
+              print('LUMEX_BLS_DIAGNOSTIC '+json.dumps(result))
+          PY
