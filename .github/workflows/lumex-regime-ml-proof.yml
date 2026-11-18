@@ -1,0 +1,51 @@
+name: LUMEX AI regime real-data research evidence
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/lumex-regime-ml-proof.yml'
+permissions:
+  contents: read
+jobs:
+  public-market-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install reproducible NumPy research dependencies
+        working-directory: production
+        run: python -m pip install -r engine/requirements.txt
+      - name: Fetch official 4-hour public futures history and evaluate frozen ML design
+        working-directory: production
+        run: |
+          python - <<'PY'
+          import json
+          from engine.regime_meta_lab import run_daily
+          result=run_daily()
+          if not result.get('ok') or result.get('live_approved') is not False or result.get('order_execution') is not False:
+              raise SystemExit('research_integrity_failure')
+          with open('regime-meta-real-research.json','w',encoding='utf-8') as f:
+              json.dump(result,f,indent=2,ensure_ascii=False)
+          print('LUMEX_REAL_MODEL_EVIDENCE '+json.dumps({
+              'source':result['source'],
+              'history':result['data_period_utc'],
+              'verified_bars':result['aligned_bars_per_symbol'],
+              'validation_gate_passed':result['validation_gate_passed'],
+              'selected_probability':result['chosen_threshold'],
+              'holdout_baseline':result['holdout_baseline'],
+              'holdout_ai_filter':result['holdout_ai_filter'],
+              'holdout_cost_2x':result['holdout_cost_2x'],
+              'holdout_one_bar_delay':result['holdout_one_bar_delay'],
+              'retrospective_gate_passed':result['retrospective_gate_passed'],
+              'live_approved':result['live_approved'],
+          },separators=(',',':')))
+          PY
+      - name: Store research evidence (no credentials or customer orders)
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumex-ml-regime-research-evidence
+          path: production/regime-meta-real-research.json
+          retention-days: 14
