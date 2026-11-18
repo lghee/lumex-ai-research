@@ -125,8 +125,17 @@ def main():
                 raise ValueError("not_acknowledged")
             break
         except urllib.error.HTTPError as exc:
+            # Report only a server-defined error CODE. Never log OIDC JWT or request payload.
+            reason = "edge_or_unclassified"
+            try:
+                body = json.loads(exc.read(2048))
+                name = str(body.get("error", ""))
+                if re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", name):
+                    reason = name
+            except (ValueError, TypeError):
+                pass
             if exc.code in (400, 401, 403, 413):
-                raise RuntimeError("BLS_OIDC_PERMANENT_REJECT_"+str(exc.code)) from None
+                raise RuntimeError("BLS_OIDC_PERMANENT_REJECT_"+str(exc.code)+"_"+reason) from None
             if attempt==2:
                 raise RuntimeError("BLS_OIDC_DELIVERY_HTTP_"+str(exc.code)) from None
         except Exception as exc:

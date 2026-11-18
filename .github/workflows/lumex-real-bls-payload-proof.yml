@@ -1,0 +1,31 @@
+name: LUMEX real BLS OIDC payload contract proof
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-real-bls-payload-proof.yml'
+permissions:
+  contents: read
+jobs:
+  test-official-atom-against-worker-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch actual official feeds and apply Worker-side strict payload validator
+        run: |
+          python3 - <<'PY'
+          import importlib.util,json,os,time
+          spec=importlib.util.spec_from_file_location("bls","production/scripts/bls-official-sidecar.py")
+          mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+          payload=mod.collect(int(time.time()*1000))
+          open('/tmp/bls_real_payload.json','w').write(json.dumps(payload))
+          print('BLS_LOCAL_SOURCE_PAYLOAD '+json.dumps({'run_id':payload['run_id'],'sources':payload['feeds'],
+            'articles':len(payload['items'])}))
+          PY
+          node --input-type=module -e "import fs from 'node:fs';import{parseVerifiedBlsSidecar}from './production/src/bls-official-sidecar.mjs';const d=JSON.parse(fs.readFileSync('/tmp/bls_real_payload.json'));try{const r=parseVerifiedBlsSidecar(d,Date.now());console.log('BLS_REAL_PAYLOAD_VALID',r.items.length)}catch(e){console.error('BLS_REAL_PAYLOAD_SCHEMA_ERROR',String(e.message));process.exitCode=1}"
