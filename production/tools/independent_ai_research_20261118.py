@@ -251,6 +251,7 @@ def main():
         markets={a:fut[a].result() for a in ASSETS}
     result=run(markets)
     CACHE_DIR.mkdir(parents=True,exist_ok=True)
+    np.savez_compressed(CACHE_DIR/'observed_bars.npz',**markets)
     path=CACHE_DIR/"independent_ai_report.json"
     path.write_text(json.dumps(result,indent=2,ensure_ascii=False),encoding="utf-8")
     compact={name:{"selection_passed":item["selected_only_from_validation"],
