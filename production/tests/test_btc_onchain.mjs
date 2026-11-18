@@ -12,3 +12,20 @@ await collectBtcOnchain({MARKET_DATA:bucket},now);let d=await (await btcOnchainR
 globalThis.fetch=async()=>new Response('',{status:503});await collectBtcOnchain({MARKET_DATA:bucket},now+60000);d=await (await btcOnchainRoute(new Request('https://example.com'),{MARKET_DATA:bucket})).json();assert.equal(d.network.observed_ms,now);assert.equal(d.mempool.observed_ms,now);assert.equal(d.errors.length,2);assert.equal(d.history.length,1);assert.equal((await btcOnchainRoute(new Request('https://example.com',{method:'POST'}),{MARKET_DATA:bucket})).status,405);
 }finally{globalThis.fetch=oldFetch}
 console.log('BTC onchain: subsidy, validation, write/read, stale preservation, GET-only passed');
+
+const {normalizeDaily,collectBtcOnchainDaily,btcOnchainDailyRoute}=await import('../src/btc-onchain.mjs');
+const today=Math.floor(now/86400000)*86400,raw=Array.from({length:1500},(_,i)=>({t:today-(1499-i)*86400,o:'100',h:'110',l:'90',c:'105',v:25}));
+assert.equal(normalizeDaily(raw,now).length,1499);
+assert.throws(()=>normalizeDaily(raw.filter((_,i)=>i!==50),now));
+assert.throws(()=>normalizeDaily([...raw.slice(0,-1),raw[2]],now));
+assert.throws(()=>normalizeDaily(raw.slice(0,-5),now));
+assert.throws(()=>normalizeDaily(raw.map((x,i)=>i===8?{...x,l:'300'}:x),now));
+try{globalThis.fetch=async()=>new Response(JSON.stringify(raw));
+await collectBtcOnchainDaily({MARKET_DATA:bucket},now);
+let d=await (await btcOnchainDailyRoute(new Request('https://example.com'),{MARKET_DATA:bucket})).json();
+assert.equal(d.candles.length,1499);assert.equal(d.candles.at(-1).t,today-86400);
+globalThis.fetch=async()=>{throw Error('must not refetch valid closed day')};
+await collectBtcOnchainDaily({MARKET_DATA:bucket},now+60000);
+assert.equal((await btcOnchainDailyRoute(new Request('https://example.com',{method:'POST'}),{MARKET_DATA:bucket})).status,405);
+}finally{globalThis.fetch=oldFetch}
+console.log('BTC Gate daily: history, current candle exclusion, gap/stale/duplicate rejection and cached read passed');
