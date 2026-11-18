@@ -36,6 +36,9 @@ jobs:
       - name: Install Worker development dependencies
         working-directory: production
         run: npm install --no-audit --no-fund
+      - name: Reject images missing required Binance Python module before deployment
+        working-directory: production
+        run: python3 tests/test_container_image_packaging_20261119.py -v
       - name: Validate Worker JS and offline public-market regression tests
         working-directory: production
         run: npm run check:js
@@ -81,6 +84,24 @@ jobs:
           print("PASS deployed Worker",body["version"])
           '
           done
+      - name: Inspect current Container image state without changing customer data
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          URL="${URL%/}"
+          curl --fail --silent --show-error --max-time 25 "$URL/market-hub/v1/binance-container-image-health" |
+            python3 -c '
+          import json,sys
+          p=json.load(sys.stdin)
+          print("LUMEX_BINANCE_CONTAINER_IMAGE",json.dumps({
+            "ok":p.get("ok"),"running":p.get("container_running"),
+            "image_matches_current":p.get("image_matches_current"),
+            "image_starting":p.get("image_starting")},sort_keys=True))
+          if p.get("image_matches_current") is False:
+              print("WARNING: running old Container image; next eligible Binance probe rotates it automatically")
+          if p.get("ok") is not True:raise SystemExit("Image diagnostic route not available")
+          '
       - name: Safe rollback reminder
         if: failure()
         run: |
