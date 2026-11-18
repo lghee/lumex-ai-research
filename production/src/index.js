@@ -4519,6 +4519,9 @@ export class ResearchContainer extends DurableObject{
 export default{
   async fetch(request,env){
     const url=new URL(request.url);
+    if(url.pathname==='/market-hub/v1/public-heatmap')
+      return import('./public-heatmap.mjs').then(m=>m.heatmapPublicRoute(request,env))
+        .catch(()=>respond({ok:false,error:'heatmap_unavailable'},503));
     if(url.pathname==='/market-hub/v1/btc-onchain-price')return import('./btc-onchain.mjs').then(m=>m.btcOnchainDailyRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname==='/market-hub/v1/btc-onchain')return import('./btc-onchain.mjs').then(m=>m.btcOnchainRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname==='/market-hub/v1/lyra-paper-health'){
@@ -4588,6 +4591,10 @@ export default{
     }
     if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_HEATMAP==='true')
+      ctx.waitUntil(import('./public-heatmap.mjs').then(m=>m.collectPublicHeatmap(env))
+        .then(r=>{if(r?.ok===false)console.warn('public_heatmap_collect_limited',String(r.reason||'unknown').slice(0,60));})
+        .catch(()=>console.warn('public_heatmap_collect_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(import('./btc-onchain.mjs').then(m=>m.collectBtcOnchain(env)).catch(()=>console.error('btc_onchain_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
