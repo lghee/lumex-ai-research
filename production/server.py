@@ -60,7 +60,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('content-length',str(len(body)))
         self.end_headers();self.wfile.write(body)
     def do_GET(self):
-        if self.path=='/health':self.send(200,{'ok':True,'service':'lumex-container','orders':False})
+        if self.path=='/health':self.send(200,{'ok':True,'service':'lumex-container','orders':False,'binance_image_contract':'lumex_binance_capture_20261119_v2','binance_routes':['/binance-egress-probe','/binance-cloudflare-capture']})
         else:self.send(404,{'error':'not_found'})
     def do_POST(self):
         secret=os.environ.get('LUMEX_CONTAINER_KEY','')
