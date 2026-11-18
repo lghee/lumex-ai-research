@@ -3092,6 +3092,150 @@ export async function probeBinanceContainerEgress(env,now=Date.now()){
   return proof;
 }
 
+
+/** Phase 9: Binance read-only source inside the EXISTING Cloudflare ResearchContainer.
+ * Does not allocate a VPS, proxy forbidden origins, or claim unsampled events.
+ * A recent successful Cloudflare-container HTTP Upgrade probe is REQUIRED.
+ * The container may be suspended/restarted; every session, cursor gap and lost
+ * buffered message invalidates continuous coverage. Cron is never auto-deleted.
+ */
+const CF_BINANCE_CAPTURE_KEY='market-hub/diagnostics/binance-cloudflare-capture-v1.json';
+export async function pollCloudflareBinanceCapture(env,now=Date.now()){
+  if(env.AUTO_BINANCE_CLOUDFLARE_CAPTURE!=='true')
+    return {ok:false,reason:'disabled'};
+  if(!env.MARKET_DATA||!env.MARKET_EVENT_HUB||!env.RESEARCH_CONTAINER||
+      typeof env.LUMEX_CONTAINER_KEY!=='string'||env.LUMEX_CONTAINER_KEY.length<32)
+    return {ok:false,reason:'required_cloudflare_binding_missing'};
+  const probe=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
+  if(probe?.schema!=='lumex_binance_egress_proof_v1'||
+      probe.ok!==true||probe.status!=='upgrade_accepted'||
+      probe.handshake_http_status!==101||
+      !Number.isSafeInteger(probe.checked_ms)||probe.checked_ms>now+60000||
+      now-probe.checked_ms>3600000)
+    return {ok:false,reason:'cloudflare_egress_not_authorized',
+      proof_checked:probe?.schema==='lumex_binance_egress_proof_v1',
+      proof_status:probe?.status||'not_tested',source:'existing_cloudflare_research_container',
+      continuous_capture_verified:false};
+  let prev=await opsReadR2(env,CF_BINANCE_CAPTURE_KEY);
+  if(prev?.schema!=='lumex_binance_cloudflare_status_v1')prev=null;
+  let cursorSession=String(prev?.session_id||''),afterSeq=Number(prev?.checkpoint_seq||0);
+  if(!Number.isSafeInteger(afterSeq)||afterSeq<0)return {ok:false,reason:'invalid_previous_checkpoint'};
+  let totalAccepted=0,totalFrames=0,totalReadback=0,gap=false,sessionChanged=false;
+  let sourceState=null,finished=false;
+  try{
+    for(let batch=0;batch<4;batch++){
+      const response=await invokeContainer(env,'/binance-cloudflare-capture',{
+        scope:'public_usdm_forceOrder',cursor_session:cursorSession,
+        after_seq:afterSeq,limit:25});
+      const payload=await response.json();
+      if(payload?.schema!=='lumex_cloudflare_binance_container_v1'||
+         typeof payload.session_id!=='string'||
+         !/^[a-f0-9-]{32,40}$/.test(payload.session_id)||
+         typeof payload.connected!=='boolean'||
+         !Number.isSafeInteger(payload.dropped_events)||payload.dropped_events<0||
+         !Number.isSafeInteger(payload.latest_seq)||payload.latest_seq<0||
+         !Array.isArray(payload.frames)||payload.frames.length>25||
+         typeof payload.cursor_gap!=='boolean'||typeof payload.session_changed!=='boolean')
+        throw Error('cloudflare_container_schema_invalid');
+      sourceState=payload;
+      if(cursorSession&&cursorSession!==payload.session_id)sessionChanged=true;
+      if(payload.session_changed&&cursorSession)sessionChanged=true;
+      if(payload.cursor_gap||payload.dropped_events>0)gap=true;
+      if(cursorSession!==payload.session_id){
+        cursorSession=payload.session_id;
+        afterSeq=0;
+      }
+      let nextSeq=afterSeq,items=[];
+      for(const item of payload.frames){
+        if(!Number.isSafeInteger(item?.seq)||item.seq<=nextSeq||
+           item.seq>payload.latest_seq||decodeBinanceLiquidations(item.frame,now).length!==1)
+          throw Error('cloudflare_container_frame_invalid');
+        nextSeq=item.seq;
+        items.push(item.frame);
+      }
+      if(items.length){
+        const events=await normalizeGithubBinanceFrames(items,now);
+        if(events===null)throw Error('cloudflare_container_source_invalid');
+        for(const symbol of HUB_SYMBOLS){
+          const chosen=events.filter(e=>e.symbol===symbol);
+          if(!chosen.length)continue;
+          const reply=await env.MARKET_EVENT_HUB.getByName(symbol).fetch(
+            new Request('https://hub/ingest',{method:'POST',
+              headers:{'content-type':'application/json'},
+              body:JSON.stringify({symbol,events:chosen})}));
+          if(!reply.ok)throw Error('cloudflare_capture_hub_ingest_failed');
+          const result=await reply.json();
+          totalAccepted+=Number(result.accepted||0);
+        }
+        const proof=await persistGithubBinanceSourceProof(env,events,now);
+        if(!proof||proof.verified!==events.length)
+          throw Error('cloudflare_capture_r2_proof_invalid');
+        totalReadback+=proof.verified;
+      }
+      totalFrames+=items.length;
+      afterSeq=nextSeq;
+      const priorFresh=prev&&prev.connected===true&&!prev.stale&&
+        now-Number(prev.checked_ms||0)<=120000;
+      const sameSession=prev?.session_id===cursorSession;
+      const uninterrupted=Boolean(priorFresh&&sameSession&&!gap&&!sessionChanged&&
+        Number(prev.dropped_events||0)===payload.dropped_events&&payload.connected);
+      const since=uninterrupted?Number(prev.continuous_since_ms||now):now;
+      const status={schema:'lumex_binance_cloudflare_status_v1',
+        ok:true,source:'cloudflare_existing_research_container_binance_public_ws',
+        checked_ms:now,session_id:cursorSession,checkpoint_seq:afterSeq,
+        connected:payload.connected,source_last_frame_ms:Number(payload.last_frame_ms||0),
+        dropped_events:payload.dropped_events,
+        error_code:String(payload.error_code||'').slice(0,75),
+        retry_at_ms:Number(payload.next_retry_ms||0),
+        gap_detected:gap||sessionChanged||!payload.connected,
+        continuous_since_ms:since,
+        accepted_this_poll:totalAccepted,frames_this_poll:totalFrames,
+        total_accepted:Number(prev?.total_accepted||0)+totalAccepted,
+        r2_readback_this_poll:totalReadback,
+        source_r2_readback_verified:totalReadback>0||
+          prev?.source_r2_readback_verified===true,
+        observed_only:true,complete_market_capture:false,
+        cron_retirement_allowed:false,orders_enabled:false};
+      // Only checkpoint AFTER EventHub ingest and source R2 read-after-write.
+      await env.MARKET_DATA.put(CF_BINANCE_CAPTURE_KEY,JSON.stringify(status),
+        {httpMetadata:{contentType:'application/json'}});
+      prev={...status,stale:false};
+      if(payload.frames.length<25||afterSeq>=payload.latest_seq){
+        finished=true;break;
+      }
+    }
+    return {ok:true,source:'cloudflare_existing_research_container',
+      connected:sourceState?.connected===true,frames:totalFrames,accepted:totalAccepted,
+      readback:totalReadback,gap_detected:gap||sessionChanged,
+      caught_up:finished,continuous_market_capture_proven:false,
+      cron_retirement_allowed:false};
+  }catch(error){
+    // Preserve the last fully verified checkpoint; never mark a failed poll as
+    // healthy or advance its cursor. Retries are deduplicated by event ID.
+    return {ok:false,reason:String(error?.message||'cloudflare_capture_failed')
+      .replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,75),
+      frames_verified:totalReadback,cron_retirement_allowed:false};
+  }
+}
+export async function cloudflareBinanceHealth(env,now=Date.now()){
+  const status=await opsReadR2(env,CF_BINANCE_CAPTURE_KEY);
+  const proof=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
+  if(status?.schema!=='lumex_binance_cloudflare_status_v1'){
+    return {ok:false,source:'cloudflare_existing_research_container',
+      reason:'no_verified_container_capture',
+      probe_status:proof?.schema==='lumex_binance_egress_proof_v1'?
+        proof.status:'not_tested',connected:false,stale:true,
+      continuous_seconds:0,source_r2_readback_verified:false,
+      complete_market_capture:false,cron_retirement_allowed:false};
+  }
+  const stale=now-Number(status.checked_ms||0)>120000;
+  return {...status,stale,connected:status.connected===true&&!stale,
+    continuous_seconds:status.connected===true&&!stale&&!status.gap_detected?
+      Math.max(0,Math.floor((now-Number(status.continuous_since_ms||now))/1000)):0,
+    probe_status:proof?.status||'unknown',complete_market_capture:false,
+    cron_retirement_allowed:false};
+}
+
 const OPS_PREFIX='market-hub/ops/v1/';
 const OPS_COINS=['BTC','ETH','SOL','XRP'];
 function opsVerdict(id,enabled,healthy,ageSeconds=null,detail=''){
@@ -4283,6 +4427,8 @@ async function hubRoute(request,env){
         'access-control-allow-origin':'https://lumexbot.com','vary':'Origin'}});
     }catch{return hubReply({ok:false,error:'derivatives_read_unavailable'},503)}
   }
+  if(path==='/market-hub/v1/binance-cloudflare-health'&&method==='GET')
+    return hubReply(await cloudflareBinanceHealth(env));
   if(path==='/market-hub/v1/binance-egress-health'&&method==='GET'){
     try{
       const x=await opsReadR2(env,BINANCE_EGRESS_PROOF_KEY);
@@ -4613,6 +4759,11 @@ export default{
     if(controller.cron==='*/5 * * * *'&&env.LUMEX_GITHUB_DISPATCH_FALLBACK==='true')
       ctx.waitUntil(dispatchGithubBinanceIfStale(env).catch(()=>
         console.warn('binance_dispatch_fallback_not_ready')));
+    if(controller.cron==='* * * * *'&&env.AUTO_BINANCE_CLOUDFLARE_CAPTURE==='true')
+      ctx.waitUntil(pollCloudflareBinanceCapture(env).then(result=>{
+        if(result?.ok===false&&result.reason!=='cloudflare_egress_not_authorized')
+          console.warn('binance_cf_capture',String(result.reason||'unready').slice(0,65));
+      }).catch(()=>console.warn('binance_cf_capture_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));

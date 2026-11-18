@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv, io, json, os, tempfile, hmac, urllib.error, urllib.parse, hashlib, math, base64, http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from cloudflare_binance_capture import collector
 from engine.lumex_ai_worker import (ResearchError, fetch_bybit_candles, load_csv, refresh_public_perpetual_candles, MARKET_SOURCES,
                                      indicators, evaluate, vector_signals, Client, ai_ideas, refresh_bybit_candles)
 SUPPORTED={'BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT'}
@@ -69,6 +70,16 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get('content-length','0'))
             if size<2 or size>MAX_PAYLOAD:return self.send(413,{'error':'payload_size_invalid'})
             arg=json.loads(self.rfile.read(size))
+            if self.path=='/binance-cloudflare-capture':
+                if not isinstance(arg,dict) or arg.get('scope')!='public_usdm_forceOrder':
+                    raise ResearchError('invalid_binance_capture_scope')
+                session=arg.get('cursor_session','')
+                seq=arg.get('after_seq',0)
+                limit=arg.get('limit',25)
+                if not isinstance(session,str) or not isinstance(seq,int) or not isinstance(limit,int):
+                    raise ResearchError('invalid_binance_cursor')
+                collector.ensure()
+                return self.send(200,collector.peek(session,seq,limit))
             if self.path=='/binance-egress-probe':
                 if not isinstance(arg,dict) or arg!={'scope':'public_usdm_forceOrder'}:
                     raise ResearchError('invalid_public_probe_scope')
