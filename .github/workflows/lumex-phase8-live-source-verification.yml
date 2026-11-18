@@ -1,3 +1,4 @@
+# Recheck after BLS official source OIDC sanitized rejection diagnostics (#98)
 name: LUMEX phase8 live public source verification
 on:
   pull_request:
