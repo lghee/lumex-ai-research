@@ -13,7 +13,7 @@ assert.equal(d.coins.length,50);
 assert.equal(d.breadth.up+d.breadth.down+d.breadth.flat,50);
 assert.equal(d.coins[0].coin,'BTC');
 assert.equal(d.coins[49].coin,'COIN49');
-assert.equal(d.coins[0].funding_rate_pct,.001);
+assert.equal(d.coins[0].funding_rate_pct,.01);
 assert.equal(d.collected_ms,NOW);
 assert.equal(d.interpretation.mood,'혼조');
 assert.equal(d.coverage.does_not_include_all_exchanges,true);
