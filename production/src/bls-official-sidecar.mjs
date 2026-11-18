@@ -69,14 +69,15 @@ export async function loadBlsSidecar(bucket,now=Date.now()){
 export function mergeVerifiedBls(base,sidecar,now=Date.now()){
   if(!sidecar||!base||base.schema!=='lumex_public_official_news_v1'||
     !Array.isArray(base.items)||!Array.isArray(base.feeds))throw Error('merge_invalid_snapshot');
+  const directVerified=new Set(base.feeds.filter(x=>x.status==='verified').map(x=>x.id));
   const fromSidecar=sidecar.items.filter(x=>x.official_source_verified===true &&
-    (x.source_id==='bls_cpi'||x.source_id==='bls_jobs'));
-  const keep=base.items.filter(x=>x.source_id!=='bls_cpi'&&x.source_id!=='bls_jobs');
+    (x.source_id==='bls_cpi'||x.source_id==='bls_jobs')&&!directVerified.has(x.source_id));
+  const keep=base.items.filter(x=>!['bls_cpi','bls_jobs'].includes(x.source_id)||directVerified.has(x.source_id));
   const items=[...keep,...fromSidecar].sort((a,b)=>b.published_ms-a.published_ms).slice(0,48);
   const feeds=base.feeds.map(f=>{
     if(!['bls_cpi','bls_jobs'].includes(f.id))return f;
     const replacement=sidecar.feeds.find(x=>x.id===f.id);
-    return replacement?.status==='verified_via_github'?replacement:f;
+    return f.status!=='verified'&&replacement?.status==='verified_via_github'?replacement:f;
   });
   return {...base,items,feeds,source:'official_us_agency_rss_plus_github_oidc',
     collected_ms:Math.max(base.collected_ms,now),collected_utc:new Date(now).toISOString(),
