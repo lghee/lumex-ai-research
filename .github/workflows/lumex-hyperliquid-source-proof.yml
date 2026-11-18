@@ -1,0 +1,34 @@
+name: Hyperliquid public upstream verification
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-hyperliquid-source-proof.yml'
+      - 'production/src/hyperliquid-whales.mjs'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Read real public leaderboard and one published wallet profile (no trading)
+        run: |
+          node --input-type=module <<'JS'
+          import { readLeaderboard, normalizePositions, normalizeFills } from './production/src/hyperliquid-whales.mjs';
+          const r=await fetch('https://stats-data.hyperliquid.xyz/Mainnet/leaderboard',{signal:AbortSignal.timeout(45000)});
+          const result=await readLeaderboard(r);
+          const wallet=result.candidates[0].address;
+          const lookup=async(type,extra={})=>{
+            const q=await fetch('https://api.hyperliquid.xyz/info',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type,user:wallet,...extra}),signal:AbortSignal.timeout(15000)});
+            if(!q.ok)throw Error(type+'_http_'+q.status);
+            return await q.json();
+          };
+          const positions=normalizePositions(await lookup('clearinghouseState'));
+          const now=Date.now(),fills=normalizeFills(await lookup('userFillsByTime',{startTime:now-86400000,endTime:now,aggregateByTime:true}),now);
+          console.log('HYPERLIQUID_PROOF '+JSON.stringify({scanned:result.scanned,eligible:result.eligible,selected:result.candidates.length,position_rows:positions.length,fill_rows:fills.length,checked_utc:new Date().toISOString()}));
+          JS
