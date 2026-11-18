@@ -2880,7 +2880,7 @@ export async function verifyGithubOfficialBlsOidc(token,now=Date.now(),jwksLoade
       typeof c?.sub!=='string'||c.sub.length<1||c.sub.length>1024||
       c?.ref!=='refs/heads/main'||
       c?.workflow_ref!=='lghee/lumex-ai-research/.github/workflows/lumex-official-bls-sidecar.yml@refs/heads/main'||
-      !['schedule','workflow_dispatch'].includes(c?.event_name)||
+      !['schedule','workflow_dispatch','push'].includes(c?.event_name)||
       c?.runner_environment!=='github-hosted'||
       !/^\d{5,16}$/.test(String(c?.run_id||''))||
       !Number.isSafeInteger(c.iat)||!Number.isSafeInteger(c.exp)||
