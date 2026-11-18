@@ -106,7 +106,7 @@ export async function collectHyperWhales(env,now=Date.now()){
    // Retain original per-wallet observation timestamps; leaderboard updates do not
    // relabel cached positions as fresh.
    list={ok:true,schema:'lumex_hyperliquid_whales_v1',source:'Hyperliquid',leaderboard_at_ms:now,source_last_modified:response.headers.get('last-modified'),scanned:stats.scanned,eligible:stats.eligible,
-     rows:stats.candidates.map(x=>({...x,profile:old.get(x.address)?.profile||null})),cursor:Number(previous?.cursor||0)%stats.candidates.length,orders_enabled:false,scope:'selected_leaderboard_accounts_default_perp_dex'};
+     rows:stats.candidates.map(x=>({...x,profile:old.get(x.address)?.profile||null})),cursor:Number(previous?.cursor||0)%stats.candidates.length,retry:previous?.retry||{},orders_enabled:false,scope:'selected_leaderboard_accounts_default_perp_dex'};
    await put(bucket,'latest.json',list);
   }catch(e){boardError=String(e.message||e).slice(0,100);list=previous}
  }
@@ -115,15 +115,21 @@ export async function collectHyperWhales(env,now=Date.now()){
  // upstream calls are ever driven by a page visitor. Fill/position failures
  // are isolated, and last successful values retain their original time.
  let count=0,errors=0;const errorKinds={};
- const indices=Array.from({length:Math.min(3,list.rows.length)},(_,i)=>(Number(list.cursor||0)+i)%list.rows.length);
- await Promise.all(indices.map(async i=>{
+ const retry=Object.fromEntries(Object.entries(list.retry||{}).filter(([a,v])=>list.rows.some(r=>r.address===a)&&Number.isFinite(v?.next)));
+ const regular=Array.from({length:Math.min(3,list.rows.length)},(_,i)=>(Number(list.cursor||0)+i)%list.rows.length);
+ const due=list.rows.map((r,i)=>({r,i})).filter(({r,i})=>!regular.includes(i)&&retry[r.address]?.next<=now).sort((a,b)=>retry[a.r.address].next-retry[b.r.address].next)[0];
+ // Two normal reads plus one retry when needed. No starvation and no extra concurrency.
+ const advance=due&&regular.length===3?2:regular.length;
+ const indices=due&&advance===2?[...regular.slice(0,2),due.i]:regular;
+ const scheduleRetry=(a)=>{const attempts=Math.min(6,(retry[a]?.attempts||0)+1);retry[a]={attempts,next:now+Math.min(30,2**attempts)*60000};};
+ const results=await Promise.allSettled(indices.map(async i=>{
   const row=list.rows[i],old=await get(bucket,'profiles/'+row.address+'.json').catch(()=>null);
   const [positions,fills]=await Promise.allSettled([
    info('clearinghouseState',row.address).then(normalizePositions),
    info('userFills',row.address,{aggregateByTime:true}).then(x=>normalizeFills(x,now))
   ]);
   for(const [type,result] of [['positions',positions],['fills',fills]])if(result.status==='rejected'){const code=type+'_'+String(result.reason?.message||'unavailable').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,70);errorKinds[code]=(errorKinds[code]||0)+1;}
-  if(positions.status!=='fulfilled'&&fills.status!=='fulfilled'){errors++;return}
+  if(positions.status!=='fulfilled'&&fills.status!=='fulfilled'){errors++;scheduleRetry(row.address);return}
   const detail={ok:true,schema:'lumex_hyperliquid_profile_v1',address:row.address,
    positions:positions.status==='fulfilled'?positions.value:old?.positions??null,
    positions_at_ms:positions.status==='fulfilled'?now:old?.positions_at_ms??null,
@@ -134,11 +140,13 @@ export async function collectHyperWhales(env,now=Date.now()){
   row.profile={positions_at_ms:detail.positions_at_ms,fills_at_ms:detail.fills_at_ms,
    positions:detail.positions===null?null:detail.positions.slice(0,8).map(p=>({coin:p.coin,side:p.side,entry_price:p.entry_price,position_value_usd:p.position_value_usd})),
    last_fill:detail.fills?.[0]||null};
-  count++;if(positions.status!=='fulfilled'||fills.status!=='fulfilled')errors++;
+  count++;if(positions.status!=='fulfilled'||fills.status!=='fulfilled'){errors++;scheduleRetry(row.address);}else delete retry[row.address];
  }));
- list.cursor=(Number(list.cursor||0)+indices.length)%list.rows.length;
+ results.forEach((r,j)=>{if(r.status==='rejected'){errors++;errorKinds.storage_failed=(errorKinds.storage_failed||0)+1;scheduleRetry(list.rows[indices[j]].address);}});
+ list.retry=retry;
+ list.cursor=(Number(list.cursor||0)+advance)%list.rows.length;
  await put(bucket,'latest.json',list);
- await put(bucket,'health.json',{ok:true,checked_ms:now,leaderboard_at_ms:list.leaderboard_at_ms,rows:list.rows.length,profiles:list.rows.filter(r=>r.profile?.positions_at_ms).length,updated:count,errors,error_kinds:errorKinds,leaderboard_error:boardError});
+ await put(bucket,'health.json',{ok:true,checked_ms:now,leaderboard_at_ms:list.leaderboard_at_ms,rows:list.rows.length,profiles:list.rows.filter(r=>r.profile?.positions_at_ms).length,fill_profiles:list.rows.filter(r=>r.profile?.fills_at_ms).length,fresh_positions:list.rows.filter(r=>r.profile?.positions_at_ms&&now-r.profile.positions_at_ms<=3600000).length,fresh_fills:list.rows.filter(r=>r.profile?.fills_at_ms&&now-r.profile.fills_at_ms<=3600000).length,pending_retries:Object.keys(retry).length,updated:count,errors,error_kinds:errorKinds,leaderboard_error:boardError});
 }
 export async function hyperWhalesRoute(request,env){
  const u=new URL(request.url),bucket=env.MARKET_DATA;
@@ -148,7 +156,7 @@ export async function hyperWhalesRoute(request,env){
  const list=await get(bucket,'latest.json');
  if(!list?.rows?.length)return reply({ok:false,reason:'not_collected'},503);
  if(u.pathname.endsWith('/hyperliquid-whales')){
-  const {cursor,...publicList}=list;return reply(publicList);
+  const {cursor,retry,...publicList}=list;return reply(publicList);
  }
  const address=u.searchParams.get('address')?.toLowerCase();
  if(!addr(address)||!list.rows.some(r=>r.address===address))return reply({ok:false},404);
