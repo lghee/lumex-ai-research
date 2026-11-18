@@ -90,6 +90,7 @@
     "AUTO_DERIVATIVES_FETCH": "true",
     "AUTO_LEGACY_BACKFILL": "true",
     "AUTO_PUBLIC_PULSE_FETCH": "true",
+    "AUTO_ML_REGIME_RESEARCH": "true",
     "AUTO_HYPERLIQUID_WHALES": "true",
     "AUTO_EXCHANGE_COMPARE_FETCH": "true",
     "AUTO_OI_MIRROR_FETCH": "true",
