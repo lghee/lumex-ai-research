@@ -26,7 +26,9 @@ jobs:
                   assert r.status==200 and data.get('ok') is True and data.get('schema')=='lumex_public_heatmap_v1'
                   assert len(coins)==50 and data.get('breadth',{}).get('total')==50
                   assert len({c['symbol'] for c in coins})==50
-                  assert data.get('selection')=='same_exchange_top50_by_24h_quote_turnover'
+                  assert data.get('selection')=='known_crypto_universe_top50_by_24h_quote_turnover'
+                  assert data.get('coverage',{}).get('excludes_unclassified_contracts') is True
+                  assert not ({'SOXL','SNDK'} & {c['coin'] for c in coins})
                   assert not data.get('stale')
                   print('HEATMAP_REAL_PUBLIC_PROOF '+json.dumps({'ok':True,'checked_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'source':data['source'],'collected_ms':data['collected_ms'],'n':len(coins),'breadth':data['breadth'],'first4':[{'coin':c['coin'],'change_24h_pct':c['change_24h_pct']} for c in coins[:4]],'stale':data['stale']}))
                   break
