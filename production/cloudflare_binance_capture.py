@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 
-BINANCE_PUBLIC_WSS = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
+BINANCE_PUBLIC_WSS = "wss://fstream.binance.com/market/stream?streams=!forceOrder@arr"
 SYMBOLS = frozenset(("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"))
 MAX_BUFFER = 300
 MAX_BATCH = 25
