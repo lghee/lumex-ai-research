@@ -106,7 +106,7 @@ export async function collectHyperWhales(env,now=Date.now()){
    // Retain original per-wallet observation timestamps; leaderboard updates do not
    // relabel cached positions as fresh.
    list={ok:true,schema:'lumex_hyperliquid_whales_v1',source:'Hyperliquid',leaderboard_at_ms:now,source_last_modified:response.headers.get('last-modified'),scanned:stats.scanned,eligible:stats.eligible,
-     rows:stats.candidates.map(x=>({...x,profile:old.get(x.address)?.profile||null})),cursor:0,orders_enabled:false,scope:'selected_leaderboard_accounts_default_perp_dex'};
+     rows:stats.candidates.map(x=>({...x,profile:old.get(x.address)?.profile||null})),cursor:Number(previous?.cursor||0)%stats.candidates.length,orders_enabled:false,scope:'selected_leaderboard_accounts_default_perp_dex'};
    await put(bucket,'latest.json',list);
   }catch(e){boardError=String(e.message||e).slice(0,100);list=previous}
  }
