@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'production/tools/independent_ai_research_20261118.py'
+      - 'production/tools/independent_holding_cost_study_20261118.py'
       - '.github/workflows/lumex-independent-ai-proof.yml'
 permissions:
   contents: read
@@ -21,11 +22,13 @@ jobs:
         working-directory: production
         env:
           LUMEX_INDEPENDENT_RESEARCH_DIR: ${{ runner.temp }}/lumex-ai-research
-        run: python tools/independent_ai_research_20261118.py
+        run: |
+          python tools/independent_ai_research_20261118.py
+          python tools/independent_holding_cost_study_20261118.py
       - name: Attach raw evidence JSON
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: lumex-independent-ai-evidence
-          path: ${{ runner.temp }}/lumex-ai-research/independent_ai_report.json
+          path: ${{ runner.temp }}/lumex-ai-research/
           retention-days: 14
