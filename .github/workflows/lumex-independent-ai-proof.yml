@@ -1,0 +1,31 @@
+name: LUMEX independent AI strategy research
+on:
+  pull_request:
+    paths:
+      - 'production/tools/independent_ai_research_20261118.py'
+      - '.github/workflows/lumex-independent-ai-proof.yml'
+permissions:
+  contents: read
+jobs:
+  independent-market-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated analysis libraries (no production requirements touched)
+        run: python -m pip install --quiet numpy scikit-learn
+      - name: Backtest real Gate markets with strict chronological OOS
+        working-directory: production
+        env:
+          LUMEX_INDEPENDENT_RESEARCH_DIR: ${{ runner.temp }}/lumex-ai-research
+        run: python tools/independent_ai_research_20261118.py
+      - name: Attach raw evidence JSON
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumex-independent-ai-evidence
+          path: ${{ runner.temp }}/lumex-ai-research/independent_ai_report.json
+          retention-days: 14
