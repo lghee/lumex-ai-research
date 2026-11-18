@@ -4740,7 +4740,7 @@ export class ResearchContainer extends DurableObject{
     }
     const url=new URL(request.url);url.protocol='http:';url.host='container';
     const headers=new Headers(request.headers);headers.delete('host');headers.set('X-Lumex-Internal-Key',this.env.LUMEX_CONTAINER_KEY||'');
-    const forwarded=new Request(url,{method:request.method,headers,body:request.body});
+    const forwarded=new Request(url,{method:request.method,headers,body:request.body,duplex:'half'});
     return container.getTcpPort(PORT).fetch(forwarded);
   }
   async startAndReady(){
