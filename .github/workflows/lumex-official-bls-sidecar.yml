@@ -1,0 +1,27 @@
+name: LUMEX official BLS Atom source (GitHub OIDC)
+on:
+  push:
+    paths:
+      - '.github/workflows/lumex-official-bls-sidecar.yml'
+  schedule:
+    - cron: '23 */2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: lumex-bls-atom-official-source
+  cancel-in-progress: false
+jobs:
+  collect-bls-headlines:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check official Atom parser (no made-up headlines)
+        run: python3 -m unittest discover -s production/tests -p 'test_bls_atom_sidecar.py' -v
+      - name: Fetch official BLS CPI and employment Atom and send with signed OIDC
+        run: python3 production/scripts/bls-official-sidecar.py
