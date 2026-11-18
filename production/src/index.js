@@ -3281,7 +3281,7 @@ export function summarizeObservedRollups(rows,symbol,windowName='24h',now=Date.n
 /** Source-separated, bounded observed-only analytics from the hot DO event ledger.
  * Never substitutes legacy WordPress archives or reports market-wide totals.
  */
-function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
+export function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
   const view=u.pathname==='/observed-pressure'?'pressure':u.pathname==='/observed-replay'?'replay':null;
   if(!view)return hubReply({ok:false,error:'unknown_observed_view'},404);
   const start=view==='pressure'?now-195*60000:Number(u.searchParams.get('start_ms'));
@@ -3294,7 +3294,7 @@ function observedAnalyticView(sql, u, now=Date.now(),longSince=now) {
     return hubReply({ok:false,error:'observed_window_out_of_hot_retention'},422);
   // The limit prevents an unbounded customer query; overflow is explicitly reported.
   const rows=sql.exec(
-    "SELECT ts,source,payload FROM hub_events WHERE kind='liquidation' AND ts>=? AND ts<? ORDER BY ts ASC LIMIT 20001",
+    "SELECT ts,source,payload FROM hub_events WHERE kind='liquidation' AND source IN ('bybit','binance') AND ts>=? AND ts<? ORDER BY ts ASC LIMIT 20001",
     start,end).toArray();
   if(rows.length>20000)return hubReply({ok:false,error:'observed_event_count_exceeds_safe_limit',coverage:'partial'},503);
   const bins=new Map(),events=[],bySource={Bybit:0,Binance:0};let invalid=0;
