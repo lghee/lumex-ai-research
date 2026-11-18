@@ -12,7 +12,7 @@ assert.equal(parsed.length,1);
 assert.equal(parsed[0].title_original,'Federal Reserve issues monetary policy statement');
 assert.equal(parsed[0].official_source_verified,true);
 assert.equal(parsed[0].published_ms,Date.parse('2026-11-18T12:00:00Z'));
-assert.equal(parseOfficialFeed(xml.replace('https://www.federalreserve.gov/','https://bad.example/'),feed,now).length,0);
+assert.throws(()=>parseOfficialFeed(xml.replace('https://www.federalreserve.gov/','https://bad.example/'),feed,now),/official_articles_unverified/);
 assert.throws(()=>parseOfficialFeed(xml.replace('Federal Reserve issues monetary policy statement','bad'),feed,now),/official_articles_unverified/);
 assert.throws(()=>parseOfficialFeed(xml.replace('18 Nov 2026','18 Nov 2046'),feed,now),/official_articles_unverified/);
 assert.throws(()=>parseOfficialFeed('<html>404</html>',feed,now),/feed_size_invalid|official_feed_items_missing/);
