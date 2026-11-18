@@ -1,0 +1,61 @@
+name: LUMEX phase9 deployed Binance health audit (read only)
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/lumex-phase9-postdeploy-health.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Observe deployed read-only Worker endpoints
+        env:
+          LUMEX_WORKER_URL: https://lumex-ai-research2.kpiplus195.workers.dev
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          base=os.environ['LUMEX_WORKER_URL'].rstrip('/')
+          paths=(
+              '/health',
+              '/market-hub/v1/health',
+              '/market-hub/v1/binance-egress-health',
+              '/market-hub/v1/binance-cloudflare-health',
+              '/market-hub/v1/github-binance-health',
+              '/market-hub/v1/live-health',
+          )
+          safe=('ok','version','enabled','status','reason','source','checked_ms',
+                'handshake_http_status','probe_status','connected','stale','gap_detected',
+                'continuous_seconds','checkpoint_seq','frames_this_poll',
+                'accepted_this_poll','r2_readback_this_poll',
+                'source_r2_readback_verified','complete_market_capture',
+                'cron_retirement_allowed','provider_messages_accepted','total_accepted',
+                'last_accepted_ms','coverage','capture_confirmed')
+          for path in paths:
+              try:
+                  req=urllib.request.Request(base+path,headers={'User-Agent':'LUMEX-GitHub-read-only-health/1.0'})
+                  with urllib.request.urlopen(req,timeout=22) as r:
+                      code=r.status
+                      data=json.loads(r.read(120000).decode('utf-8'))
+                  if not isinstance(data,dict): raise ValueError('health_not_object')
+                  filtered={k:data[k] for k in safe if k in data}
+                  if path.endswith('/live-health'):
+                      feeds=data.get('feeds',{})
+                      if isinstance(feeds,dict):
+                          filtered['feeds']={k:{field:v.get(field) for field in
+                              ('connected','last_message_ms','stale') if field in v}
+                            for k,v in feeds.items() if isinstance(v,dict)}
+                  print('PHASE9_PUBLIC_HEALTH',json.dumps({'path':path,'http':code,
+                      'data':filtered},separators=(',',':')))
+              except Exception as exc:
+                  print('PHASE9_PUBLIC_HEALTH',json.dumps({'path':path,
+                      'error_type':type(exc).__name__}))
+                  if path=='/health':raise
+          print('NOTE: Code deployment != confirmed Binance 24/7 connectivity. The capability probe is not a verified live WebSocket.')
+          PY
