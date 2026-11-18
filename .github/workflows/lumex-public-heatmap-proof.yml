@@ -1,5 +1,8 @@
 name: LUMEX free heatmap production evidence
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/lumex-public-heatmap-proof.yml'
   push:
     paths:
       - '.github/workflows/lumex-public-heatmap-proof.yml'
