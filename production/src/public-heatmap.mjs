@@ -4,6 +4,10 @@
 const PREFIX='market-hub/free-heatmap/v1/';
 const SOURCE='Gate USDT perpetual public 24h ticker';
 const SCHEMA='lumex_public_heatmap_v1';
+/** Bounded audited crypto base-symbol inventory: exclude tokenized shares/ETFs such as SOXL or SNDK. */
+export const CRYPTO_BASES=Object.freeze('BTC ETH SOL XRP BNB DOGE ADA TRX LINK AVAX LTC BCH DOT UNI AAVE NEAR SUI TON HBAR ICP ETC XLM ATOM ARB OP PEPE SHIB BONK WIF FLOKI INJ FIL SEI FET TAO RENDER RNDR RUNE KAS JUP POL MATIC WLD APT XMR ZEC DASH XTZ EOS ALGO GRT CRV MKR COMP SNX LDO ENA ONDO PENDLE W AXS SAND MANA IMX GALA MEME POPCAT PNUT TRUMP PUMP NOT TURBO BRETT GOAT ACT PEOPLE ZK ZRO STRK PYTH TIA JTO BOME MOODENG NEIRO TOSHI FARTCOIN VIRTUAL SPX GRASS AI16Z AIXBT GIGA PENGU JASMY CHZ IOTA VET FLOW EGLD THETA KAVA MINA DYDX GMX JOE CAKE 1INCH SUSHI YFI RSR ANKR ZIL QTUM LRC KSM SSV BLUR STX CFX ROSE KDA CELO ONE AR OM AGIX OCEAN AKT CORE COTI KNC SKL SXP BNT NEO ZRX BAT ICX ZEN MASK API3 TRB WOO ORDI SATS 1000SATS 1000PEPE 1000SHIB 1000BONK DOGS CATI HMSTR RAY LAYER BERA MOVE IP HYPE KAITO MORPHO BIO ETHFI EIGEN ATH MNT OKB CRO GT LEO TWT NEXO AMP RPL PHA TNSR DRIFT SAGA MANTA DYM NTRN ALT METIS SNT KERNEL HOME GUN INIT PARTI RED NIL B3 WAL HAEDAL AERO DEEP SYRUP PLUME FXS CVX'.split(' '));
+const CRYPTO_SET=new Set(CRYPTO_BASES);
+
 const CORS={'access-control-allow-origin':'*','access-control-allow-methods':'GET, HEAD, OPTIONS',
   'access-control-allow-headers':'content-type','x-content-type-options':'nosniff'};
 const json=(v,status=200,cache=0)=>new Response(JSON.stringify(v),{status,headers:{
@@ -22,7 +26,7 @@ export function normalizeTickers(source,ms){
  for(const t of source){
   const contract=typeof t?.contract==='string'?t.contract:'';
   const match=/^([A-Z0-9]{2,16})_USDT$/.exec(contract);
-  if(!match)continue;
+  if(!match||!CRYPTO_SET.has(match[1]))continue;
   if(seen.has(contract))continue;
   const price=num(t.last,0.00000001,1e9),delta=num(t.change_percentage,-100,10000),
       volume=num(t.volume_24h_quote??t.volume_24h_settle,1000,1e16),
@@ -44,11 +48,12 @@ export function normalizeTickers(source,ms){
        volatility=movers>=15?'급변 종목 많음':movers>=7?'변동 확대':'비교적 안정';
  return {ok:true,schema:SCHEMA,source:SOURCE,data_kind:'observed_public_market_only',
    collected_ms:ms,observed_at_utc:new Date(ms).toISOString(),
-   selection:'same_exchange_top50_by_24h_quote_turnover',
-   universe:'Gate 거래소 USDT 무기한 선물 중 24시간 거래대금 상위 50개 계약',
+   selection:'known_crypto_universe_top50_by_24h_quote_turnover',
+   universe:'사전 검증한 암호화폐 종목군에서 Gate USDT 선물 24시간 거래대금 상위 50개 계약',
    price_unit:'USDT',change_period:'24h',not_spot_market:true,
    coverage:{selected:top.length,valid_candidate_count:candidates.length,
-      does_not_include_all_exchanges:true},
+      does_not_include_all_exchanges:true,eligible_crypto_base_count:CRYPTO_SET.size,
+      excludes_unclassified_contracts:true},
    breadth:{up,down,flat,total:50,movers_ge_5pct:movers},
    interpretation:{mood,volatility,weighted_change_pct:round(weighted),
      note:'50개 선물 계약의 24시간 등락률 분포를 설명합니다. 전체 암호화폐 시장이나 향후 가격을 예측하지 않습니다.'},
