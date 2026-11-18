@@ -63,3 +63,41 @@ export async function btcOnchainRoute(request,env){
  return new Response(JSON.stringify(data||{ok:false,error:'not_collected'}),{status:data?200:503,
   headers:{'content-type':'application/json; charset=utf-8','cache-control':'public, max-age=60','x-content-type-options':'nosniff'}});
 }
+
+const GATE_DAILY='https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=1d&limit=1500';
+export function normalizeDaily(rows,now=Date.now()){
+ if(!Array.isArray(rows)||rows.length<200||rows.length>1500)throw Error('daily_count');
+ const today=Math.floor(now/86400000)*86400;
+ const numeric=x=>typeof x==='number'||(typeof x==='string'&&/^\d+(\.\d+)?$/.test(x))?Number(x):NaN;
+ const byTime=new Map();
+ for(const r of rows){
+  const t=numeric(r?.t),o=numeric(r?.o),h=numeric(r?.h),l=numeric(r?.l),c=numeric(r?.c),v=numeric(r?.v);
+  if(!Number.isSafeInteger(t)||t%86400!==0||t<1500000000||t>today||![o,h,l,c,v].every(Number.isFinite)||l<=0||o<=0||c<=0||h<Math.max(o,c,l)||l>Math.min(o,c)||v<0)throw Error('daily_row');
+  if(t===today)continue;
+  if(byTime.has(t))throw Error('daily_duplicate');
+  byTime.set(t,{t,o,h,l,c,v});
+ }
+ const candles=[...byTime.values()].sort((a,b)=>a.t-b.t);
+ if(candles.length<200||candles.at(-1).t!==today-86400||candles.some((r,i)=>i&&r.t-candles[i-1].t!==86400))throw Error('daily_gap_or_stale');
+ return candles;
+}
+export async function collectBtcOnchainDaily(env,now=Date.now()){
+ const bucket=env.MARKET_DATA;if(!bucket)return;
+ const old=await read(bucket,'daily-price.json'),today=Math.floor(now/86400000)*86400;
+ if(old?.candles?.at(-1)?.t===today-86400)return;
+ const attempt=await read(bucket,'daily-price-attempt.json');
+ if(attempt&&now-attempt.checked_ms<900000)return;
+ await write(bucket,'daily-price-attempt.json',{checked_ms:now});
+ try{
+  const r=await fetch(GATE_DAILY,{headers:{accept:'application/json'},signal:AbortSignal.timeout(10000)});
+  if(!r.ok)throw Error('gate_http_'+r.status);
+  const body=await r.text();if(body.length>400000)throw Error('daily_size');
+  const candles=normalizeDaily(JSON.parse(body),now);
+  await write(bucket,'daily-price.json',{ok:true,schema:'lumex_btc_gate_daily_v1',source:'Gate BTC_USDT perpetual',checked_ms:now,candles,orders_enabled:false});
+ }catch(e){console.warn('btc_daily_price_unavailable',String(e?.message||'error').slice(0,80));}
+}
+export async function btcOnchainDailyRoute(request,env){
+ if(request.method!=='GET')return new Response(null,{status:405,headers:{allow:'GET'}});
+ const d=env.MARKET_DATA?await read(env.MARKET_DATA,'daily-price.json'):null;
+ return new Response(JSON.stringify(d||{ok:false,error:'not_collected'}),{status:d?200:503,headers:{'content-type':'application/json; charset=utf-8','cache-control':'public, max-age=300','x-content-type-options':'nosniff'}});
+}

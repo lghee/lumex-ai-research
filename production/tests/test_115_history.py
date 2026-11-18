@@ -20,6 +20,10 @@ class History115Tests(unittest.TestCase):
         return [{'t':t//1000,'o':'100','h':'101','l':'99','c':'100','v':'20'} for t in range(first,last+1,step)]
 
     def test_five_minute_recent_30d_is_collecting_not_90d_research(self):
+        # Freeze the wall clock across both fetches; a real five-minute boundary
+        # between them legitimately changes the count and made this fixture flaky.
+        clock=patch.object(e.time,'time',return_value=1794987540.0)
+        clock.start();self.addCleanup(clock.stop)
         target=self.path/'partial.csv'
         with patch.object(e,'http_json',side_effect=self.gate):
             count=e.fetch_gate_futures_candles('BTCUSDT',5,target)
