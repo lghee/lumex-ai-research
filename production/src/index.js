@@ -4485,6 +4485,8 @@ export default{
     const url=new URL(request.url);
     if(url.pathname==='/market-hub/v1/btc-onchain-price')return import('./btc-onchain.mjs').then(m=>m.btcOnchainDailyRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname==='/market-hub/v1/btc-onchain')return import('./btc-onchain.mjs').then(m=>m.btcOnchainRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
+    if(url.pathname==='/market-hub/v1/regime-research-report')
+      return import('./regime-research.mjs').then(m=>m.privateRegimeReport(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(['/market-hub/v1/hyperliquid-whales','/market-hub/v1/hyperliquid-whale-profile','/market-hub/v1/hyperliquid-whales-health'].includes(url.pathname))
       return import('./hyperliquid-whales.mjs').then(m=>m.hyperWhalesRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
@@ -4508,6 +4510,10 @@ export default{
   },
   async scheduled(controller,env,ctx){
     // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_ML_REGIME_RESEARCH==='true')
+      ctx.waitUntil(import('./regime-research.mjs').then(m=>m.scheduledRegimeResearch(env)).then(x=>{
+        if(x?.ok===false)console.warn('ml_regime_research_not_ready',String(x.reason||'failed').slice(0,60));
+      }).catch(()=>console.error('ml_regime_research_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_MARKET_QA_DAILY==='true'){
       // Retry throughout the UTC day. A single missed 00:15 cron must not
       // permanently lose the daily proof. marketOpsDaily is idempotent by R2 key.
