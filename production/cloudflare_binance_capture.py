@@ -26,6 +26,8 @@ def clean_public_snapshot(raw: str):
         if "stream" in document and document["stream"] != "!forceOrder@arr":
             return None
         data = document.get("data", document)
+        if not isinstance(data, dict):
+            return None
         order = data.get("o")
         if (data.get("e") != "forceOrder" or not isinstance(order, dict) or
                 order.get("s") not in SYMBOLS or
