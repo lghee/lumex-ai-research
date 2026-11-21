@@ -4948,5 +4948,17 @@ export default{
   }
 };
 
-// Phase 33 isolated observer: no customer-facing order-flow feature flag.
-export {OrderFlowLiveCollector} from './order-flow-live.mjs';
+// Phase 33 isolated observer; lazy loading preserves legacy data-URI regression harness.
+export class OrderFlowLiveCollector extends DurableObject {
+  constructor(ctx,env){super(ctx,env);this.ctx=ctx;this.env=env;this.flow=null;}
+  async handler(){
+    if(!this.flow){
+      const module=await import('./order-flow-live.mjs');
+      this.flow=new module.OrderFlowLiveLogic(this.ctx,this.env);
+      await this.flow.ready;
+    }
+    return this.flow;
+  }
+  async fetch(request){return (await this.handler()).fetch(request);}
+  async alarm(){return (await this.handler()).alarm();}
+}
