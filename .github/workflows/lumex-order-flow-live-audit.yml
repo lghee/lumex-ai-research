@@ -44,8 +44,17 @@ jobs:
             dest="/tmp/flow-observed/${minute}.json"
             npx wrangler r2 object get "lumex-ai-data/market-hub/order-flow/v1/live/gate/${day}/${minute}.json" --file "$dest" --remote >/dev/null 2>&1 || rm -f "$dest"
           done
+      - name: Get independent collector heartbeat (diagnostic only)
+        working-directory: production
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx wrangler r2 object get 'lumex-ai-data/market-hub/order-flow/v1/live/gate/status.json' --file /tmp/flow-observer-status.json --remote >/dev/null 2>&1 || {
+            rm -f /tmp/flow-observer-status.json
+            echo "::warning::No collector heartbeat in R2: scheduler or Durable Object may not be running"
+          }
       - name: Reject blank, stale, malformed or synthetic observations
-        run: python3 production/scripts/order-flow-live-audit.py --dir /tmp/flow-observed
+        run: python3 production/scripts/order-flow-live-audit.py --dir /tmp/flow-observed --status /tmp/flow-observer-status.json
       - name: Publish honest proof report
         if: always()
         run: |
