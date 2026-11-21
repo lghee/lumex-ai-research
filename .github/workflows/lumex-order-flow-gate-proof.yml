@@ -1,0 +1,20 @@
+name: LUMEX Gate executed trade public schema proof (read only)
+on:
+  pull_request:
+    paths:
+      - 'production/tests/probe_gate_dual_flow_20261121.mjs'
+      - '.github/workflows/lumex-order-flow-gate-proof.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify public spot / futures executions and contract units
+        run: node production/tests/probe_gate_dual_flow_20261121.mjs
