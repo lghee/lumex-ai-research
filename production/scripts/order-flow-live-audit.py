@@ -82,6 +82,9 @@ def main():
         proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
         proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
         proof["collector_runtime_revision"]=heartbeat.get("runtime_revision","legacy_or_unknown")
+        if proof["collector_runtime_revision"] != "phase35_flow_20261121":
+            proof["ok"]=False
+            proof["runtime_error"]="old_durable_object_version"
         proof["futures_decimal_header_requested"]=heartbeat.get("futures_decimal_header_requested") is True
         proof["message_diagnostics"]=heartbeat.get("message_diagnostics",{})
         if "um-futures" in proof["websocket_connections"] and not proof["futures_decimal_header_requested"]:
@@ -103,7 +106,8 @@ def main():
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
-        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
+        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")        f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
+
         f.write(f"- Futures decimal request: {proof.get('futures_decimal_header_requested','unavailable')}\n")
         f.write(f"- Filtered vs malformed: {proof.get('message_diagnostics',{})}\n")
 
