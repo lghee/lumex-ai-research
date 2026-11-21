@@ -1,0 +1,28 @@
+name: LUMEX four-coin public candle continuity monitor
+on:
+  schedule:
+    - cron: '3,18,33,48 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  read-only-snapshot-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify four public 15m closed candles remain current
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          curl --fail --silent --show-error --max-time 20 "${URL%/}/market-hub/v1/chart-snapshot-health" |
+          python3 -c '
+          import json,sys
+          p=json.load(sys.stdin)
+          assert p.get("ok") is True and p.get("schema")=="lumex_public_chart_freshness_proof_v1", "health route invalid"
+          rows=p.get("symbols") or []
+          assert len(rows)==4 and set(x.get("coin") for x in rows)=={"BTC","ETH","SOL","XRP"}, "unverified symbol set"
+          for x in rows:
+              print(x.get("coin"), "current" if x.get("ready") else "STALE", x.get("last_candle_utc"), x.get("reason"), x.get("lag_seconds"))
+          assert p.get("all_ready") is True, "market chart R2 missing current verified closed 15m candles"
+          '

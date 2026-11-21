@@ -96,6 +96,34 @@ jobs:
           print("PASS deployed Worker",body["version"])
           '
           done
+      - name: Verify all four chart snapshots after Worker deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          URL="${URL%/}/market-hub/v1/chart-snapshot-health"
+          for attempt in 1 2 3 4 5; do
+            echo "Chart snapshot probe ${attempt}/5"
+            if response="$(curl --fail --silent --show-error --max-time 20 "$URL")"; then
+              if printf '%s' "$response" | python3 -c '
+          import json,sys
+          p=json.load(sys.stdin)
+          assert p.get("ok") is True and p.get("schema")=="lumex_public_chart_freshness_proof_v1", "invalid chart health schema"
+          rows=p.get("symbols") or []
+          assert len(rows)==4 and set(x.get("coin") for x in rows)=={"BTC","ETH","SOL","XRP"}, "invalid symbol coverage"
+          for x in rows:
+              print(x["coin"], "READY" if x.get("ready") else "LAGGING",
+                    x.get("last_candle_utc"),x.get("reason"),"lag",x.get("lag_seconds"))
+          assert p.get("all_ready") is True and all(x.get("ready") is True for x in rows), "4-symbol chart snapshots not fresh"
+          '; then
+                echo "PASS: 4/4 verified public 15m candle snapshots current"
+                exit 0
+              fi
+            fi
+            if [[ "$attempt" -lt 5 ]]; then sleep 15; fi
+          done
+          echo "::error::4-coin public chart continuity verification failed after deploy"
+          exit 1
       - name: Verify Phase 33 private observer route refuses anonymous requests
         shell: bash
         run: |

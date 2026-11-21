@@ -79,3 +79,31 @@ export async function readFreshPublicChart(env,symbol){
   return {...item,served_at_utc:new Date().toISOString(),
     delayed:last*1000<expectedOpen(Date.now())};
 }
+
+/** Public read-only freshness receipt. Only source timestamps and status;
+ * never exposes credentials, private orders, account data, or candles.
+ */
+export async function readPublicChartHealth(env,atMs=Date.now()){
+  const expected=expectedOpen(atMs);
+  if(!env.MARKET_DATA)return {ok:false,schema:'lumex_public_chart_freshness_proof_v1',error:'r2_unavailable'};
+  const symbols=await Promise.all(COINS.map(async symbol=>{
+    try{
+      const head=await env.MARKET_DATA.head(BASE+symbol+'.json');
+      const meta=head?.customMetadata||{},last=Number(meta.lastOpenMs||0);
+      const valid=meta.schema===SCHEMA&&meta.source==='gate_public_futures_15m'&&
+        Number.isSafeInteger(last)&&last>1500000000000&&last<=atMs;
+      return {coin:symbol.replace('USDT',''),ready:valid&&last>=expected,
+        last_candle_utc:valid?new Date(last).toISOString():null,
+        lag_seconds:valid?Math.max(0,Math.floor((atMs-last-900000)/1000)):null,
+        reason:!head?'snapshot_missing':!valid?'invalid_metadata':last<expected?'closed_bar_missing':'ok'};
+    }catch{
+      return {coin:symbol.replace('USDT',''),ready:false,last_candle_utc:null,
+        lag_seconds:null,reason:'r2_read_failed'};
+    }
+  }));
+  return {ok:true,schema:'lumex_public_chart_freshness_proof_v1',
+    checked_at_utc:new Date(atMs).toISOString(),interval_minutes:15,
+    expected_last_candle_utc:new Date(expected).toISOString(),
+    all_ready:symbols.every(x=>x.ready),symbols,
+    chart_type:'verified_closed_15m',prices_exposed:false,order_execution:false};
+}

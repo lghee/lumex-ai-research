@@ -4152,6 +4152,10 @@ export async function hubWhales30dArchive(env,now=Date.now()){
 
 async function hubRoute(request,env){
   const u=new URL(request.url),path=u.pathname,method=request.method;
+  if(path==='/market-hub/v1/chart-snapshot-health'&&method==='GET'){
+    try{return hubReply(await (await import('./public-chart-fresh.js')).readPublicChartHealth(env))}
+    catch{return hubReply({ok:false,error:'public_chart_health_unavailable'},503)}
+  }
   // PRO-only via WordPress, server-side Bearer; no public customer access to Worker R2.
   // Owner-only source health: enables diagnosing 403, stale source and schema mismatch.
   if(path==='/market-hub/v1/exchange-compare-health'&&method==='GET'){
