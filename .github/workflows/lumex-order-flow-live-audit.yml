@@ -1,10 +1,9 @@
 name: LUMEX Phase33 live R2 observed trade freshness audit
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'production/scripts/order-flow-live-audit.py'
-      - '.github/workflows/lumex-order-flow-live-audit.yml'
+  workflow_run:
+    workflows:
+      - LUMEX Worker production deploy (automatic guarded Phase33)
+    types: [completed]
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
@@ -12,9 +11,10 @@ permissions:
   contents: read
 concurrency:
   group: lumex-phase33-observed-minute-audit
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   verify:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -28,6 +28,12 @@ jobs:
       - name: Ensure read-only R2 credentials
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID" && test -n "$CLOUDFLARE_API_TOKEN"
+      - name: Allow bounded Durable Object code turnover after a successful deploy
+        if: ${{ github.event_name == 'workflow_run' }}
+        run: |
+          # Code update max_delay 60s + collector status heartbeat every 20s.
+          # The R2 read below takes additional time; no data is fabricated.
+          sleep 70
       - name: Install Wrangler
         working-directory: production
         run: npm install --no-audit --no-fund

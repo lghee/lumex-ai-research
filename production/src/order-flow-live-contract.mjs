@@ -7,6 +7,7 @@ export const FLOW_MARKETS=['spot','um-futures'];
 const symbols=new Set(FLOW_SYMBOLS.map(s=>s+'_USDT'));
 const qty=x=>{const n=Number(x);return x!==null&&x!==undefined&&x!==''&&Number.isFinite(n)&&n>0&&n<1e15?n:null;};
 export function decimalId(x){
+ if(typeof x==='number'&&!Number.isSafeInteger(x))return null;
  const s=String(x??'');
  return /^\d{1,30}$/.test(s)?s.replace(/^0+(?=\d)/,''):null;
 }
@@ -21,15 +22,19 @@ export function parseGateExecution(market,row,multipliers={},now=Date.now()){
  const symbol=pair.replace('_USDT','');
  const id=decimalId(market==='spot'?(row.id_market??row.id):row.id);
  if(!id)return null;
- const tsRaw=Number(row.create_time_ms);
- // Spot sends decimal millisecond strings, for example 1606292218213.4578.
+ // Spot and WebSocket generally send ms. Some Gate futures REST responses
+ // report seconds with three decimal places (or only create_time).
+ const originalTime=row.create_time_ms??row.create_time;
+ const raw=Number(originalTime);
+ if(!Number.isFinite(raw))return null;
+ const tsRaw=raw>=1e9&&raw<1e11?raw*1000:raw;
  if(!Number.isFinite(tsRaw)||tsRaw<1e12||tsRaw>now+120000||tsRaw<now-172800000)return null;
- const ts=Math.floor(tsRaw);
+ const ts=raw>=1e9&&raw<1e11?Math.round(tsRaw):Math.floor(tsRaw);
  const price=qty(row.price);
  if(!price)return null;
  let taker,base;
  if(market==='spot'){
-  if(row.money&&row.money!=='USDT')return null; // unified non-USDT quotes must not be mixed.
+  if((row.money&&row.money!=='USDT')||(row.trade_quote&&row.trade_quote!=='USDT'))return null; // unified non-USDT quotes must not be mixed.
   taker=row.side;
   base=qty(row.amount);
   if(taker!=='buy'&&taker!=='sell')return null;

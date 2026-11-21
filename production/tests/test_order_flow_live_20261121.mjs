@@ -23,6 +23,15 @@ const unordered=parseGatePacket('um-futures',{channel:'futures.trades',event:'up
  result:[{...f,id:34},{...f,id:32},{...f,id:33}]},{BTC_USDT:0.0001},now);
 assert.deepEqual(unordered.map(x=>x.id),['32','33','34'],'reverse-ordered exchange packets must not lose valid trades');
 
+assert.equal(parseGateExecution('um-futures',
+ {...f,create_time_ms:undefined,create_time:Math.floor((now-500)/1000)},
+ {BTC_USDT:0.0001},now)?.ts,Math.floor((now-500)/1000)*1000,
+ 'seconds-only REST date must validate');
+assert.equal(parseGateExecution('um-futures',
+ {...f,create_time_ms:(now-500)/1000},
+ {BTC_USDT:0.0001},now)?.ts,now-500,
+ 'fractional seconds REST timestamp must normalize');
+assert.equal(decimalId(9007199254740993),null,'unsafe 64bit numeric trade ID cannot dedupe');
 assert.equal(decimalId('00009'),'9');assert.equal(orderIdAfter('100','99'),true);
 assert.equal(orderIdAfter('100','100'),false);assert.equal(orderIdAfter('90','100'),false);
 console.log('PASS phase33 Gate source unit validation, venue isolation, IDs and futures multiplier');
@@ -51,7 +60,7 @@ flow.consume('um-futures',{event:'update',channel:'futures.trades',
  price:'80000'}]});
 assert.equal(flow.state.rejected_trade_rows,1);
 assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
-assert.equal(flow.health().runtime_revision,'phase34.1_precision_20261121');
+assert.equal(flow.health().runtime_revision,'phase35_flow_20261121');
 assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
 
 await flow.persist();

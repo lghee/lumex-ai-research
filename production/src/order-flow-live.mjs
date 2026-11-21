@@ -31,6 +31,7 @@ export class OrderFlowLiveLogic{
  constructor(ctx,env){
   this.ctx=ctx;this.env=env;
   this.sockets=new Map();this.connecting=new Set();this.connectionStarted={};
+  this.retryUntil={};this.failureStreak={};this.lastPingMs={};
   this.state=cleanState();
   this.ready=ctx.storage.get('phase33:checkpoint').then(previous=>{
    if(previous?.schema==='lumex_gate_live_collector_v1'){
@@ -68,12 +69,15 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:'phase34.1_precision_20261121',
+   runtime_revision:'phase35_flow_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
    last_archive_key:this.state.last_r2_key||null,
    futures_decimal_header_requested:!!this.state.futures_decimal_header_requested,
+   websocket_retry_after_ms:this.retryUntil,
+   websocket_close_details:(this.state.websocket_close_details||[]).slice(-8),
+   futures_last_pong_ms:this.state.futures_last_pong_ms||null,
    rest_replay_pending:this.state.rest_replay_pending?.length||0,
    recent_rest_replay_checks:(this.state.rest_replay_checks||[]).slice(-12),
    invalid_messages:this.state.bad_events,duplicates:this.state.duplicate_events,
@@ -118,13 +122,16 @@ export class OrderFlowLiveLogic{
  queueRestGap(market,at=Date.now()){
   if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
   const queue=this.state.rest_replay_pending||(this.state.rest_replay_pending=[]);
+  // Preserve at most 24 bounded probes. Repeated 15s disconnects must not
+  // create an unbounded, expensive replay backlog.
+  while(queue.length>24)queue.shift();
   const minute=Math.floor((at-3*MS_MIN)/MS_MIN)*MS_MIN;
   for(const symbol of FLOW_SYMBOLS){
    const key=market+':'+symbol+':'+minute;
-   if(!queue.some(x=>x.key===key)&&queue.length<48)
+   if(!queue.some(x=>x.key===key)&&queue.length<24)
     queue.push({key,market,symbol,minute,queued_at_ms:at});
   }
-  if(queue.length>=48)recordGap(this.state,'rest_replay_queue_bounded','all');
+  if(queue.length>=24)recordGap(this.state,'rest_replay_queue_bounded','all');
  }
  async runOneRestReplay(now=Date.now()){
   if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
@@ -142,7 +149,7 @@ export class OrderFlowLiveLogic{
     await this.env.MARKET_DATA.put(mod.recoveryKey(task.market,task.symbol,task.minute),
      JSON.stringify(proof),{httpMetadata:{contentType:'application/json'}});
    }else result.status='r2_unavailable';
-   if(proof.status!=='bounded_rest_pages_exhausted')
+   if(!['bounded_rest_pages_exhausted','bounded_futures_time_slices_observed'].includes(proof.status))
     recordGap(this.state,'rest_replay_'+String(proof.status).slice(0,50),
       task.market+':'+task.symbol);
   }catch{
@@ -153,6 +160,15 @@ export class OrderFlowLiveLogic{
   checks.push({...result,attempt_at_ms:now});this.state.rest_replay_checks=checks.slice(-40);
  }
  async ensure(){
+  // Gate protocol ping/pong is automatic at WebSocket layer. Add an
+  // application-level liveness probe to distinguish silent futures sockets.
+  const future=this.sockets.get('um-futures');
+  if(future?.readyState===1&&Date.now()-(this.lastPingMs['um-futures']||0)>20000){
+   try{
+    future.send(JSON.stringify({time:Math.floor(Date.now()/1000),channel:'futures.ping'}));
+    this.lastPingMs['um-futures']=Date.now();
+   }catch{recordGap(this.state,'futures_application_ping_send_failed','um-futures');}
+  }
   // Runtime upgrades cannot reuse a futures socket created without exact
   // decimal sizing. Reconnect with an explicit header, never integer fallback.
   if(this.sockets.has('um-futures')&&!this.state.futures_decimal_header_requested){
@@ -182,6 +198,7 @@ export class OrderFlowLiveLogic{
  }
  async connect(market){
   if(this.sockets.has(market)||this.connecting.has(market))return;
+  if(Date.now()<(this.retryUntil[market]||0))return;
   this.connecting.add(market);
   const url=market==='spot'?'wss://api.gateio.ws/ws/v4/':'wss://fx-ws.gateio.ws/v4/ws/usdt';
   const channel=market==='spot'?'spot.trades':'futures.trades';
@@ -204,6 +221,7 @@ export class OrderFlowLiveLogic{
    const subscribe=()=>{
     if(didSubscribe)return;
     didSubscribe=true;
+    this.retryUntil[market]=0; // reset failure streak only after a sustained session
     this.state.reconnects++;
     try{ws.send(JSON.stringify({time:Math.floor(Date.now()/1000),
       channel,event:'subscribe',payload:FLOW_SYMBOLS.map(pair)}));}
@@ -215,16 +233,31 @@ export class OrderFlowLiveLogic{
     try{
      if(typeof event.data!=='string'||event.data.length>1200000){this.state.bad_events++;this.state.malformed_ws_frames=(this.state.malformed_ws_frames||0)+1;return;}
      const doc=JSON.parse(event.data);
+     if(market==='um-futures'&&doc.channel==='futures.pong'){
+      this.state.futures_last_pong_ms=Date.now();return;
+     }
+     if(doc.channel==='futures.system'&&doc.result?.type==='upgrade'){
+      recordGap(this.state,'futures_provider_upgrade',market);
+      try{ws.close(1000,'provider_upgrade');}catch{}
+      return;
+     }
      if(doc.channel!==channel)return;
-     if(doc.event==='subscribe'&&doc.result?.status!=='success'){
+     if(doc.event==='subscribe'&&(doc.error||doc.result?.status!=='success')){
       this.state.subscription_failures=(this.state.subscription_failures||0)+1;
       recordGap(this.state,'subscription_rejected',market);try{ws.close();}catch{}return;
      }
      if(doc.event==='update')this.consume(market,doc);
     }catch{this.state.bad_events++;this.state.malformed_ws_frames=(this.state.malformed_ws_frames||0)+1;}
    });
-   ws.addEventListener('close',()=>{
+   ws.addEventListener('close',event=>{
     if(this.sockets.get(market)===ws)this.sockets.delete(market);
+    const details=this.state.websocket_close_details||(this.state.websocket_close_details=[]);
+    details.push({market,at_ms:Date.now(),code:Number(event?.code||0),
+     clean:Boolean(event?.wasClean),reason:String(event?.reason||'').slice(0,55)});
+    this.state.websocket_close_details=details.slice(-24);
+    const duration=Date.now()-(this.connectionStarted[market]||Date.now());
+    this.failureStreak[market]=duration>120000?0:Math.min(4,(this.failureStreak[market]||0)+1);
+    this.retryUntil[market]=Date.now()+Math.min(45000,2000*2**this.failureStreak[market]);
     recordGap(this.state,'websocket_disconnected',market);
     this.queueRestGap(market);
    });
@@ -258,14 +291,15 @@ export class OrderFlowLiveLogic{
    if(this.state.last_event_ms[k]&&x.ts+10000<this.state.last_event_ms[k]){
     recordGap(this.state,'out_of_order_trade',k);continue;
    }
-   this.state.last_ids[k]=x.id;
-   this.state.last_event_ms[k]=x.ts;
-   this.state.counts[k]=(this.state.counts[k]||0)+1;
    const minute=Math.floor(x.ts/MS_MIN)*MS_MIN;
    const age=now-minute;
    if(age>180000||minute>now+MS_MIN){
     recordGap(this.state,'late_or_future_trade',k);continue;
    }
+   // Only advance the last accepted ID after its timestamp and source pass.
+   this.state.last_ids[k]=x.id;
+   this.state.last_event_ms[k]=x.ts;
+   this.state.counts[k]=(this.state.counts[k]||0)+1;
    const bucket=this.state.buckets[minute]||(this.state.buckets[minute]={});
    const a=bucket[k]||(bucket[k]={symbol:x.symbol,market,source:'gateio',
      observed_trades:0,buy_quote_usdt:0,sell_quote_usdt:0,last_trade_ms:0});
@@ -302,8 +336,8 @@ export class OrderFlowLiveLogic{
   this.state.last_tick_ms=now;
   await this.ctx.storage.put('phase33:checkpoint',this.state);
   // Private diagnostic heartbeat. Does NOT create synthetic trade rows.
-  // Bounded to one R2 write per minute.
-  if(this.env.MARKET_DATA && (!this.lastStatusWrite || now-this.lastStatusWrite>=60000)){
+  // Independent private heartbeat every 20s for bounded rollout attestation.
+  if(this.env.MARKET_DATA && (!this.lastStatusWrite || now-this.lastStatusWrite>=20000)){
    const status={...this.health(),status_written_at_ms:now,
      websocket_details:Object.fromEntries(['spot','um-futures'].map(m=>[m,{
        ready_state:this.sockets.get(m)?.readyState??null,
