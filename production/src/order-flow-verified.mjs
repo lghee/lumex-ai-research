@@ -12,7 +12,18 @@ const safe=(x,min,max)=>typeof x!=='boolean'&&x!==null&&x!==''&&Number.isFinite(
 const err=(error,status=503)=>new Response(JSON.stringify({ok:false,schema:'lumex_order_flow_error_v1',error,ready:false}),{status,
  headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'}});
 const ok=doc=>new Response(JSON.stringify(doc),{headers:{'content-type':'application/json','cache-control':'private, no-store','x-content-type-options':'nosniff'}});
-const key=(symbol,market)=>ROOT+symbol+'-'+market+'.json';
+const POINTER='market-hub/order-flow/v1/current.json';
+const releaseKey=(release,symbol,market)=>ROOT+'releases/'+release+'/'+symbol+'-'+market+'.json';
+function checkedPointer(p,now){
+ if(p?.schema!=='lumex_flow_archive_pointer_v1'||p?.complete!==true||
+    !/^[0-9]{6,16}-[0-9]{1,5}$/.test(p.release_id||'')||
+    p.source!=='official_binance_public_1h_klines'||
+    p.market_count!==8||!Number.isSafeInteger(p.created_at_ms)||
+    p.created_at_ms>now+120000||now-p.created_at_ms>48*HOUR||
+    !Array.isArray(p.symbols)||p.symbols.join(',')!=='BTC,ETH,SOL,XRP'||
+    !Array.isArray(p.markets)||p.markets.join(',')!=='spot,um-futures')return null;
+ return p;
+}
 export function validateHourlyArchive(doc,symbol,market,now=Date.now()){
  if(!ASSETS.has(symbol)||!VENUES.includes(market)||doc?.schema!=='lumex_flow_hourly_v1'||
   doc?.symbol!==symbol+'USDT'||doc?.market!==market||
@@ -99,14 +110,17 @@ export async function serveOrderFlowHistory(request,env,{now=Date.now()}={}){
  if(!ASSETS.has(symbol))return err('unsupported_symbol',400);
  if(!env?.MARKET_DATA)return err('r2_not_bound');
  try{
-  const [so,fo]=await Promise.all(VENUES.map(v=>env.MARKET_DATA.get(key(symbol,v))));
-  if(!so||!fo)return err('official_archive_not_imported');
+  const pointerObj=await env.MARKET_DATA.get(POINTER);
+  const pointer=pointerObj?checkedPointer(await pointerObj.json(),now):null;
+  if(!pointer)return err('verified_archive_release_not_activated');
+  const [so,fo]=await Promise.all(VENUES.map(v=>env.MARKET_DATA.get(releaseKey(pointer.release_id,symbol,v))));
+  if(!so||!fo)return err('verified_release_market_missing');
   if(Number(so.size||0)>520000||Number(fo.size||0)>520000)return err('archive_too_large');
   const [s,f]=await Promise.all([so.json(),fo.json()]);
   const cleanS=validateHourlyArchive(s,symbol,'spot',now),cleanF=validateHourlyArchive(f,symbol,'um-futures',now);
   if(!cleanS||!cleanF)return err('archive_integrity_or_gap_failed');
   const result=computeOrderFlow(cleanS,cleanF,now);
   if(!result)return err('insufficient_contiguous_90_day_window');
-  return ok(result);
+  return ok({...result,archive_release_id:pointer.release_id,archive_release_created_ms:pointer.created_at_ms});
  }catch{return err('order_flow_source_unavailable')}
 }
