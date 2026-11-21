@@ -4158,6 +4158,10 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-compare.mjs')).serveExchangeCompareHealth(env);
   }
+  if(path==='/market-hub/v1/exchange-compare-history'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./exchange-history.mjs')).serveExchangeHistory(request,env);
+  }
   if(path==='/market-hub/v1/exchange-compare'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-compare.mjs')).serveExchangeCompare(request,env);
