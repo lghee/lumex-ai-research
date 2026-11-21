@@ -46,6 +46,8 @@ export class OrderFlowLiveLogic{
    return response(this.health());
   }catch(e){
    recordGap(this.state,'ensure_or_persist_failed','all');
+   try{await this.ctx.storage.put('phase33:checkpoint',this.state);}catch{}
+
    await this.ctx.storage.setAlarm(Date.now()+30000).catch(()=>{});
    return response({ok:false,reason:'live_source_or_r2_unavailable',customer_launch_ready:false},503);
   }
@@ -207,6 +209,19 @@ export class OrderFlowLiveLogic{
   }
   this.state.last_tick_ms=now;
   await this.ctx.storage.put('phase33:checkpoint',this.state);
+  // Private diagnostic heartbeat. Does NOT create synthetic trade rows.
+  // Bounded to one R2 write per minute.
+  if(this.env.MARKET_DATA && (!this.lastStatusWrite || now-this.lastStatusWrite>=60000)){
+   const status={...this.health(),status_written_at_ms:now,
+     websocket_details:Object.fromEntries(['spot','um-futures'].map(m=>[m,{
+       ready_state:this.sockets.get(m)?.readyState??null,
+       connecting:this.connecting.has(m),
+       connected_at_ms:this.connectionStarted[m]||null
+     }]))};
+   await this.env.MARKET_DATA.put(ROOT+'status.json',JSON.stringify(status),{
+     httpMetadata:{contentType:'application/json'}});
+   this.lastStatusWrite=now;
+  }
  }
  async alarm(){
   try{

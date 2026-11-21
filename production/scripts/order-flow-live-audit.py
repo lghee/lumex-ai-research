@@ -57,8 +57,31 @@ def audit(root, now_ms):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--dir",required=True)
+    parser.add_argument("--status",default=None)
     args=parser.parse_args()
     proof=audit(args.dir,int(time.time()*1000))
+    heartbeat=None
+    p=pathlib.Path(args.status) if args.status else None
+    if p and p.is_file():
+        try:
+            heartbeat=json.loads(p.read_text(encoding="utf-8"))
+            assert heartbeat.get("schema")=="lumex_gate_live_observation_health_v1"
+            assert heartbeat.get("customer_launch_ready") is False
+            assert heartbeat.get("live_verified") is False
+            assert isinstance(heartbeat.get("status_written_at_ms"),int)
+        except Exception:
+            heartbeat=None
+    if heartbeat:
+        proof["heartbeat_age_seconds"]=round((int(time.time()*1000)-heartbeat["status_written_at_ms"])/1000)
+        proof["websocket_connections"]=heartbeat.get("websocket_connections",[])
+        proof["websocket_details"]=heartbeat.get("websocket_details",{})
+        proof["recent_gaps"]=heartbeat.get("unresolved_gaps",[])[-6:]
+        proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
+        proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
+        proof["collector_counts"]={str(i.get("market"))+":"+str(i.get("symbol")):i.get("observed_count")
+                                   for i in heartbeat.get("sources",[])}
+    else:
+        proof["heartbeat_state"]="missing_or_invalid"
     print(json.dumps(proof,ensure_ascii=False))
     with open("/tmp/lumex-flow-proof.md","w",encoding="utf-8") as f:
         f.write("## LUMEX Gate WebSocket minute snapshots\n\n")
@@ -66,6 +89,9 @@ def main():
         f.write(f"- Checked snapshots: {proof['snapshots_read']}\n")
         f.write(f"- Fresh markets: {', '.join(proof['recent_markets']) or 'none'}\n")
         f.write(f"- Invalid payloads: {', '.join(proof['invalid']) or 'none'}\n")
+        f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
+        f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
+        f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
         f.write("- **NOT a full market continuity/24h/7d certification. UID/PRO page remains hidden.**\n")
     if not proof["ok"]:
         raise SystemExit("Gate observed trade snapshots absent, stale or malformed (no invented fallback)")

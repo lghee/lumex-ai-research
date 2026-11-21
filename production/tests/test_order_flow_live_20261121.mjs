@@ -22,3 +22,24 @@ assert.equal(parseGatePacket('spot',{channel:'futures.trades',event:'update',res
 assert.equal(decimalId('00009'),'9');assert.equal(orderIdAfter('100','99'),true);
 assert.equal(orderIdAfter('100','100'),false);assert.equal(orderIdAfter('90','100'),false);
 console.log('PASS phase33 Gate source unit validation, venue isolation, IDs and futures multiplier');
+
+const {OrderFlowLiveLogic}=await import('../src/order-flow-live.mjs');
+const objects=new Map();
+const state=new Map();
+const ctx={storage:{
+ get:async key=>state.get(key)||null,
+ put:async(key,value)=>state.set(key,value),
+ setAlarm:async()=>{}
+}};
+const flow=new OrderFlowLiveLogic(ctx,{MARKET_DATA:{
+ put:async (key,body)=>objects.set(key,JSON.parse(body))
+}});
+await flow.ready;
+await flow.persist();
+const status=objects.get('market-hub/order-flow/v1/live/gate/status.json');
+assert.equal(status?.schema,'lumex_gate_live_observation_health_v1');
+assert.equal(status?.customer_launch_ready,false);
+assert.equal(status?.live_verified,false);
+assert.equal(status?.sources?.length,8);
+assert.equal(objects.size,1,'never invent minute snapshots when the source is silent');
+console.log('PASS phase33 observer heartbeat is independent of trade collection and fail-closed');
