@@ -84,17 +84,21 @@ export class OrderFlowLiveLogic{
    websocket_close_details:(this.state.websocket_close_details||[]).slice(-8),
    futures_last_pong_ms:this.state.futures_last_pong_ms||null,
    futures_ws_circuit_until:this.state.futures_ws_circuit_until||0,
+   futures_ws_circuit_trips:this.state.futures_ws_circuit_trips||0,
    futures_1006_last_3m:(this.state.futures_1006_recent_ms||[])
      .filter(t=>now-t<180000).length,
    futures_rest_standby:{
      active:decideRestStandby(this.state,now).use_rest_standby||
-       this.sockets.get('um-futures')?.readyState!==1,
+       this.sockets.get('um-futures')?.readyState!==1||
+       !FLOW_SYMBOLS.every(symbol=>fresh(this.state.last_event_ms['um-futures:'+symbol],now)),
      last_http_ok_ms:this.state.futures_rest_last_ok_ms||{},
      last_trade_ms:this.state.futures_rest_last_trade_ms||{},
      last_saved_ms:this.state.futures_rest_last_saved_ms||{},
      last_error:this.state.futures_rest_last_error||{},
      cursor:this.state.futures_rest_cursor||{},
      requests:this.state.futures_rest_requests||0,
+     skipped_windows:this.state.futures_rest_skipped_windows||0,
+     contiguous_success_cursor:true,
      source:'gateio_rest',websocket_merged:false,customer_launch_ready:false
    },
    rest_replay_pending:this.state.rest_replay_pending?.length||0,
@@ -281,11 +285,20 @@ export class OrderFlowLiveLogic{
      recent.push(at);
      this.state.futures_1006_recent_ms=recent.slice(-16);
      if(recent.length>=3){
-      this.state.futures_ws_circuit_until=at+5*60000;
+      const trips=(this.state.futures_ws_circuit_trips||0)+1;
+      this.state.futures_ws_circuit_trips=trips;
+      // If the provider/egress repeatedly drops connections, keep the
+      // proven separate REST standby instead of a reconnect storm.
+      const pauseMin=Math.min(30,5*2**Math.min(trips-1,3));
+      this.state.futures_ws_circuit_until=at+pauseMin*60000;
       recordGap(this.state,'futures_ws_circuit_rest_standby','um-futures');
      }
     }
     const duration=Date.now()-(this.connectionStarted[market]||Date.now());
+    if(market==='um-futures'&&duration>120000){
+     this.state.futures_ws_circuit_trips=0;
+     this.state.futures_1006_recent_ms=[];
+    }
     this.failureStreak[market]=duration>120000?0:Math.min(4,(this.failureStreak[market]||0)+1);
     this.retryUntil[market]=Date.now()+Math.min(45000,2000*2**this.failureStreak[market]);
     recordGap(this.state,'websocket_disconnected',market);
@@ -338,56 +351,63 @@ export class OrderFlowLiveLogic{
    a.last_trade_ms=Math.max(a.last_trade_ms,x.ts);
   }
  }
- async runFuturesRestStandby(now=Date.now()){
+ async runFuturesRestStandby(now=Date.now(),collector=collectStandbySlice){
   if(this.env.AUTO_GATE_FUTURES_REST_STANDBY!=='true')return;
   const active=this.sockets.get('um-futures')?.readyState===1;
-  if(active&&!decideRestStandby(this.state,now).use_rest_standby)return;
+  const allFresh=FLOW_SYMBOLS.every(symbol=>
+   fresh(this.state.last_event_ms['um-futures:'+symbol],now));
+  // An OPEN socket with no current executions is not a healthy feed.
+  if(active&&allFresh&&!decideRestStandby(this.state,now).use_rest_standby)return;
   if(!this.env.MARKET_DATA){
    recordGap(this.state,'futures_rest_standby_r2_unavailable','um-futures');return;
   }
-  const end=lastClosedSlice(now),cursor=this.state.futures_rest_cursor||(this.state.futures_rest_cursor={});
+  const end=lastClosedSlice(now);
+  const cursor=this.state.futures_rest_cursor||(this.state.futures_rest_cursor={});
   const ok=this.state.futures_rest_last_ok_ms||(this.state.futures_rest_last_ok_ms={});
   const tradeTs=this.state.futures_rest_last_trade_ms||(this.state.futures_rest_last_trade_ms={});
   const saved=this.state.futures_rest_last_saved_ms||(this.state.futures_rest_last_saved_ms={});
   const errors=this.state.futures_rest_last_error||(this.state.futures_rest_last_error={});
-  const tasks=[];
-  for(const symbol of FLOW_SYMBOLS){
-   // Two closed ten-second windows per 15-second alarm: enough to catch up
-   // over time, but never invent earlier data if an outage exceeds 2 min.
+  // Process each symbol in strict time order, at most two 10-second slots per
+  // alarm. Different symbols can proceed in parallel, not adjacent slots.
+  await Promise.all(FLOW_SYMBOLS.map(async symbol=>{
    let last=Number(cursor[symbol]);
    if(!Number.isSafeInteger(last)||last>end||end-last>120000){
-    if(Number.isSafeInteger(last)&&end-last>120000)
+    if(Number.isSafeInteger(last)&&last>0&&end-last>120000){
      recordGap(this.state,'futures_rest_standby_cursor_skipped','um-futures:'+symbol);
+     this.state.futures_rest_skipped_windows=(this.state.futures_rest_skipped_windows||0)+1;
+    }
     last=end-20000;
    }
-   for(const at of [last+10000,last+20000]){
+   for(let step=0;step<2;step++){
+    const at=last+10000;
     if(at>end)break;
-    tasks.push({symbol,at});
-   }
-  }
-  // No requests beyond 8 per alarm, 1000 trades per 10s slice per market.
-  await Promise.all(tasks.slice(0,8).map(async ({symbol,at})=>{
-   let proof;
-   try{
-    proof=await collectStandbySlice(symbol,at,this.state.multipliers,{now});
-    await this.env.MARKET_DATA.put(standbyR2Key(symbol,at),JSON.stringify(proof),
+    try{
+     const proof=await collector(symbol,at,this.state.multipliers,{now});
+     // A negative or incomplete result is preserved as explicit evidence;
+     // it must not move the successful contiguous cursor.
+     await this.env.MARKET_DATA.put(standbyR2Key(symbol,at),JSON.stringify(proof),
       {httpMetadata:{contentType:'application/json'}});
-    saved[symbol]=now;
-    cursor[symbol]=Math.max(Number(cursor[symbol])||0,at);
-    if(proof.ok){
+     saved[symbol]=now;
+     this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
+     if(!proof.ok){
+      errors[symbol]={at_ms:now,slice_start_ms:at,reason:proof.status};
+      recordGap(this.state,'futures_rest_standby_'+String(proof.status).slice(0,55),
+       'um-futures:'+symbol);
+      break;
+     }
+     cursor[symbol]=at;
+     last=at;
      ok[symbol]=now;
      if(proof.last_trade_ms)tradeTs[symbol]=proof.last_trade_ms;
      delete errors[symbol];
-    }else{
-     errors[symbol]={at_ms:now,reason:proof.status};
-     recordGap(this.state,'futures_rest_standby_'+proof.status,'um-futures:'+symbol);
+    }catch{
+     errors[symbol]={at_ms:now,slice_start_ms:at,reason:'rest_or_r2_failed'};
+     recordGap(this.state,'futures_rest_standby_io_failed','um-futures:'+symbol);
+     // Retry the same slice on the next alarm, never jump over a failed R2 write.
+     this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
+     break;
     }
-   }catch{
-    errors[symbol]={at_ms:now,reason:'rest_or_r2_failed'};
-    recordGap(this.state,'futures_rest_standby_io_failed','um-futures:'+symbol);
-    // Don't advance cursor: try the same 10s time slice again next alarm.
    }
-   this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
   }));
  }
  async persist(){
