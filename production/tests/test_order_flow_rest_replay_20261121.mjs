@@ -29,7 +29,7 @@ const f=await boundedGateRestReplay('um-futures','BTC',minute,
   assert.equal(opts.headers['X-Gate-Size-Decimal'],'1');
   futureUrls.push(url);return new Response(JSON.stringify([future(10,minute+200)]));}});
 assert.equal(f.status,'bounded_rest_pages_exhausted');
-assert.equal(f.observed_sell_quote_usdt,0.12);
+assert.ok(Math.abs(f.observed_sell_quote_usdt-0.12)<1e-10,'floating-point USDT totals must compare with tolerance');
 assert.equal(new URL(futureUrls[0]).searchParams.get('offset'),'0');
 assert.equal((await boundedGateRestReplay('um-futures','BTC',minute,{}, {now})).status,
  'futures_contract_units_unverified');
