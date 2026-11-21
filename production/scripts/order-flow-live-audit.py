@@ -106,7 +106,8 @@ def main():
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
-        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")        f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
+        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
+        f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
 
         f.write(f"- Futures decimal request: {proof.get('futures_decimal_header_requested','unavailable')}\n")
         f.write(f"- Filtered vs malformed: {proof.get('message_diagnostics',{})}\n")
