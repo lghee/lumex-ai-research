@@ -106,6 +106,7 @@
   "vars": {
     "LUMEX_SITE_URL": "https://lumexbot.com",
     "AUTO_LIVE_STREAM": "true",
+    "AUTO_PUBLIC_CHARTS": "true",
     "AUTO_WHALE_FETCH": "true",
     "AUTO_DERIVATIVES_FETCH": "true",
     "AUTO_LEGACY_BACKFILL": "true",
