@@ -41,6 +41,6 @@ const env={MARKET_DATA:{
 const result=await collectGateObservedCoverage(env,now);
 assert.equal(result.ok,true);assert.equal(result.hourly_observed,true);
 assert.equal(db.get(hourlyProofKey(start)).customer_launch_ready,false);
-assert.equal(db.get(rollingProofKey).accepted_hours_24h,0);
+assert.equal(db.get(rollingProofKey).accepted_hours_24h,1,'the just-written closed hour is valid, earlier hours are missing');
 assert.equal(db.get(rollingProofKey).observed_minutes_continuous_7d,false);
 console.log('PASS Phase34 60-minute source-isolated windows, immutable historical proof, no premature 24h/7d/live release');
