@@ -4180,6 +4180,14 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./liquidity-intelligence.mjs')).serveLiquidity(request,env);
   }
+  if(path==='/market-hub/v1/order-flow-live-health'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    if(!env.ORDER_FLOW_LIVE_COLLECTOR)return hubReply({ok:false,error:'collector_not_bound',customer_launch_ready:false},503);
+    try{
+      return await env.ORDER_FLOW_LIVE_COLLECTOR.getByName('gate-live-phase33')
+        .fetch('https://flow/status',{method:'GET'});
+    }catch{return hubReply({ok:false,error:'collector_unavailable',customer_launch_ready:false},503);}
+  }
   if(path==='/market-hub/v1/order-flow-history'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./order-flow-verified.mjs')).serveOrderFlowHistory(request,env);
@@ -4898,6 +4906,12 @@ export default{
       ctx.waitUntil(import('./btc-onchain.mjs').then(m=>m.collectBtcOnchainDaily(env)).catch(()=>console.error('btc_onchain_daily_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(collectPublicPulse(env).catch(()=>console.error('public_pulse_collect_failed')));
+    if(controller.cron==='* * * * *'&&env.AUTO_ORDER_FLOW_LIVE==='true'&&env.ORDER_FLOW_LIVE_COLLECTOR)
+      ctx.waitUntil(env.ORDER_FLOW_LIVE_COLLECTOR.getByName('gate-live-phase33')
+        .fetch('https://flow/tick',{method:'POST'}).then(async r=>{
+          if(!r.ok)console.warn('phase33_order_flow_collector_unavailable',r.status);
+          await r.body?.cancel();
+        }).catch(()=>console.warn('phase33_order_flow_collector_tick_failed')));
     const live=LIVE_ENABLED(env)&&Boolean(env.MARKET_LIVE_COLLECTOR);
     if(controller.cron==='*/5 * * * *'&&env.AUTO_DERIVATIVES_FETCH==='true')
       ctx.waitUntil(collectGateDerivatives(env).catch(()=>console.error('derivatives_collect_failed')));
@@ -4933,3 +4947,6 @@ export default{
     }
   }
 };
+
+// Phase 33 isolated observer: no customer-facing order-flow feature flag.
+export {OrderFlowLiveCollector} from './order-flow-live.mjs';
