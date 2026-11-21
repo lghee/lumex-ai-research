@@ -4604,7 +4604,14 @@ async function hubRoute(request,env){
     const requested=u.searchParams.get('limit')||'500';
     if(!['500','850'].includes(requested))return hubReply({ok:false,error:'invalid_candle_limit'},400);
     try{return hubReply(await hubGetCandles(env,symbol,interval,Number(requested)))}
-    catch(e){return hubReply({ok:false,error:safeError(e),symbol,interval},503)}
+    catch(e){
+      if(interval===240){
+        try{return hubReply(await (await import('./regime-fourhour-fallback.mjs'))
+          .regimeFourHourFallback(env,symbol,Number(requested)))}
+        catch(recoveryError){return hubReply({ok:false,error:'verified_fourhour_sources_unavailable',symbol,interval},503)}
+      }
+      return hubReply({ok:false,error:safeError(e),symbol,interval},503);
+    }
   }
   if((path==='/market-hub/v1/observed-pressure'||path==='/market-hub/v1/observed-replay')&&method==='GET') {
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
