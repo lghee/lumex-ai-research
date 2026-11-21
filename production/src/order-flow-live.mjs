@@ -221,7 +221,7 @@ export class OrderFlowLiveLogic{
    const subscribe=()=>{
     if(didSubscribe)return;
     didSubscribe=true;
-    this.failureStreak[market]=0;this.retryUntil[market]=0;
+    this.retryUntil[market]=0; // reset failure streak only after a sustained session
     this.state.reconnects++;
     try{ws.send(JSON.stringify({time:Math.floor(Date.now()/1000),
       channel,event:'subscribe',payload:FLOW_SYMBOLS.map(pair)}));}
@@ -255,7 +255,8 @@ export class OrderFlowLiveLogic{
     details.push({market,at_ms:Date.now(),code:Number(event?.code||0),
      clean:Boolean(event?.wasClean),reason:String(event?.reason||'').slice(0,55)});
     this.state.websocket_close_details=details.slice(-24);
-    this.failureStreak[market]=Math.min(4,(this.failureStreak[market]||0)+1);
+    const duration=Date.now()-(this.connectionStarted[market]||Date.now());
+    this.failureStreak[market]=duration>120000?0:Math.min(4,(this.failureStreak[market]||0)+1);
     this.retryUntil[market]=Date.now()+Math.min(45000,2000*2**this.failureStreak[market]);
     recordGap(this.state,'websocket_disconnected',market);
     this.queueRestGap(market);
