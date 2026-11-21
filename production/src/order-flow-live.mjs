@@ -11,6 +11,7 @@ import {NATIVE_PROBE_URL,PROBE_SAMPLE_MS,nativeProbeState,shouldRunNativeProbe,
 import {upgradeGateFuturesDecimalWebSocket} from './order-flow-ws-upgrade.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
+const WS_HANDSHAKE_REVISION='phase38_1_ws_handshake_deadline_fixed_20261121';
 export const gateReplayOptions=(market,now=Date.now())=>({now,limit:1000,maxPages:market==='um-futures'?6:3});
 const pair=s=>s+'_USDT';
 const fresh=(time,now=Date.now())=>Number.isFinite(time)&&time>0&&now-time<45000;
@@ -48,6 +49,17 @@ export class OrderFlowLiveLogic{
     this.state=previous;
     recordGap(this.state,'collector_restarted_without_ws_continuity','all');
    }
+   // This existing checkpoint may carry a 5-30 minute backoff accumulated
+   // when AbortSignal.timeout(10000) was repeatedly killing a HEALTHY WSS.
+   // Allow exactly ONE fresh connection attempt after the transport fix.
+   // Preserve every trade ID, observed bucket, REST cursor and gap proof.
+   if(this.state.ws_handshake_revision!==WS_HANDSHAKE_REVISION){
+    this.state.ws_handshake_revision=WS_HANDSHAKE_REVISION;
+    this.state.futures_ws_circuit_until=0;
+    this.state.futures_ws_circuit_trips=0;
+    this.state.futures_1006_recent_ms=[];
+    recordGap(this.state,'futures_ws_handshake_fix_one_time_retry','um-futures');
+   }
   });
  }
  async fetch(request){
@@ -79,7 +91,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:'phase38_1_ws_handshake_deadline_fixed_20261121',
+   runtime_revision:WS_HANDSHAKE_REVISION,
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
