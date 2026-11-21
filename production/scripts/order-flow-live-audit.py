@@ -94,6 +94,21 @@ def audit_futures_rest_standby(directory, now_ms):
         "source":"gateio_rest","websocket_merged":False,
         "exchange_complete":False,"customer_launch_ready":False}
 
+def rest_contiguous_current(status, now_ms):
+    """Latest REST success proves current bounded observations, never full fills."""
+    if not isinstance(status,dict):return False
+    last_ok=status.get("last_http_ok_ms") or {}
+    cursor=status.get("cursor") or {}
+    errors=status.get("last_error") or {}
+    for symbol in ("BTC","ETH","SOL","XRP"):
+        if errors.get(symbol):return False
+        written=last_ok.get(symbol)
+        at=cursor.get(symbol)
+        if type(written) is not int or type(at) is not int:return False
+        if not (0<=now_ms-written<60000 and 0<=now_ms-at<60000):return False
+        if at%10000!=0:return False
+    return True
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--dir",required=True)
@@ -143,12 +158,7 @@ def main():
             proof["futures_rest_unresolved_errors"]={
                 x:last_error.get(x) for x in ("BTC","ETH","SOL","XRP") if last_error.get(x)
             }
-            verified_all=(not proof["futures_rest_unresolved_errors"] and all(
-                type(last_ok.get(x)) is int and
-                0<=int(time.time()*1000)-last_ok[x]<60000 and
-                type(cursors.get(x)) is int and
-                0<=int(time.time()*1000)-cursors[x]<60000
-                for x in ("BTC","ETH","SOL","XRP")))
+            verified_all=rest_contiguous_current(status,int(time.time()*1000))
             spot_sources=[x for x in heartbeat.get("sources",[]) if x.get("market")=="spot"]
             source_spot_ok=(len(spot_sources)==4 and
                 {x.get("symbol") for x in spot_sources}=={"BTC","ETH","SOL","XRP"} and
