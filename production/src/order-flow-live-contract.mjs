@@ -29,7 +29,7 @@ export function parseGateExecution(market,row,multipliers={},now=Date.now()){
  if(!Number.isFinite(raw))return null;
  const tsRaw=raw>=1e9&&raw<1e11?raw*1000:raw;
  if(!Number.isFinite(tsRaw)||tsRaw<1e12||tsRaw>now+120000||tsRaw<now-172800000)return null;
- const ts=Math.floor(tsRaw);
+ const ts=raw>=1e9&&raw<1e11?Math.round(tsRaw):Math.floor(tsRaw);
  const price=qty(row.price);
  if(!price)return null;
  let taker,base;
