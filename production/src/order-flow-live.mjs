@@ -19,7 +19,7 @@ const cleanState=()=>({
  rest_replay_pending:[],rest_replay_checks:[],last_rest_replay_attempt_ms:0,
  futures_decimal_header_requested:false,
  futures_1006_recent_ms:[],futures_ws_circuit_until:0,
- futures_rest_cursor:{},futures_rest_last_ok_ms:{},futures_rest_last_trade_ms:{},
+ futures_rest_cursor:{},futures_rest_pending_slice:{},futures_rest_last_ok_ms:{},futures_rest_last_trade_ms:{},
  futures_rest_last_saved_ms:{},futures_rest_last_error:{},futures_rest_requests:0,
  filtered_internal_trades:0,filtered_other_quote_trades:0,
  rejected_trade_rows:0,malformed_ws_frames:0,subscription_failures:0
@@ -96,6 +96,7 @@ export class OrderFlowLiveLogic{
      last_saved_ms:this.state.futures_rest_last_saved_ms||{},
      last_error:this.state.futures_rest_last_error||{},
      cursor:this.state.futures_rest_cursor||{},
+     pending_slice:this.state.futures_rest_pending_slice||{},
      requests:this.state.futures_rest_requests||0,
      skipped_windows:this.state.futures_rest_skipped_windows||0,
      contiguous_success_cursor:true,
@@ -363,6 +364,7 @@ export class OrderFlowLiveLogic{
   }
   const end=lastClosedSlice(now);
   const cursor=this.state.futures_rest_cursor||(this.state.futures_rest_cursor={});
+  const pending=this.state.futures_rest_pending_slice||(this.state.futures_rest_pending_slice={});
   const ok=this.state.futures_rest_last_ok_ms||(this.state.futures_rest_last_ok_ms={});
   const tradeTs=this.state.futures_rest_last_trade_ms||(this.state.futures_rest_last_trade_ms={});
   const saved=this.state.futures_rest_last_saved_ms||(this.state.futures_rest_last_saved_ms={});
@@ -371,12 +373,18 @@ export class OrderFlowLiveLogic{
   // alarm. Different symbols can proceed in parallel, not adjacent slots.
   await Promise.all(FLOW_SYMBOLS.map(async symbol=>{
    let last=Number(cursor[symbol]);
+   const queued=Number(pending[symbol]);
+   // On the very first failed slot there is no successful cursor yet.
+   // Keep the failed slot explicitly instead of recomputing from a later end.
+   if(!Number.isSafeInteger(last)&&Number.isSafeInteger(queued)&&
+      queued<=end&&end-queued<=120000)last=queued-10000;
    if(!Number.isSafeInteger(last)||last>end||end-last>120000){
     if(Number.isSafeInteger(last)&&last>0&&end-last>120000){
      recordGap(this.state,'futures_rest_standby_cursor_skipped','um-futures:'+symbol);
      this.state.futures_rest_skipped_windows=(this.state.futures_rest_skipped_windows||0)+1;
     }
     last=end-20000;
+    delete pending[symbol];
    }
    for(let step=0;step<2;step++){
     const at=last+10000;
@@ -390,17 +398,20 @@ export class OrderFlowLiveLogic{
      saved[symbol]=now;
      this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
      if(!proof.ok){
+      pending[symbol]=at;
       errors[symbol]={at_ms:now,slice_start_ms:at,reason:proof.status};
       recordGap(this.state,'futures_rest_standby_'+String(proof.status).slice(0,55),
        'um-futures:'+symbol);
       break;
      }
      cursor[symbol]=at;
+     delete pending[symbol];
      last=at;
      ok[symbol]=now;
      if(proof.last_trade_ms)tradeTs[symbol]=proof.last_trade_ms;
      delete errors[symbol];
     }catch{
+     pending[symbol]=at;
      errors[symbol]={at_ms:now,slice_start_ms:at,reason:'rest_or_r2_failed'};
      recordGap(this.state,'futures_rest_standby_io_failed','um-futures:'+symbol);
      // Retry the same slice on the next alarm, never jump over a failed R2 write.
