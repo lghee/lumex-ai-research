@@ -133,14 +133,12 @@ def main():
                              0<=int(time.time()*1000)-last_ok[x]<120000 and
                              type(cursors.get(x)) is int
                              for x in ("BTC","ETH","SOL","XRP"))
-            source_spot_ok=all(
-                x.get("market")=="spot" or x.get("market")=="um-futures"
-                for x in heartbeat.get("sources",[])
-            ) and all(
-                type(x.get("last_observed_ms")) is int and
-                0<=int(time.time()*1000)-x["last_observed_ms"]<120000
-                for x in heartbeat.get("sources",[]) if x.get("market")=="spot"
-            )
+            spot_sources=[x for x in heartbeat.get("sources",[]) if x.get("market")=="spot"]
+            source_spot_ok=(len(spot_sources)==4 and
+                {x.get("symbol") for x in spot_sources}=={"BTC","ETH","SOL","XRP"} and
+                all(type(x.get("last_observed_ms")) is int and
+                    0<=int(time.time()*1000)-x["last_observed_ms"]<120000
+                    for x in spot_sources))
             proof["ok"]=(rest["ok"] and state_ok and verified_all and source_spot_ok and
                 0<=proof.get("heartbeat_age_seconds",9999)<=120 and
                 spot.issubset(set(proof["recent_markets"])) and not proof["invalid"])
