@@ -1,15 +1,22 @@
-name: LUMEX 90-day order-flow historical import (manual only)
+name: LUMEX order-flow 90-day verified archive refresh
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'production/scripts/order-flow-official-archive.py'
+      - '.github/workflows/lumex-order-flow-bootstrap.yml'
+  schedule:
+    - cron: '17 4 * * *'
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type IMPORT_VERIFIED_90D to upload 8 verified archives'
+        description: 'Type IMPORT_VERIFIED_90D to refresh 8 official markets'
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: lumex-90day-order-flow-import
+  group: lumex-order-flow-archive-import
   cancel-in-progress: false
 jobs:
   archive:
@@ -18,35 +25,39 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      RELEASE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Confirm import and verify existing credentials
+      - name: Verify authorisation and available R2 secrets
         shell: bash
         env:
+          EVENT: ${{ github.event_name }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
-          test "$CONFIRM" = 'IMPORT_VERIFIED_90D' || { echo 'Manual confirmation required'; exit 1; }
-          test -n "$CLOUDFLARE_ACCOUNT_ID" && test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Cloudflare credentials missing'; exit 1; }
-      - name: Fetch Binance OFFICIAL spot and USDT perpetual archives, validate 8 markets
+          if [[ "$EVENT" = workflow_dispatch ]]; then
+            test "$CONFIRM" = 'IMPORT_VERIFIED_90D' || { echo 'Manual confirmation required'; exit 1; }
+          fi
+          test -n "$CLOUDFLARE_ACCOUNT_ID" && test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Cloudflare auth missing'; exit 1; }
+      - name: Download and validate exact 90-day source continuity in 8 markets
         run: python3 production/scripts/order-flow-official-archive.py --out /tmp/lumex-flow
-      - name: Stop before writing unless ALL markets are valid
+      - name: Ensure 8/8 inputs and schema before writing any object
         run: |
           python3 - <<'PY'
           import json,pathlib
           d=json.load(open('/tmp/lumex-flow/manifest.json'))
           files=list(pathlib.Path('/tmp/lumex-flow').glob('*.json'))
-          assert d.get('ok') is True and len(d['validated_sources'])==8 and len(files)==9
-          for x in d['validated_sources']:
-              assert x['hours']>=2160 and x['bytes']<520000
-          print('8/8 source datasets, 90d continuous window, size verified')
+          assert d['ok'] is True and len(d['validated_sources'])==8 and len(files)==9
+          for s in d['validated_sources']:
+              assert s['hours']>=2160 and s['bytes']<520000
+          print('PASS eight official source markets, no missing 1h intervals')
           PY
-      - name: Install current pinned repo Wrangler
+      - name: Install existing repository Wrangler (no Worker deployment)
         working-directory: production
         run: npm ci --no-audit --no-fund
-      - name: Write ONLY order-flow archive namespace in existing R2 bucket
+      - name: Upload immutable new release and verify each R2 object checksum
         shell: bash
         working-directory: production
         run: |
@@ -54,22 +65,43 @@ jobs:
           for market in spot um-futures; do
             for symbol in BTC ETH SOL XRP; do
               input="/tmp/lumex-flow/${symbol}-${market}.json"
+              dest="lumex-ai-data/market-hub/order-flow/v1/hourly/releases/${RELEASE_ID}/${symbol}-${market}.json"
               test -s "$input"
-              npx wrangler r2 object put "lumex-ai-data/market-hub/order-flow/v1/hourly/${symbol}-${market}.json" --file "$input" --remote
+              npx wrangler r2 object put "$dest" --file "$input" --remote
+              npx wrangler r2 object get "$dest" --file "/tmp/r2-verify.json" --remote
+              cmp "$input" "/tmp/r2-verify.json" || { echo "R2 readback mismatch"; exit 1; }
             done
           done
-          echo 'Historical import requested. Live data not verified; UID page remains unpublished.'
-      - name: Summarize data provenance (no private information)
+          echo 'All eight new-release objects stored and read-back verified'
+      - name: Atomically activate new release (LAST WRITE ONLY)
+        shell: bash
+        working-directory: production
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os,time
+          pointer={'schema':'lumex_flow_archive_pointer_v1','complete':True,
+            'release_id':os.environ['RELEASE_ID'],
+            'source':'official_binance_public_1h_klines',
+            'market_count':8,'created_at_ms':int(time.time()*1000),
+            'symbols':['BTC','ETH','SOL','XRP'],'markets':['spot','um-futures']}
+          open('/tmp/lumex-flow-pointer.json','w').write(json.dumps(pointer,separators=(',',':')))
+          PY
+          npx wrangler r2 object put 'lumex-ai-data/market-hub/order-flow/v1/current.json' --file '/tmp/lumex-flow-pointer.json' --remote
+          npx wrangler r2 object get 'lumex-ai-data/market-hub/order-flow/v1/current.json' --file '/tmp/lumex-flow-pointer-readback.json' --remote
+          cmp '/tmp/lumex-flow-pointer.json' '/tmp/lumex-flow-pointer-readback.json'
+          echo 'R2 verified historical release activated, NOT live verified and NOT UI launched'
+      - name: Summarize data readiness without implying live
         if: always()
         run: |
           if test -s /tmp/lumex-flow/manifest.json; then
             python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
           d=json.load(open('/tmp/lumex-flow/manifest.json'))
-          print('## Official Binance 90-day order-flow backfill')
-          print('Validated sources:',len(d.get('validated_sources',[])),'/ 8')
+          print('## Verified LUMEX archival CVD sources')
+          print('Valid sources:',len(d.get('validated_sources',[])),'/ 8')
           for x in d.get('validated_sources',[]):
-              print('-',x['symbol'],x['market'],x['hours'],'hours')
-          print('**This import does not enable the UID/PRO customer page. Real-time proof is separate.**')
+              print('-',x['symbol'],x['market'],x['hours'],'complete hours')
+          print('**Not real-time. UID/PRO order-flow page remains unpublished pending independent live verification.**')
           PY
           fi
