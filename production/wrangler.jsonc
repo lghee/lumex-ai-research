@@ -121,7 +121,8 @@
     "AUTO_OFFICIAL_NEWS": "true",
     "AUTO_TOP50_UNIVERSE": "true",
     "AUTO_ORDER_FLOW_LIVE": "true",
-    "AUTO_ORDER_FLOW_COVERAGE": "true"
+    "AUTO_ORDER_FLOW_COVERAGE": "true",
+    "AUTO_ORDER_FLOW_REST_REPLAY": "true"
   },
   "keep_vars": true,
   "observability": {
