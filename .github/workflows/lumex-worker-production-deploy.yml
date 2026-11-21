@@ -3,9 +3,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'production/src/index.js'
-      - 'production/src/order-flow-*.mjs'
-      - 'production/tests/test_order_flow_live_20261121.mjs'
+      # Any deployed Worker runtime change is auto-released to Cloudflare after full safety checks.
+      - 'production/src/**'
+      - 'production/engine/**'
+      - 'production/relay/**'
+      - 'production/server.py'
+      - 'production/Dockerfile'
       - 'production/wrangler.jsonc'
       - 'production/package.json'
       - '.github/workflows/lumex-worker-production-deploy.yml'
