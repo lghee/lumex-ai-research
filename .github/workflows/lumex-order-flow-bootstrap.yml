@@ -1,0 +1,75 @@
+name: LUMEX 90-day order-flow historical import (manual only)
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type IMPORT_VERIFIED_90D to upload 8 verified archives'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: lumex-90day-order-flow-import
+  cancel-in-progress: false
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Confirm import and verify existing credentials
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          test "$CONFIRM" = 'IMPORT_VERIFIED_90D' || { echo 'Manual confirmation required'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" && test -n "$CLOUDFLARE_API_TOKEN" || { echo 'Cloudflare credentials missing'; exit 1; }
+      - name: Fetch Binance OFFICIAL spot and USDT perpetual archives, validate 8 markets
+        run: python3 production/scripts/order-flow-official-archive.py --out /tmp/lumex-flow
+      - name: Stop before writing unless ALL markets are valid
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          d=json.load(open('/tmp/lumex-flow/manifest.json'))
+          files=list(pathlib.Path('/tmp/lumex-flow').glob('*.json'))
+          assert d.get('ok') is True and len(d['validated_sources'])==8 and len(files)==9
+          for x in d['validated_sources']:
+              assert x['hours']>=2160 and x['bytes']<520000
+          print('8/8 source datasets, 90d continuous window, size verified')
+          PY
+      - name: Install current pinned repo Wrangler
+        working-directory: production
+        run: npm ci --no-audit --no-fund
+      - name: Write ONLY order-flow archive namespace in existing R2 bucket
+        shell: bash
+        working-directory: production
+        run: |
+          set -euo pipefail
+          for market in spot um-futures; do
+            for symbol in BTC ETH SOL XRP; do
+              input="/tmp/lumex-flow/${symbol}-${market}.json"
+              test -s "$input"
+              npx wrangler r2 object put "lumex-ai-data/market-hub/order-flow/v1/hourly/${symbol}-${market}.json" --file "$input" --remote
+            done
+          done
+          echo 'Historical import requested. Live data not verified; UID page remains unpublished.'
+      - name: Summarize data provenance (no private information)
+        if: always()
+        run: |
+          if test -s /tmp/lumex-flow/manifest.json; then
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d=json.load(open('/tmp/lumex-flow/manifest.json'))
+          print('## Official Binance 90-day order-flow backfill')
+          print('Validated sources:',len(d.get('validated_sources',[])),'/ 8')
+          for x in d.get('validated_sources',[]):
+              print('-',x['symbol'],x['market'],x['hours'],'hours')
+          print('**This import does not enable the UID/PRO customer page. Real-time proof is separate.**')
+          PY
+          fi
