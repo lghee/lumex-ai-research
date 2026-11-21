@@ -10,7 +10,7 @@ export function normalizeBook(venue,payload,symbol,now=Date.now()){
  let bids,asks,ts;
  if(venue==='Bybit'){
    if(payload?.retCode!==0||payload?.result?.s!==symbol)return null;
-   bids=payload.result.b;asks=payload.result.a;ts=num(payload.ts,1500000000000,now+2000);
+   bids=payload.result.b;asks=payload.result.a;ts=num(payload.result.ts,1500000000000,now+2000);
  }else{
    if(!Number.isSafeInteger(Number(payload?.lastUpdateId)))return null;
    bids=payload.bids;asks=payload.asks;ts=num(payload.T??payload.E,1500000000000,now+2000);
@@ -73,10 +73,18 @@ export async function sampleLiquidity(symbol,{now=Date.now(),fetchImpl=fetch}={}
  const results=await Promise.all(sources.map(async ([venue,url])=>{
   try{return normalizeBook(venue,await publicJson(url,fetchImpl),symbol,now)}catch{return null}
  }));
- const books=results.filter(Boolean);if(!books.length)return null;
+ const books=results.filter(Boolean);
+ if(books.length<2){
+   try{
+     const other=await (await import('./liquidity-futures-alternatives.mjs'))
+       .alternativeBooks(symbol,{now,fetchImpl});
+     for(const book of other)if(!books.some(b=>b.exchange===book.exchange))books.push(book);
+   }catch{}
+ }
+ if(!books.length)return null;
  return {ok:true,schema:'lumex_public_liquidity_v1',symbol,generated_at_ms:now,
   venues:books.map(b=>({...b,depth:[.1,.5,1].map(n=>depthStats(b,n))})),
-  available_venues:books.length,venue_target:2,orders_enabled:false,snapshot_only:true,
+  available_venues:books.length,venue_target:4,orders_enabled:false,snapshot_only:true,
   not_market_total:true,all_levels_base_quantity:true,
   notice:'visible_orderbook_only_no_execution_or_fee_guarantee'};
 }

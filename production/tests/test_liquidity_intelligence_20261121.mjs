@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {normalizeBook,depthStats,simulateOrder,sampleLiquidity,serveLiquidity} from '../src/liquidity-intelligence.mjs';
 const now=Date.UTC(2026,10,21,8,0);
-const a={retCode:0,ts:now,result:{s:'BTCUSDT',b:[['100','2'],['99','3']],a:[['101','3'],['102','4']]}};
+const a={retCode:0,time:now+300,result:{s:'BTCUSDT',ts:now,b:[['100','2'],['99','3']],a:[['101','3'],['102','4']]}};
 const b={lastUpdateId:12,T:now,bids:[['99.9','2'],['99.8','3']],asks:[['100.3','3'],['100.4','4']]};
 const book=normalizeBook('Bybit',a,'BTCUSDT',now);
 assert.equal(book.best_bid,100);
@@ -10,7 +10,7 @@ assert.equal(depthStats(book,.5).bid_usdt,200);
 assert.equal(simulateOrder(book,'buy',100).fully_covered,true);
 assert.equal(simulateOrder(book,'sell',100000).fully_covered,false);
 assert.equal(simulateOrder(book,'sell',100000).avg_price,null);
-assert.equal(normalizeBook('Bybit',{...a,ts:now-20000},'BTCUSDT',now),null);
+assert.equal(normalizeBook('Bybit',{...a,result:{...a.result,ts:now-20000}},'BTCUSDT',now),null);
 assert.equal(normalizeBook('Bybit',{...a,result:{...a.result,b:[['100','2'],['100','3']]}},'BTCUSDT',now),null);
 assert.equal(normalizeBook('Binance',b,'BTCUSDT',now).best_ask,100.3);
 const fakeFetch=async url=>({ok:true,headers:new Headers(),text:async()=>JSON.stringify(url.includes('bybit')?a:b)});
