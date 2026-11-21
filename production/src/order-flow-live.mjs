@@ -8,6 +8,7 @@ import {FLOW_SYMBOLS,parseGatePacket,orderIdAfter} from './order-flow-live-contr
 import {collectStandbySlice,standbyR2Key,decideRestStandby,lastClosedSlice} from './order-flow-futures-rest-standby.mjs';
 import {NATIVE_PROBE_URL,PROBE_SAMPLE_MS,nativeProbeState,shouldRunNativeProbe,
  nativeProbeSubscription,processNativeProbeFrame,nativeProbeClose} from './order-flow-native-transport-probe.mjs';
+import {upgradeGateFuturesDecimalWebSocket} from './order-flow-ws-upgrade.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
 export const gateReplayOptions=(market,now=Date.now())=>({now,limit:1000,maxPages:market==='um-futures'?6:3});
@@ -78,7 +79,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:'phase38_native_gate_transport_probe_20261121',
+   runtime_revision:'phase38_1_ws_handshake_deadline_fixed_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
@@ -293,9 +294,10 @@ export class OrderFlowLiveLogic{
    let ws;
    if(market==='um-futures'){
     // Gate futures truncates fractional sizes unless decimal mode is requested.
-    const upgraded=await fetch('https://fx-ws.gateio.ws/v4/ws/usdt',{
-      headers:{Upgrade:'websocket','X-Gate-Size-Decimal':'1'},
-      signal:AbortSignal.timeout(10000)});
+    // Handshake-only deadline: unlike AbortSignal.timeout(10000), this
+    // timer is CANCELLED once the 101 upgrade succeeds. Otherwise the
+    // active WebSocket can be aborted ten seconds later with code 1006.
+    const upgraded=await upgradeGateFuturesDecimalWebSocket();
     if(upgraded.status!==101||!upgraded.webSocket){
      recordGap(this.state,'futures_decimal_upgrade_unavailable',market);
      this.state.connection_failures++;return;
