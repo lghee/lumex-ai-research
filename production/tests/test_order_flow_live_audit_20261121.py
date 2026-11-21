@@ -44,7 +44,12 @@ class GateObservedAudit(unittest.TestCase):
     "observed_trades":2,"buy_quote_usdt":1.2,"sell_quote_usdt":1.3,
     "websocket_merged":False,"binance_archive_merged":False,
     "exchange_trade_completeness_verified":False,
-    "customer_launch_ready":False,"synthetic_values":False}
+    "customer_launch_ready":False,"synthetic_values":False,
+    "source_join_allowed":False,"full_page_reused":False,
+    "request_count":1,"adaptive_time_partitioned":False,
+    "min_partition_seconds":10,
+    "segment_proofs":[{"from_ms":slot,"to_ms":slot+10000,
+      "observed_trades":2,"api_limit":1000,"source":"gateio_rest"}]}
   with tempfile.TemporaryDirectory() as folder:
    p=pathlib.Path(folder)
    for sym in ("BTC","ETH","SOL","XRP"):
@@ -85,5 +90,47 @@ class GateObservedAudit(unittest.TestCase):
   self.assertFalse(mod.phase37_runtime_features_present(
     {**features,"futures_ws_circuit_trips":"2"}))
   self.assertFalse(mod.phase37_runtime_features_present({}))
+ def test_adaptive_rest_proves_2500_real_rows_without_reusing_full_pages(self):
+  slot=int(time.time()*1000)//10000*10000-20000
+  parts=[]
+  cursor=slot
+  for span,count in ((2000,500),(3000,750),(2000,500),(3000,750)):
+   parts.append({"from_ms":cursor,"to_ms":cursor+span,
+     "observed_trades":count,"api_limit":1000,"source":"gateio_rest"})
+   cursor+=span
+  base={"slice_start_ms":slot,"observed_trades":2500,
+    "request_count":7,"adaptive_time_partitioned":True,
+    "segment_proofs":parts,"min_partition_seconds":2,
+    "source_join_allowed":False,"full_page_reused":False}
+  self.assertTrue(mod.verify_rest_partition_proofs(base))
+  self.assertFalse(mod.verify_rest_partition_proofs(
+    {**base,"segment_proofs":[{**parts[0],"observed_trades":1000},*parts[1:]]}))
+  self.assertFalse(mod.verify_rest_partition_proofs(
+    {**base,"segment_proofs":[parts[0],{**parts[1],"from_ms":parts[1]["from_ms"]+1000},*parts[2:]]}))
+  self.assertFalse(mod.verify_rest_partition_proofs({**base,"request_count":20}))
+  self.assertFalse(mod.verify_rest_partition_proofs({**base,"full_page_reused":True}))
+  self.assertFalse(mod.verify_rest_partition_proofs({**base,"adaptive_time_partitioned":False}))
+  self.assertFalse(mod.verify_rest_partition_proofs({**base,"observed_trades":2499}))
+  self.assertFalse(mod.verify_rest_partition_proofs({**base,"source_join_allowed":True}))
+  now=int(time.time()*1000)
+  with tempfile.TemporaryDirectory() as folder:
+   directory=pathlib.Path(folder)
+   for symbol in ("BTC","ETH","SOL","XRP"):
+    payload={"schema":"lumex_gate_futures_rest_standby_v1",
+      "source":"gateio_rest","market":"um-futures","symbol":symbol,
+      "checked_at_ms":now-1000,"ok":True,"status":"observed_rest_trades",
+      "websocket_merged":False,"binance_archive_merged":False,
+      "customer_launch_ready":False,"synthetic_values":False,
+      "exchange_trade_completeness_verified":False,
+      "buy_quote_usdt":25000,"sell_quote_usdt":30000,**base}
+    (directory/(symbol+".json")).write_text(json.dumps(payload),encoding="utf-8")
+   proof=mod.audit_futures_rest_standby(folder,now)
+   self.assertTrue(proof["ok"])
+   self.assertEqual(set(proof["adaptive_symbols"]),{"BTC","ETH","SOL","XRP"})
+   self.assertEqual(proof["api_requests"],28)
+   broken=json.loads((directory/"ETH.json").read_text())
+   broken["segment_proofs"][1]["observed_trades"]=1000
+   (directory/"ETH.json").write_text(json.dumps(broken))
+   self.assertFalse(mod.audit_futures_rest_standby(folder,now)["ok"])
 if __name__=="__main__":
  unittest.main()
