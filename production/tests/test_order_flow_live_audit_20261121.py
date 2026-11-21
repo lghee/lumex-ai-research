@@ -74,5 +74,16 @@ class GateObservedAudit(unittest.TestCase):
   self.assertFalse(mod.rest_contiguous_current(
     {**base,"cursor":{**base["cursor"],"SOL":None}},now))
   self.assertFalse(mod.rest_contiguous_current({},now))
+ def test_phase37_requires_live_runtime_feature_fingerprint(self):
+  features={"futures_rest_standby":{"contiguous_success_cursor":True,"pending_slice":{}},
+            "futures_ws_circuit_trips":2}
+  self.assertTrue(mod.phase37_runtime_features_present(features))
+  self.assertFalse(mod.phase37_runtime_features_present(
+    {**features,"futures_rest_standby":{"pending_slice":{}}}))
+  self.assertFalse(mod.phase37_runtime_features_present(
+    {**features,"futures_rest_standby":{"contiguous_success_cursor":True}}))
+  self.assertFalse(mod.phase37_runtime_features_present(
+    {**features,"futures_ws_circuit_trips":"2"}))
+  self.assertFalse(mod.phase37_runtime_features_present({}))
 if __name__=="__main__":
  unittest.main()
