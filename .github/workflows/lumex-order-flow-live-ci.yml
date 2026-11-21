@@ -62,7 +62,7 @@ jobs:
           assert.equal(config.vars.AUTO_ORDER_FLOW_LIVE,'true');
           assert.equal(config.durable_objects.code_update_strategy.mode,'deferred');
           assert.ok(config.durable_objects.code_update_strategy.max_delay<=60);
-          assert.match(src,/phase36_futures_rest_standby_20261121/,'current DO runtime marker required');
+          assert.match(src,/phase38_native_gate_transport_probe_20261121/,'current DO runtime marker required');
           assert.match(rest,/futures_time_slice_saturated/);
           assert.doesNotMatch(rest,/q\.set\('offset'/,'Gate futures REST does not support offset paging');
           assert.ok(!('migrations' in config),'declarative exports and migrations may not coexist');
