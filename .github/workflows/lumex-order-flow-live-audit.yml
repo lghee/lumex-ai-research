@@ -1,5 +1,10 @@
 name: LUMEX Phase33 live R2 observed trade freshness audit
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'production/scripts/order-flow-live-audit.py'
+      - '.github/workflows/lumex-order-flow-live-audit.yml'
   workflow_run:
     workflows:
       - LUMEX Worker production deploy (automatic guarded Phase33)
