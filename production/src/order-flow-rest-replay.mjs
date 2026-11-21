@@ -28,6 +28,7 @@ export function gateRestUrl(market,symbol,minute,page,limit){
 export async function boundedGateRestReplay(market,symbol,minute,multipliers={},options={}){
  const now=Number(options.now??Date.now()),limit=Number(options.limit??1000);
  const cap=Number(options.maxPages??(market==='um-futures'?6:3));
+ const deadline=Date.now()+Math.min(15000,Math.max(1000,Number(options.maxElapsedMs??12000)));
  const fetchFn=options.fetchFn||fetch;
  const base={schema:'lumex_gate_rest_replay_v1',source:'gateio_rest',market,symbol,
   minute_ms:minute,checked_at_ms:now,
@@ -44,12 +45,13 @@ export async function boundedGateRestReplay(market,symbol,minute,multipliers={},
  const seen=new Set();let buys=0,sells=0,rows=0,pages=0,
   minMs=null,maxMs=null,firstId=null,lastId=null,exhausted=false,emptySlices=0;
  for(let i=0;i<cap;i++){
+  if(Date.now()>=deadline)return {...base,status:'rest_budget_exceeded',pages,rows};
   let body;
   const url=gateRestUrl(market,symbol,minute,i,limit);
   try{
    const resp=await fetchFn(url,{headers:{accept:'application/json',
      ...(market==='um-futures'?{'X-Gate-Size-Decimal':'1'}:{})},
-     signal:AbortSignal.timeout(8000)});
+     signal:AbortSignal.timeout(Math.max(1,Math.min(8000,deadline-Date.now())))});
    if(!resp.ok)return {...base,status:'rest_http_'+resp.status,pages,rows};
    const text=await resp.text();
    if(text.length>1500000)return {...base,status:'rest_payload_too_large',pages,rows};
