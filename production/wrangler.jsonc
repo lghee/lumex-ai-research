@@ -138,13 +138,5 @@
     "issue_detection": {
       "enabled": false
     }
-  },
-  "migrations": [
-    {
-      "tag": "phase33-order-flow-live-20261121",
-      "new_sqlite_classes": [
-        "OrderFlowLiveCollector"
-      ]
-    }
-  ]
+  }
 }
