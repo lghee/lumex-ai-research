@@ -110,3 +110,64 @@ assert.equal(standbyState.active,true);
 assert.equal(standbyState.websocket_merged,false);
 assert.equal(flow.health().customer_launch_ready,false);
 console.log('PASS Phase36 futures 1006 circuit failover, source isolation and customer launch lock');
+
+
+// Phase 37: simulated Gate REST failures must not advance the cursor past
+// a missing ten-second slice. Never treat a successfully-written error as data.
+const {lastClosedSlice,standbyR2Key}=await import('../src/order-flow-futures-rest-standby.mjs');
+const ms37=Math.floor(Date.now()/10000)*10000+2000;
+const end37=lastClosedSlice(ms37);
+const store37=new Map(),failWrites37=new Set();
+const flow37=new OrderFlowLiveLogic({storage:{
+ get:async()=>null,put:async()=>{},setAlarm:async()=>{}
+}},{
+ AUTO_GATE_FUTURES_REST_STANDBY:'true',
+ MARKET_DATA:{put:async(key,value)=>{
+  if(failWrites37.has(key))throw Error('simulated_R2_failure');
+  store37.set(key,JSON.parse(value));
+ }}
+});
+await flow37.ready;
+flow37.state.multipliers=Object.fromEntries(['BTC','ETH','SOL','XRP'].map(s=>[s+'_USDT',0.0001]));
+const mk37=(symbol,at,ok)=>({
+ schema:'lumex_gate_futures_rest_standby_v1',source:'gateio_rest',
+ symbol,market:'um-futures',slice_start_ms:at,
+ checked_at_ms:ms37,ok,status:ok?'observed_rest_trades':'http_503',
+ observed_trades:ok?2:0,buy_quote_usdt:ok?10:0,sell_quote_usdt:ok?10:0,
+ last_trade_ms:ok?at+1000:null,
+ websocket_merged:false,binance_archive_merged:false,
+ exchange_trade_completeness_verified:false,customer_launch_ready:false,
+ synthetic_values:false
+});
+let calls37=[];
+await flow37.runFuturesRestStandby(ms37,async (symbol,at)=>{
+ calls37.push([symbol,at]);
+ return mk37(symbol,at,!(symbol==='BTC'&&at===end37-10000));
+});
+assert.equal(calls37.length,7,'BTC fails first slot, other three symbols process 2 slots each');
+assert.equal(flow37.state.futures_rest_cursor.BTC,undefined,'failure must NOT advance BTC cursor');
+assert.equal(flow37.state.futures_rest_cursor.ETH,end37);
+assert.equal(flow37.state.futures_rest_last_error.BTC.reason,'http_503');
+assert.equal(store37.get(standbyR2Key('BTC',end37-10000)).ok,false);
+calls37=[];
+await flow37.runFuturesRestStandby(ms37,async (symbol,at)=>{
+ calls37.push([symbol,at]);return mk37(symbol,at,true);
+});
+assert.deepEqual(calls37,[['BTC',end37-10000],['BTC',end37]],
+ 'a later successful retry must fill the exact missing BTC slice before the following slice');
+assert.equal(flow37.state.futures_rest_cursor.BTC,end37);
+assert.equal(flow37.state.futures_rest_last_error.BTC,undefined);
+assert.equal(store37.get(standbyR2Key('BTC',end37-10000)).ok,true);
+assert.equal(flow37.health().futures_rest_standby.contiguous_success_cursor,true);
+// A live WS object with stale last execution timestamps must not disable standby.
+flow37.sockets.set('um-futures',{readyState:1});
+const next37=ms37+10000,newEnd37=lastClosedSlice(next37);
+failWrites37.add(standbyR2Key('XRP',newEnd37));
+await flow37.runFuturesRestStandby(next37,async(symbol,at)=>mk37(symbol,at,true));
+assert.equal(flow37.state.futures_rest_cursor.XRP,end37,'failed R2 write never commits progress');
+assert.equal(flow37.state.futures_rest_last_error.XRP.reason,'rest_or_r2_failed');
+failWrites37.clear();
+await flow37.runFuturesRestStandby(next37,async(symbol,at)=>mk37(symbol,at,true));
+assert.equal(flow37.state.futures_rest_cursor.XRP,newEnd37);
+assert.equal(flow37.state.futures_rest_last_error.XRP,undefined);
+console.log('PASS Phase37 sequential per-symbol standby retries, no false cursor advancement on Gate 503/R2 outage');
