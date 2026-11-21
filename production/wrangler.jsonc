@@ -36,6 +36,10 @@
       {
         "name": "LYRA_PAPER_RUNNER",
         "class_name": "LyraPaperRunner"
+      },
+      {
+        "name": "ORDER_FLOW_LIVE_COLLECTOR",
+        "class_name": "OrderFlowLiveCollector"
       }
     ]
   },
@@ -57,6 +61,10 @@
       "storage": "sqlite"
     },
     "LyraPaperRunner": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "OrderFlowLiveCollector": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -111,7 +119,8 @@
     "AUTO_LYRA_SHADOW_PAPER": "true",
     "AUTO_PUBLIC_HEATMAP": "true",
     "AUTO_OFFICIAL_NEWS": "true",
-    "AUTO_TOP50_UNIVERSE": "true"
+    "AUTO_TOP50_UNIVERSE": "true",
+    "AUTO_ORDER_FLOW_LIVE": "true"
   },
   "keep_vars": true,
   "observability": {
@@ -129,5 +138,13 @@
     "issue_detection": {
       "enabled": false
     }
-  }
+  },
+  "migrations": [
+    {
+      "tag": "phase33-order-flow-live-20261121",
+      "new_sqlite_classes": [
+        "OrderFlowLiveCollector"
+      ]
+    }
+  ]
 }
