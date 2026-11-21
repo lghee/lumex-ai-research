@@ -48,5 +48,8 @@ export function parseGatePacket(market,packet,multipliers={},now=Date.now()){
  if(packet?.channel!==channel||packet?.event!=='update')return [];
  const rows=Array.isArray(packet.result)?packet.result:[packet.result];
  if(rows.length>10000)return [];
- return rows.map(x=>parseGateExecution(market,x,multipliers,now)).filter(Boolean);
+ // Gate may batch executions in reverse order. Sort by exact decimal IDs
+ // before the collector compares high-water marks, never by imprecise JS Number.
+ return rows.map(x=>parseGateExecution(market,x,multipliers,now)).filter(Boolean)
+  .sort((a,b)=>a.id.length-b.id.length||(a.id<b.id?-1:a.id>b.id?1:0));
 }
