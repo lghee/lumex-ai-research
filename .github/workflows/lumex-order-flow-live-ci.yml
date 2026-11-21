@@ -43,6 +43,8 @@ jobs:
           assert.match(root,/order-flow-live-health/);
           assert.match(root,/hubAuthorized\(request,env\)/);
           assert.match(src,/customer_launch_ready:false/);
+          assert.match(src,/X-Gate-Size-Decimal/,'futures must request precise contract sizes');
+          assert.match(src,/boundedGateRestReplay/,'REST probes must be separate from WS aggregation');
           assert.match(src,/historical_binance_archive_combined:false/);
           assert.ok(config.exports.OrderFlowLiveCollector);
           assert.equal(config.vars.AUTO_ORDER_FLOW_LIVE,'true');
