@@ -45,7 +45,8 @@ export async function boundedGateRestReplay(market,symbol,minute,multipliers={},
   let body;
   const url=gateRestUrl(market,symbol,minute,i,limit);
   try{
-   const response=await fetchFn(url,{headers:{accept:'application/json'},
+   const response=await fetchFn(url,{headers:{accept:'application/json',
+     ...(market==='um-futures'?{'X-Gate-Size-Decimal':'1'}:{})},
      signal:AbortSignal.timeout(8000)});
    if(!response.ok)return {...base,status:'rest_http_'+response.status,pages,rows};
    const text=await response.text();
