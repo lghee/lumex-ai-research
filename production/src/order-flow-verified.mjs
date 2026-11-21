@@ -121,6 +121,8 @@ export async function serveOrderFlowHistory(request,env,{now=Date.now()}={}){
   if(!cleanS||!cleanF)return err('archive_integrity_or_gap_failed');
   const result=computeOrderFlow(cleanS,cleanF,now);
   if(!result)return err('insufficient_contiguous_90_day_window');
-  return ok({...result,archive_release_id:pointer.release_id,archive_release_created_ms:pointer.created_at_ms});
+  const insights=(await import('./order-flow-insights.mjs')).explainHistoricalFlow(result.daily);
+  if(!insights)return err('analysis_quality_failed');
+  return ok({...result,insights,archive_release_id:pointer.release_id,archive_release_created_ms:pointer.created_at_ms});
  }catch{return err('order_flow_source_unavailable')}
 }
