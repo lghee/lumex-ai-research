@@ -4,6 +4,7 @@
  * No exchange credentials, trading endpoints or customer portfolios.
  */
 import { DurableObject } from 'cloudflare:workers';
+import { collectFreshPublicCharts,readFreshPublicChart } from './public-chart-fresh.js';
 
 
 
@@ -3574,6 +3575,11 @@ async function hubRoute(request,env){
   }
   const symbol=hubName(u.searchParams.get('symbol'));
   if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
+  if(path==='/market-hub/v1/chart-fresh'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await readFreshPublicChart(env,symbol))}
+    catch(e){return hubReply({ok:false,error:safeError(e)},503)}
+  }
   if(path==='/market-hub/v1/ws'&&method==='GET'){
     if(!(await hubCheckTicket(request,env,symbol)))return hubReply({ok:false,error:'invalid_session_ticket'},401);
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
@@ -3712,6 +3718,11 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    // Independent public-market chart continuity. Does not depend on AUTO_FETCH,
+    // research jobs, 90-day Container data, or account/order Cron.
+    if(controller.cron==='* * * * *'&&env.AUTO_PUBLIC_CHARTS==='true')
+      ctx.waitUntil(collectFreshPublicCharts(env,Date.now()).catch(e=>
+        console.error('independent_chart_refresh_failed',safeError(e))));
     // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
     if(controller.cron==='*/5 * * * *'&&env.AUTO_MARKET_QA_DAILY==='true'){
       // Retry throughout the UTC day. A single missed 00:15 cron must not
