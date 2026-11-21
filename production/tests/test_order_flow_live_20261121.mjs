@@ -36,7 +36,9 @@ assert.equal(decimalId('00009'),'9');assert.equal(orderIdAfter('100','99'),true)
 assert.equal(orderIdAfter('100','100'),false);assert.equal(orderIdAfter('90','100'),false);
 console.log('PASS phase33 Gate source unit validation, venue isolation, IDs and futures multiplier');
 
-const {OrderFlowLiveLogic}=await import('../src/order-flow-live.mjs');
+const {OrderFlowLiveLogic,gateReplayOptions}=await import('../src/order-flow-live.mjs');
+assert.equal(gateReplayOptions('um-futures').maxPages,6,'futures REST must inspect all six 10s windows');
+assert.equal(gateReplayOptions('spot').maxPages,3,'spot keeps bounded native page count');
 const objects=new Map();
 const state=new Map();
 const ctx={storage:{
@@ -82,3 +84,14 @@ assert.equal(closedOld,1,'old futures connection must close for decimal rollover
 assert.ok(refreshed.includes('um-futures'),'futures must reconnect instead of trusting integer websocket');
 assert.ok(flow.state.gaps.some(x=>x.reason==='precision_upgrade_reconnect'));
 console.log('PASS Phase34.1 legacy futures socket requires explicit decimal handshake rollover');
+
+flow.env.AUTO_ORDER_FLOW_REST_REPLAY='true';
+const before=Date.now();
+flow.queueRestGap('um-futures',before);
+flow.queueRestGap('um-futures',before+60000);
+assert.equal(flow.state.rest_replay_pending.length,4,'repeated future WS disconnects must coalesce by symbol');
+flow.queueRestGap('spot',before);
+assert.equal(flow.state.rest_replay_pending.length,8,'at most eight pending probes across venues');
+for(let i=0;i<15;i++)flow.queueRestGap('um-futures',before+i*15000);
+assert.equal(flow.state.rest_replay_pending.length,8,'15s reconnect cycles must not grow replay queue');
+console.log('PASS Phase35 replay caller covers six futures slices without backlog saturation');
