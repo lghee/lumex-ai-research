@@ -81,7 +81,7 @@ export function normalizeFills(data,now=Date.now()){
  const rows=[],seen=new Set();
  for(const f of data){
   const coin=cleanCoin(f?.coin),ts=n(f?.time),price=n(f?.px),size=n(f?.sz),id=String(f?.tid??'');
-  if(!coin||!Number.isSafeInteger(ts)||ts>now+120000||ts<now-86400000*7||!(price>0)||!(size>0)||!id||seen.has(id))continue;
+  if(!coin||!Number.isSafeInteger(ts)||ts>now+120000||ts<now-86400000*30||!(price>0)||!(size>0)||!id||seen.has(id))continue;
   seen.add(id);
   rows.push({id,coin,ts,price,size,direction:String(f.dir||'').slice(0,40),side:f.side==='B'?'buy':f.side==='A'?'sell':null,closed_pnl_usd:n(f.closedPnl),fee_usd:n(f.fee),value_usd:price*size});
  }
