@@ -46,12 +46,13 @@ jobs:
           import assert from 'node:assert/strict';
           const root=readFileSync('src/index.js','utf8');
           const src=readFileSync('src/order-flow-live.mjs','utf8');
+          const wsUpgrade=readFileSync('src/order-flow-ws-upgrade.mjs','utf8');
           const rest=readFileSync('src/order-flow-rest-replay.mjs','utf8');
           const config=JSON.parse(readFileSync('wrangler.jsonc','utf8'));
           assert.match(root,/order-flow-live-health/);
           assert.match(root,/hubAuthorized\(request,env\)/);
           assert.match(src,/customer_launch_ready:false/);
-          assert.match(src,/X-Gate-Size-Decimal/,'futures must request precise contract sizes');
+          assert.match(wsUpgrade,/X-Gate-Size-Decimal/,'futures must request precise contract sizes in upgrade helper');
           assert.match(src,/nativeProbeState/);
           assert.match(src,/upgradeGateFuturesDecimalWebSocket/);
           assert.doesNotMatch(src,/signal:AbortSignal\.timeout\(10000\)/,
