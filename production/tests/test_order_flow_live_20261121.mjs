@@ -146,28 +146,32 @@ await flow37.runFuturesRestStandby(ms37,async (symbol,at)=>{
 });
 assert.equal(calls37.length,7,'BTC fails first slot, other three symbols process 2 slots each');
 assert.equal(flow37.state.futures_rest_cursor.BTC,undefined,'failure must NOT advance BTC cursor');
+assert.equal(flow37.state.futures_rest_pending_slice.BTC,end37-10000,'initial missing slot must be saved for retry');
 assert.equal(flow37.state.futures_rest_cursor.ETH,end37);
 assert.equal(flow37.state.futures_rest_last_error.BTC.reason,'http_503');
 assert.equal(store37.get(standbyR2Key('BTC',end37-10000)).ok,false);
 calls37=[];
-await flow37.runFuturesRestStandby(ms37,async (symbol,at)=>{
+await flow37.runFuturesRestStandby(ms37+10000,async (symbol,at)=>{
  calls37.push([symbol,at]);return mk37(symbol,at,true);
 });
-assert.deepEqual(calls37,[['BTC',end37-10000],['BTC',end37]],
- 'a later successful retry must fill the exact missing BTC slice before the following slice');
+assert.deepEqual(calls37.filter(x=>x[0]==='BTC'),[['BTC',end37-10000],['BTC',end37]],
+ 'a later-alarm retry must fill the exact missing BTC slice before the following slice');
 assert.equal(flow37.state.futures_rest_cursor.BTC,end37);
+assert.equal(flow37.state.futures_rest_pending_slice.BTC,undefined);
 assert.equal(flow37.state.futures_rest_last_error.BTC,undefined);
 assert.equal(store37.get(standbyR2Key('BTC',end37-10000)).ok,true);
 assert.equal(flow37.health().futures_rest_standby.contiguous_success_cursor,true);
 // A live WS object with stale last execution timestamps must not disable standby.
 flow37.sockets.set('um-futures',{readyState:1});
-const next37=ms37+10000,newEnd37=lastClosedSlice(next37);
+const next37=ms37+20000,newEnd37=lastClosedSlice(next37);
 failWrites37.add(standbyR2Key('XRP',newEnd37));
 await flow37.runFuturesRestStandby(next37,async(symbol,at)=>mk37(symbol,at,true));
-assert.equal(flow37.state.futures_rest_cursor.XRP,end37,'failed R2 write never commits progress');
+assert.equal(flow37.state.futures_rest_cursor.XRP,end37+10000,'failed R2 write never commits progress');
+assert.equal(flow37.state.futures_rest_pending_slice.XRP,newEnd37);
 assert.equal(flow37.state.futures_rest_last_error.XRP.reason,'rest_or_r2_failed');
 failWrites37.clear();
 await flow37.runFuturesRestStandby(next37,async(symbol,at)=>mk37(symbol,at,true));
 assert.equal(flow37.state.futures_rest_cursor.XRP,newEnd37);
+assert.equal(flow37.state.futures_rest_pending_slice.XRP,undefined);
 assert.equal(flow37.state.futures_rest_last_error.XRP,undefined);
 console.log('PASS Phase37 sequential per-symbol standby retries, no false cursor advancement on Gate 503/R2 outage');
