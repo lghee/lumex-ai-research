@@ -1,0 +1,46 @@
+name: LUMEX order-flow archive source verification (read only)
+on:
+  pull_request:
+    paths:
+      - 'production/src/order-flow-verified.mjs'
+      - 'production/scripts/order-flow-official-archive.py'
+      - 'production/tests/test_order_flow_20261121.mjs'
+      - '.github/workflows/lumex-order-flow-proof.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test source separation, 90-day coverage, and fail-closed calculations
+        run: node production/tests/test_order_flow_20261121.mjs
+      - name: Check archive loader syntax
+        run: python3 -m py_compile production/scripts/order-flow-official-archive.py
+      - name: Probe two small official archives without credentials or writes
+        run: |
+          python3 - <<'PY'
+          import io, zipfile, urllib.request
+          base='https://data.binance.vision/data/'
+          for folder in ('spot','futures/um'):
+              url=f'{base}{folder}/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2026-10.zip'
+              try:
+                  with urllib.request.urlopen(url, timeout=18) as r:
+                      if not r.geturl().startswith(base):raise ValueError('redirect outside official archive')
+                      data=r.read(3*1024*1024)
+                  z=zipfile.ZipFile(io.BytesIO(data))
+                  members=[x for x in z.namelist() if x.endswith('.csv')]
+                  if len(members)!=1:raise ValueError('invalid archive contents')
+                  print('VERIFIED_SOURCE',folder,'size',len(data),
+                    'fields',len(z.read(members[0]).decode().splitlines()[0].split(',')))
+              except Exception as e:
+                  print('ARCHIVE_SOURCE_UNAVAILABLE',folder,type(e).__name__,str(e)[:120])
+                  raise
+          PY
+      - name: Exercise all 8 source datasets (NO R2 writes; abort on any missing hour)
+        run: python3 production/scripts/order-flow-official-archive.py --out /tmp/flow-proof
