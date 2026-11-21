@@ -19,6 +19,10 @@ assert.equal(parseGateExecution('spot',{...s,id_market:'bogus'}, {}, now),null);
 assert.equal(parseGateExecution('spot',{...s,currency_pair:'DOGE_USDT'}, {}, now),null);
 assert.equal(parseGatePacket('spot',{channel:'spot.trades',event:'update',result:s},{},now).length,1);
 assert.equal(parseGatePacket('spot',{channel:'futures.trades',event:'update',result:s},{},now).length,0);
+const unordered=parseGatePacket('um-futures',{channel:'futures.trades',event:'update',
+ result:[{...f,id:34},{...f,id:32},{...f,id:33}]},{BTC_USDT:0.0001},now);
+assert.deepEqual(unordered.map(x=>x.id),['32','33','34'],'reverse-ordered exchange packets must not lose valid trades');
+
 assert.equal(decimalId('00009'),'9');assert.equal(orderIdAfter('100','99'),true);
 assert.equal(orderIdAfter('100','100'),false);assert.equal(orderIdAfter('90','100'),false);
 console.log('PASS phase33 Gate source unit validation, venue isolation, IDs and futures multiplier');
