@@ -4168,6 +4168,10 @@ async function hubRoute(request,env){
     try{return hubReply(await (await import('./pro50-fourhour.mjs')).regimeFourHourFallback(env,symbol,500))}
     catch{return hubReply({ok:false,error:'verified_4h_unavailable'},503)}
   }
+  if(path==='/market-hub/v1/pro-top50-history'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./pro-venue-matrix.mjs')).serveTop50VenueHistory(request,env);
+  }
   if(path==='/market-hub/v1/pro-top50-venues'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-venue-matrix.mjs')).serveVenueMatrix(request,env);
