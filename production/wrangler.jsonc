@@ -110,7 +110,8 @@
     "AUTO_BINANCE_TAKER_FETCH": "false",
     "AUTO_LYRA_SHADOW_PAPER": "true",
     "AUTO_PUBLIC_HEATMAP": "true",
-    "AUTO_OFFICIAL_NEWS": "true"
+    "AUTO_OFFICIAL_NEWS": "true",
+    "AUTO_TOP50_UNIVERSE": "true"
   },
   "keep_vars": true,
   "observability": {
