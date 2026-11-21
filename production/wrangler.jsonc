@@ -41,7 +41,11 @@
         "name": "ORDER_FLOW_LIVE_COLLECTOR",
         "class_name": "OrderFlowLiveCollector"
       }
-    ]
+    ],
+    "code_update_strategy": {
+      "mode": "deferred",
+      "max_delay": 60
+    }
   },
   "exports": {
     "ResearchContainer": {
