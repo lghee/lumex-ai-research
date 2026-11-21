@@ -1,0 +1,54 @@
+name: LUMEX Phase33 order flow safety and Worker build
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'production/src/index.js'
+      - 'production/src/order-flow-*.mjs'
+      - 'production/tests/test_order_flow_live_20261121.mjs'
+      - 'production/wrangler.jsonc'
+      - 'production/package.json'
+      - '.github/workflows/lumex-worker-production-deploy.yml'
+      - '.github/workflows/lumex-order-flow-live-ci.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install production dependencies
+        working-directory: production
+        run: npm install --no-audit --no-fund
+      - name: Check Python Container packaging
+        working-directory: production
+        run: python3 tests/test_container_image_packaging_20261119.py -v
+      - name: Run complete JavaScript regression including Phase33
+        working-directory: production
+        run: npm run check:js
+      - name: Confirm new schema and privacy gate are not bypassed
+        working-directory: production
+        run: |
+          node --input-type=module <<'JS'
+          import {readFileSync} from 'node:fs';
+          import assert from 'node:assert/strict';
+          const root=readFileSync('src/index.js','utf8');
+          const src=readFileSync('src/order-flow-live.mjs','utf8');
+          const config=JSON.parse(readFileSync('wrangler.jsonc','utf8'));
+          assert.match(root,/order-flow-live-health/);
+          assert.match(root,/hubAuthorized\(request,env\)/);
+          assert.match(src,/customer_launch_ready:false/);
+          assert.match(src,/historical_binance_archive_combined:false/);
+          assert.ok(config.exports.OrderFlowLiveCollector);
+          assert.equal(config.vars.AUTO_ORDER_FLOW_LIVE,'true');
+          assert.ok(!('migrations' in config),'declarative exports and migrations may not coexist');
+          console.log('PASS Phase33 privacy, source separation and fail-closed launch');
+          JS
+      - name: Verify Worker bundle can be generated without deploying
+        working-directory: production
+        run: npx wrangler deploy --dry-run --outdir /tmp/lumex-phase33-worker-dry-run

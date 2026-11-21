@@ -1,9 +1,18 @@
-name: LUMEX Worker production deploy (manual only)
+name: LUMEX Worker production deploy (automatic guarded Phase33)
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'production/src/index.js'
+      - 'production/src/order-flow-*.mjs'
+      - 'production/tests/test_order_flow_live_20261121.mjs'
+      - 'production/wrangler.jsonc'
+      - 'production/package.json'
+      - '.github/workflows/lumex-worker-production-deploy.yml'
   workflow_dispatch:
     inputs:
       confirmation:
-        description: "Type DEPLOY_LUMEX_131 to deploy Cloudflare Worker to production"
+        description: "Type DEPLOY_LUMEX_131 to manually deploy (main push deploys automatically)"
         required: true
         type: string
 
@@ -12,7 +21,7 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY_LUMEX_131' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.confirmation == 'DEPLOY_LUMEX_131') }}
     runs-on: ubuntu-latest
     concurrency:
       group: lumex-cloudflare-worker-production
@@ -84,6 +93,18 @@ jobs:
           print("PASS deployed Worker",body["version"])
           '
           done
+      - name: Verify Phase 33 private observer route refuses anonymous requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="${LUMEX_WORKER_URL:-https://lumex-ai-research2.kpiplus195.workers.dev}"
+          status="$(curl --silent --show-error --max-time 25 --output /tmp/phase33-anon.json --write-out '%{http_code}' "${URL%/}/market-hub/v1/order-flow-live-health")"
+          if [[ "$status" != 401 ]]; then
+            echo "::error::Phase 33 anonymous observer must return HTTP 401, got $status"
+            cat /tmp/phase33-anon.json
+            exit 1
+          fi
+          echo "PASS Phase 33 private route rejects anonymous calls"
       - name: Inspect current Container image state without changing customer data
         shell: bash
         run: |
