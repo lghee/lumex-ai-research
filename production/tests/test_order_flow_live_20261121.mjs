@@ -243,3 +243,14 @@ try{
  else globalThis.WebSocket=actualWebSocket;
 }
 console.log('PASS Phase38 native WS A/B metadata only, no trade volumes, dedup IDs or client metrics');
+
+
+// Phase38.1 stability claim requires an actual 90s WebSocket session;
+// the marker is never inferred from stale R2 files or a mere OPEN state.
+flow.connectionStarted['um-futures']=Date.now()-91000;
+flow.sockets.set('um-futures',{readyState:1});
+assert.equal(flow.health().futures_decimal_ws_stable_90s,true);
+assert.ok(flow.health().futures_decimal_ws_uptime_ms>=90000);
+flow.connectionStarted['um-futures']=Date.now()-10000;
+assert.equal(flow.health().futures_decimal_ws_stable_90s,false);
+console.log('PASS Phase38.1 90s precision WS uptime telemetry cannot be faked by connection alone');
