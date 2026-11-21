@@ -25,6 +25,8 @@ const cleanState=()=>({
  futures_1006_recent_ms:[],futures_ws_circuit_until:0,
  futures_rest_cursor:{},futures_rest_pending_slice:{},futures_rest_last_ok_ms:{},futures_rest_last_trade_ms:{},
  futures_rest_last_saved_ms:{},futures_rest_last_error:{},futures_rest_requests:0,
+ futures_rest_adaptive_recoveries:0,futures_rest_one_second_saturated:0,
+ futures_rest_adaptive_last_ok_ms:{},
  futures_native_probe:{},
  filtered_internal_trades:0,filtered_other_quote_trades:0,
  rejected_trade_rows:0,malformed_ws_frames:0,subscription_failures:0
@@ -91,7 +93,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:WS_HANDSHAKE_REVISION,
+   runtime_revision:'phase39_gate_rest_adaptive_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
@@ -122,6 +124,9 @@ export class OrderFlowLiveLogic{
      requests:this.state.futures_rest_requests||0,
      skipped_windows:this.state.futures_rest_skipped_windows||0,
      contiguous_success_cursor:true,
+     adaptive_high_volume_recoveries:this.state.futures_rest_adaptive_recoveries||0,
+     one_second_saturation_failures:this.state.futures_rest_one_second_saturated||0,
+     adaptive_last_ok_ms:this.state.futures_rest_adaptive_last_ok_ms||{},
      source:'gateio_rest',websocket_merged:false,customer_launch_ready:false
    },
    rest_replay_pending:this.state.rest_replay_pending?.length||0,
@@ -480,6 +485,9 @@ export class OrderFlowLiveLogic{
      saved[symbol]=now;
      this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
      if(!proof.ok){
+      if(proof.status==='one_second_saturated')
+       this.state.futures_rest_one_second_saturated=
+        (this.state.futures_rest_one_second_saturated||0)+1;
       pending[symbol]=at;
       errors[symbol]={at_ms:now,slice_start_ms:at,reason:proof.status};
       recordGap(this.state,'futures_rest_standby_'+String(proof.status).slice(0,55),
@@ -487,6 +495,13 @@ export class OrderFlowLiveLogic{
       break;
      }
      cursor[symbol]=at;
+     if(proof.adaptive_time_partitioned){
+      this.state.futures_rest_adaptive_recoveries=
+       (this.state.futures_rest_adaptive_recoveries||0)+1;
+      const last=this.state.futures_rest_adaptive_last_ok_ms||
+       (this.state.futures_rest_adaptive_last_ok_ms={});
+      last[symbol]=at;
+     }
      delete pending[symbol];
      last=at;
      ok[symbol]=now;
