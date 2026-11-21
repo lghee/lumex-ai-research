@@ -120,7 +120,8 @@
     "AUTO_PUBLIC_HEATMAP": "true",
     "AUTO_OFFICIAL_NEWS": "true",
     "AUTO_TOP50_UNIVERSE": "true",
-    "AUTO_ORDER_FLOW_LIVE": "true"
+    "AUTO_ORDER_FLOW_LIVE": "true",
+    "AUTO_ORDER_FLOW_COVERAGE": "true"
   },
   "keep_vars": true,
   "observability": {
