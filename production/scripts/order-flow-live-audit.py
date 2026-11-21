@@ -187,6 +187,12 @@ def main():
             proof["ok"]=proof["ok"] and source_fresh
 
         proof["websocket_details"]=heartbeat.get("websocket_details",{})
+        uptime=heartbeat.get("futures_decimal_ws_uptime_ms")
+        proof["futures_decimal_ws_uptime_seconds"]=(
+            round(uptime/1000,1) if type(uptime) is int and uptime>=0 else None)
+        proof["futures_decimal_ws_stable_90s"]=(heartbeat.get("futures_decimal_ws_stable_90s") is True
+            and proof["futures_decimal_ws_uptime_seconds"] is not None
+            and proof["futures_decimal_ws_uptime_seconds"]>=90)
         proof["websocket_close_details"]=heartbeat.get("websocket_close_details",[])[-6:]
         pong=heartbeat.get("futures_last_pong_ms")
         proof["futures_last_pong_age_seconds"]=(
@@ -200,7 +206,7 @@ def main():
         if not proof["phase37_runtime_features_verified"]:
             proof["ok"]=False
             proof["runtime_feature_error"]="deployed_DO_missing_phase37_contiguous_retry"
-        if proof["collector_runtime_revision"] != "phase38_native_gate_transport_probe_20261121":
+        if proof["collector_runtime_revision"] != "phase38_1_ws_handshake_deadline_fixed_20261121":
             proof["ok"]=False
             proof["runtime_error"]="old_durable_object_version"
         native=heartbeat.get("futures_native_transport_probe")
@@ -231,6 +237,7 @@ def main():
         f.write(f"- Invalid payloads: {', '.join(proof['invalid']) or 'none'}\n")
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
+        f.write(f"- Decimal futures WS uptime: {proof.get('futures_decimal_ws_uptime_seconds')}s, stable 90s: {proof.get('futures_decimal_ws_stable_90s',False)}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
         f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
         f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
