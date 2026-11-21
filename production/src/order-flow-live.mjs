@@ -195,7 +195,7 @@ export class OrderFlowLiveLogic{
    const body={schema:'lumex_gate_ws_observed_minute_v1',source:'gateio',
     observed_minute_ms:minute,closed_at_ms:now,rows,
     complete_trades_verified:false,synthetic_values:false,
-    gaps_observed:this.state.gaps.length>0,
+    gaps_observed:this.state.gaps.some(x=>x.at_ms>=minute&&x.at_ms<minute+MS_MIN),
     scope:'observed_websocket_messages_only_not_exchange_complete',
     historical_binance_archive_combined:false,customer_launch_ready:false};
    await this.env.MARKET_DATA.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'}});
