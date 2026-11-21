@@ -10,7 +10,7 @@ export function normalizeBook(venue,payload,symbol,now=Date.now()){
  let bids,asks,ts;
  if(venue==='Bybit'){
    if(payload?.retCode!==0||payload?.result?.s!==symbol)return null;
-   bids=payload.result.b;asks=payload.result.a;ts=num(payload.ts,1500000000000,now+2000);
+   bids=payload.result.b;asks=payload.result.a;ts=num(payload.result.ts,1500000000000,now+2000);
  }else{
    if(!Number.isSafeInteger(Number(payload?.lastUpdateId)))return null;
    bids=payload.bids;asks=payload.asks;ts=num(payload.T??payload.E,1500000000000,now+2000);
