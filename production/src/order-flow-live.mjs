@@ -7,6 +7,7 @@
 import {FLOW_SYMBOLS,parseGatePacket,orderIdAfter} from './order-flow-live-contract.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
+export const gateReplayOptions=(market,now=Date.now())=>({now,limit:1000,maxPages:market==='um-futures'?6:3});
 const pair=s=>s+'_USDT';
 const fresh=(time,now=Date.now())=>Number.isFinite(time)&&time>0&&now-time<45000;
 const cleanState=()=>({
@@ -122,16 +123,16 @@ export class OrderFlowLiveLogic{
  queueRestGap(market,at=Date.now()){
   if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
   const queue=this.state.rest_replay_pending||(this.state.rest_replay_pending=[]);
-  // Preserve at most 24 bounded probes. Repeated 15s disconnects must not
-  // create an unbounded, expensive replay backlog.
-  while(queue.length>24)queue.shift();
+  // At most one outstanding REST candidate per market/symbol. A persistent
+  // disconnect cannot enqueue 4 probes every minute while only 1/min drains.
+  for(let i=queue.length-1;i>=0;i--)
+   if(at-queue[i].minute>25*MS_MIN)queue.splice(i,1);
   const minute=Math.floor((at-3*MS_MIN)/MS_MIN)*MS_MIN;
   for(const symbol of FLOW_SYMBOLS){
    const key=market+':'+symbol+':'+minute;
-   if(!queue.some(x=>x.key===key)&&queue.length<24)
+   if(!queue.some(x=>x.market===market&&x.symbol===symbol)&&queue.length<8)
     queue.push({key,market,symbol,minute,queued_at_ms:at});
   }
-  if(queue.length>=24)recordGap(this.state,'rest_replay_queue_bounded','all');
  }
  async runOneRestReplay(now=Date.now()){
   if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
@@ -143,7 +144,7 @@ export class OrderFlowLiveLogic{
   try{
    const mod=await import('./order-flow-rest-replay.mjs');
    const proof=await mod.boundedGateRestReplay(task.market,task.symbol,task.minute,
-     this.state.multipliers,{now,limit:1000,maxPages:3});
+     this.state.multipliers,gateReplayOptions(task.market,now));
    result.status=proof.status;result.pages=proof.pages;result.rows=proof.rows;
    if(this.env.MARKET_DATA){
     await this.env.MARKET_DATA.put(mod.recoveryKey(task.market,task.symbol,task.minute),
