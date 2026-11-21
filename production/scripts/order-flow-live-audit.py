@@ -78,6 +78,11 @@ def main():
             proof["heartbeat_error"]="missing_current_heartbeat"
         proof["websocket_connections"]=heartbeat.get("websocket_connections",[])
         proof["websocket_details"]=heartbeat.get("websocket_details",{})
+        proof["websocket_close_details"]=heartbeat.get("websocket_close_details",[])[-6:]
+        pong=heartbeat.get("futures_last_pong_ms")
+        proof["futures_last_pong_age_seconds"]=(
+            round((int(time.time()*1000)-pong)/1000) if isinstance(pong,int) and pong>0 else None
+        )
         proof["recent_gaps"]=heartbeat.get("unresolved_gaps",[])[-6:]
         proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
         proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
@@ -106,6 +111,9 @@ def main():
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
+        f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
+        f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
+
         f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
         f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
 
