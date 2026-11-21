@@ -62,3 +62,14 @@ assert.equal(status?.live_verified,false);
 assert.equal(status?.sources?.length,8);
 assert.equal(objects.size,1,'never invent minute snapshots when the source is silent');
 console.log('PASS phase33 observer heartbeat is independent of trade collection and fail-closed');
+
+let closedOld=0;const refreshed=[];
+flow.sockets.set('um-futures',{readyState:1,close:()=>{closedOld++;}});
+flow.state.futures_decimal_header_requested=false;
+flow.multipliers=async()=>true;
+flow.connect=async market=>{refreshed.push(market);};
+await flow.ensure();
+assert.equal(closedOld,1,'old futures connection must close for decimal rollover');
+assert.ok(refreshed.includes('um-futures'),'futures must reconnect instead of trusting integer websocket');
+assert.ok(flow.state.gaps.some(x=>x.reason==='precision_upgrade_reconnect'));
+console.log('PASS Phase34.1 legacy futures socket requires explicit decimal handshake rollover');
