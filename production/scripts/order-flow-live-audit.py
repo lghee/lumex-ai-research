@@ -200,7 +200,7 @@ def main():
         if not proof["phase37_runtime_features_verified"]:
             proof["ok"]=False
             proof["runtime_feature_error"]="deployed_DO_missing_phase37_contiguous_retry"
-        if proof["collector_runtime_revision"] != "phase38_native_gate_transport_probe_20261121":
+        if proof["collector_runtime_revision"] != "phase38_1_ws_handshake_deadline_fixed_20261121":
             proof["ok"]=False
             proof["runtime_error"]="old_durable_object_version"
         native=heartbeat.get("futures_native_transport_probe")
