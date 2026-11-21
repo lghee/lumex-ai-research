@@ -59,6 +59,37 @@ jobs:
             rm -f /tmp/flow-observer-status.json
             echo "::warning::No collector heartbeat in R2: scheduler or Durable Object may not be running"
           }
+      - name: Read actual Gate REST standby evidence when futures stream is degraded
+        working-directory: production
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/flow-futures-standby
+          if test -s /tmp/flow-observer-status.json; then
+            python3 - <<'PY' > /tmp/futures-standby-keys.tsv
+          import datetime,json
+          try:
+              h=json.load(open('/tmp/flow-observer-status.json',encoding='utf-8'))
+              cursors=(h.get('futures_rest_standby') or {}).get('cursor') or {}
+              for symbol in ('BTC','ETH','SOL','XRP'):
+                  value=cursors.get(symbol)
+                  if type(value) is not int or value<=0 or value%10000:continue
+                  day=datetime.datetime.fromtimestamp(value/1000,datetime.timezone.utc).strftime('%Y-%m-%d')
+                  key=f'market-hub/order-flow/v1/live/gate/futures-rest-standby/v1/{day}/{symbol}/{value}.json'
+                  print(symbol+'\t'+key)
+          except (OSError,ValueError,TypeError,KeyError):
+              pass
+          PY
+            while IFS=        run: python3 production/scripts/order-flow-live-audit.py --dir /tmp/flow-observed --status /tmp/flow-observer-status.json --standby-dir /tmp/flow-futures-standby
+      - name: Publish honest proof report
+        if: always()
+        run: |
+          if test -s /tmp/lumex-flow-proof.md; then cat /tmp/lumex-flow-proof.md >> "$GITHUB_STEP_SUMMARY"; fi
+\t' read -r symbol key; do
+              test -n "$symbol" || continue
+              npx wrangler r2 object get "lumex-ai-data/$key" --file "/tmp/flow-futures-standby/$symbol.json" --remote >/dev/null 2>&1 || rm -f "/tmp/flow-futures-standby/$symbol.json"
+            done < /tmp/futures-standby-keys.tsv
+          fi
       - name: Reject blank, stale, malformed or synthetic observations
         run: python3 production/scripts/order-flow-live-audit.py --dir /tmp/flow-observed --status /tmp/flow-observer-status.json
       - name: Publish honest proof report
