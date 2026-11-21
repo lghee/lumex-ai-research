@@ -94,7 +94,8 @@ export async function readPublicChartHealth(env,atMs=Date.now()){
         Number.isSafeInteger(last)&&last>1500000000000&&last<=atMs;
       return {coin:symbol.replace('USDT',''),ready:valid&&last>=expected,
         last_candle_utc:valid?new Date(last).toISOString():null,
-        lag_seconds:valid?Math.max(0,Math.floor((atMs-last-900000)/1000)):null,
+        lag_seconds:valid?Math.max(0,Math.floor((expected-last)/1000)):null,
+        seconds_since_last_close:valid?Math.max(0,Math.floor((atMs-last-900000)/1000)):null,
         reason:!head?'snapshot_missing':!valid?'invalid_metadata':last<expected?'closed_bar_missing':'ok'};
     }catch{
       return {coin:symbol.replace('USDT',''),ready:false,last_candle_utc:null,
