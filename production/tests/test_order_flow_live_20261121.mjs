@@ -65,7 +65,7 @@ flow.consume('um-futures',{event:'update',channel:'futures.trades',
  price:'80000'}]});
 assert.equal(flow.state.rejected_trade_rows,1);
 assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
-assert.equal(flow.health().runtime_revision,'phase38_1_ws_handshake_deadline_fixed_20261121');
+assert.equal(flow.health().runtime_revision,'phase39_gate_rest_adaptive_20261121');
 assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
 
 await flow.persist();
@@ -175,6 +175,33 @@ assert.equal(flow37.state.futures_rest_cursor.XRP,newEnd37);
 assert.equal(flow37.state.futures_rest_pending_slice.XRP,undefined);
 assert.equal(flow37.state.futures_rest_last_error.XRP,undefined);
 console.log('PASS Phase37 sequential per-symbol standby retries, no false cursor advancement on Gate 503/R2 outage');
+
+// Phase39: a genuine adaptive proof advances only the contiguous high-volume
+// checkpoint and preserves customer_launch_ready=false.
+const later39=next37+10000;
+await flow37.runFuturesRestStandby(later39,async(symbol,at)=>{
+ const proof=mk37(symbol,at,true);
+ if(symbol==='BTC'){
+  proof.adaptive_time_partitioned=true;
+  proof.observed_trades=2500;
+  proof.request_count=7;
+ }
+ return proof;
+});
+assert.ok(flow37.state.futures_rest_adaptive_recoveries>=1);
+assert.ok(flow37.health().futures_rest_standby.adaptive_high_volume_recoveries>=1);
+assert.ok(flow37.health().futures_rest_standby.adaptive_last_ok_ms.BTC>0);
+assert.equal(flow37.health().customer_launch_ready,false);
+const future39=later39+10000;
+await flow37.runFuturesRestStandby(future39,async(symbol,at)=>{
+ const p=mk37(symbol,at,true);
+ if(symbol==='ETH')return {...p,ok:false,status:'one_second_saturated'};
+ return p;
+});
+assert.ok(flow37.health().futures_rest_standby.one_second_saturation_failures>=1);
+assert.equal(flow37.state.futures_rest_last_error.ETH.reason,'one_second_saturated');
+console.log('PASS Phase39 adaptive >1000 trades advances only confirmed per-symbol checkpoints, irrecoverable 1s failure remains explicit');
+
 
 
 // Phase38: native WebSocket transport is metadata-only A/B diagnostics.
