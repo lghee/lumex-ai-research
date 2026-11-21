@@ -56,7 +56,7 @@ jobs:
           PY
       - name: Install existing repository Wrangler (no Worker deployment)
         working-directory: production
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
       - name: Upload immutable new release and verify each R2 object checksum
         shell: bash
         working-directory: production
