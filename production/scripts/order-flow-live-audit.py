@@ -78,6 +78,13 @@ def main():
         proof["recent_gaps"]=heartbeat.get("unresolved_gaps",[])[-6:]
         proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
         proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
+        proof["collector_runtime_revision"]=heartbeat.get("runtime_revision","legacy_or_unknown")
+        proof["futures_decimal_header_requested"]=heartbeat.get("futures_decimal_header_requested") is True
+        proof["message_diagnostics"]=heartbeat.get("message_diagnostics",{})
+        if "um-futures" in proof["websocket_connections"] and not proof["futures_decimal_header_requested"]:
+            proof["ok"]=False
+            proof["precision_error"]="futures_socket_not_proven_decimal_header"
+
         proof["collector_counts"]={str(i.get("market"))+":"+str(i.get("symbol")):i.get("observed_count")
                                    for i in heartbeat.get("sources",[])}
     else:
@@ -92,8 +99,12 @@ def main():
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
+        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
+        f.write(f"- Futures decimal request: {proof.get('futures_decimal_header_requested','unavailable')}\n")
+        f.write(f"- Filtered vs malformed: {proof.get('message_diagnostics',{})}\n")
+
         f.write("- **NOT a full market continuity/24h/7d certification. UID/PRO page remains hidden.**\n")
     if not proof["ok"]:
-        raise SystemExit("Gate observed trade snapshots absent, stale or malformed (no invented fallback)")
+        raise SystemExit("Gate observed trades missing/stale/malformed OR decimal future precision not verified")
 if __name__=="__main__":
     main()
