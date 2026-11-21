@@ -187,6 +187,12 @@ def main():
             proof["ok"]=proof["ok"] and source_fresh
 
         proof["websocket_details"]=heartbeat.get("websocket_details",{})
+        uptime=heartbeat.get("futures_decimal_ws_uptime_ms")
+        proof["futures_decimal_ws_uptime_seconds"]=(
+            round(uptime/1000,1) if type(uptime) is int and uptime>=0 else None)
+        proof["futures_decimal_ws_stable_90s"]=(heartbeat.get("futures_decimal_ws_stable_90s") is True
+            and proof["futures_decimal_ws_uptime_seconds"] is not None
+            and proof["futures_decimal_ws_uptime_seconds"]>=90)
         proof["websocket_close_details"]=heartbeat.get("websocket_close_details",[])[-6:]
         pong=heartbeat.get("futures_last_pong_ms")
         proof["futures_last_pong_age_seconds"]=(
@@ -231,6 +237,7 @@ def main():
         f.write(f"- Invalid payloads: {', '.join(proof['invalid']) or 'none'}\n")
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
+        f.write(f"- Decimal futures WS uptime: {proof.get('futures_decimal_ws_uptime_seconds')}s, stable 90s: {proof.get('futures_decimal_ws_stable_90s',False)}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
         f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
         f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
