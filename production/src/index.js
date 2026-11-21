@@ -4603,6 +4603,11 @@ async function hubRoute(request,env){
   }
   const symbol=hubName(u.searchParams.get('symbol'));
   if(!symbol)return hubReply({ok:false,error:'unsupported_symbol'},400);
+  if(path==='/market-hub/v1/chart-fresh'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    try{return hubReply(await (await import('./public-chart-fresh.js')).readFreshPublicChart(env,symbol))}
+    catch(e){return hubReply({ok:false,error:safeError(e)},503)}
+  }
   if(path==='/market-hub/v1/ws'&&method==='GET'){
     if(!(await hubCheckTicket(request,env,symbol)))return hubReply({ok:false,error:'invalid_session_ticket'},401);
     if(!env.MARKET_EVENT_HUB)return hubReply({ok:false,error:'hub_binding_missing'},503);
@@ -4849,6 +4854,10 @@ export default{
     return respond({ok:false,error:'not_found'},404);
   },
   async scheduled(controller,env,ctx){
+    // Independent public 15m chart collector, separate from AUTO_FETCH/research.
+    if(controller.cron==='* * * * *'&&env.AUTO_PUBLIC_CHARTS==='true')
+      ctx.waitUntil(import('./public-chart-fresh.js').then(m=>m.collectFreshPublicCharts(env,Date.now())).catch(e=>
+        console.error('independent_chart_refresh_failed',safeError(e))));
     // Once per UTC day, bounded read-only evidence -> write-only daily R2 summary.
     if(controller.cron==='*/5 * * * *'&&env.AUTO_ML_REGIME_RESEARCH==='true')
       ctx.waitUntil(import('./regime-research.mjs').then(m=>m.scheduledRegimeResearch(env)).then(x=>{
