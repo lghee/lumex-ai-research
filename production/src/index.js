@@ -4162,6 +4162,10 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-history.mjs')).serveExchangeHistory(request,env);
   }
+  if(path==='/market-hub/v1/pro-top50'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./pro-top50.mjs')).serveTop50(env);
+  }
   if(path==='/market-hub/v1/exchange-compare'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-compare.mjs')).serveExchangeCompare(request,env);
@@ -4833,6 +4837,10 @@ export default{
     if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_TOP50_UNIVERSE==='true')
+      ctx.waitUntil(import('./pro-top50.mjs').then(m=>m.collectTop50(env)).then(r=>{
+        if(r?.ok!==true)console.warn('top50_public_universe_unavailable',String(r?.reason||'unverified').slice(0,65));
+      }).catch(()=>console.warn('top50_public_universe_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
       ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
         console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));
