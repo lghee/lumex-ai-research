@@ -4,7 +4,6 @@
  * authentic footprint, Binance historical CVD continuity, or launch readiness.
  * Trading/payment/automated strategies are not touched.
  */
-import {DurableObject} from 'cloudflare:workers';
 import {FLOW_SYMBOLS,parseGatePacket,orderIdAfter} from './order-flow-live-contract.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
@@ -24,13 +23,12 @@ function recordGap(st,reason,source,at=Date.now()){
 }
 const response=(body,status=200)=>new Response(JSON.stringify(body),{
  status,headers:{'content-type':'application/json','cache-control':'private,no-store','x-content-type-options':'nosniff'}});
-export class OrderFlowLiveCollector extends DurableObject{
+export class OrderFlowLiveLogic{
  constructor(ctx,env){
-  super(ctx,env);this.ctx=ctx;this.env=env;
+  this.ctx=ctx;this.env=env;
   this.sockets=new Map();this.connecting=new Set();this.connectionStarted={};
   this.state=cleanState();
-  ctx.blockConcurrencyWhile(async()=>{
-   const previous=await ctx.storage.get('phase33:checkpoint');
+  this.ready=ctx.storage.get('phase33:checkpoint').then(previous=>{
    if(previous?.schema==='lumex_gate_live_collector_v1'){
     this.state=previous;
     recordGap(this.state,'collector_restarted_without_ws_continuity','all');
