@@ -4809,6 +4809,8 @@ export default{
         .catch(()=>respond({ok:false,error:'paper_report_unavailable'},503));
     if(url.pathname==='/market-hub/v1/regime-research-report')
       return import('./regime-research.mjs').then(m=>m.privateRegimeReport(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
+    if(['/market-hub/v1/hyperliquid-whale-candles','/market-hub/v1/hyperliquid-whale-portfolio'].includes(url.pathname))
+      return import('./hyperliquid-whale-history.mjs').then(m=>m.whaleHistoryRoute(request,env)).catch(()=>respond({ok:false,error:'whale_history_unavailable'},503));
     if(['/market-hub/v1/hyperliquid-whales','/market-hub/v1/hyperliquid-whale-profile','/market-hub/v1/hyperliquid-whales-health'].includes(url.pathname))
       return import('./hyperliquid-whales.mjs').then(m=>m.hyperWhalesRoute(request,env)).catch(()=>respond({ok:false,error:'unavailable'},503));
     if(url.pathname.startsWith('/market-hub/v1/'))return hubRoute(request,env);
