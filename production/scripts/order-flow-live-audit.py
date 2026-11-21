@@ -54,10 +54,54 @@ def audit(root, now_ms):
       "source":"Gate WebSocket observer; Binance archive never combined"}
     return proof
 
+def verify_rest_partition_proofs(obj):
+    """Require an exact 10-second nonoverlapping leaf partition, no full pages.
+
+    The integer-second Gate REST endpoint cannot recover a saturated one-second
+    page. These proofs establish bounded time partitioning, NOT exchange-wide
+    market completeness.
+    """
+    start=obj.get("slice_start_ms")
+    count=obj.get("observed_trades")
+    request_count=obj.get("request_count")
+    parts=obj.get("segment_proofs")
+    adaptive=obj.get("adaptive_time_partitioned")
+    if type(start) is not int or start%10000:return False
+    if type(count) is not int or not 0<=count<=9990:return False
+    if type(request_count) is not int or not 1<=request_count<=19:return False
+    if type(adaptive) is not bool or not isinstance(parts,list) or not 1<=len(parts)<=10:return False
+    if obj.get("full_page_reused") is not False:return False
+    if obj.get("source_join_allowed") is not False:return False
+    cursor=start
+    total=0
+    min_seconds=11
+    for p in parts:
+        if not isinstance(p,dict):return False
+        left=p.get("from_ms")
+        right=p.get("to_ms")
+        n=p.get("observed_trades")
+        if type(left) is not int or type(right) is not int or type(n) is not int:return False
+        if left!=cursor or right<=left or (right-left)%1000:return False
+        if left%1000 or right%1000 or right>start+10000:return False
+        if not 0<=n<1000 or p.get("api_limit")!=1000:return False
+        if p.get("source")!="gateio_rest":return False
+        total+=n
+        min_seconds=min(min_seconds,(right-left)//1000)
+        cursor=right
+    if cursor!=start+10000 or total!=count:return False
+    if obj.get("min_partition_seconds")!=min_seconds:return False
+    if adaptive and (request_count<3 or len(parts)<2):return False
+    if not adaptive and (len(parts)!=1 or request_count!=1):return False
+    if count>=1000 and not adaptive:return False
+    return True
+
+
 def audit_futures_rest_standby(directory, now_ms):
     expected={"BTC","ETH","SOL","XRP"}
     found=[]
     bad=[]
+    adaptive_symbols=[]
+    total_requests=0
     if not directory:
         return {"ok":False,"symbols":[],"invalid":["standby_evidence_directory_missing"]}
     for symbol in sorted(expected):
@@ -80,7 +124,10 @@ def audit_futures_rest_standby(directory, now_ms):
             checked=obj.get("checked_at_ms")
             assert type(checked) is int and 0<=now_ms-checked<=120000
             count=obj.get("observed_trades")
-            assert type(count) is int and 0<=count<1000
+            assert verify_rest_partition_proofs(obj)
+            total_requests+=obj["request_count"]
+            if obj["adaptive_time_partitioned"]:
+                adaptive_symbols.append(symbol)
             buy=obj.get("buy_quote_usdt")
             sell=obj.get("sell_quote_usdt")
             assert type(buy) in (int,float) and 0<=buy<1e25
@@ -91,6 +138,7 @@ def audit_futures_rest_standby(directory, now_ms):
         except Exception as e:
             bad.append(symbol+":"+type(e).__name__)
     return {"ok":len(found)==4 and not bad,"symbols":found,"invalid":bad,
+        "adaptive_symbols":adaptive_symbols,"api_requests":total_requests,
         "source":"gateio_rest","websocket_merged":False,
         "exchange_complete":False,"customer_launch_ready":False}
 
@@ -206,7 +254,7 @@ def main():
         if not proof["phase37_runtime_features_verified"]:
             proof["ok"]=False
             proof["runtime_feature_error"]="deployed_DO_missing_phase37_contiguous_retry"
-        if proof["collector_runtime_revision"] != "phase38_1_ws_handshake_deadline_fixed_20261121":
+        if proof["collector_runtime_revision"] != "phase39_gate_rest_adaptive_20261121":
             proof["ok"]=False
             proof["runtime_error"]="old_durable_object_version"
         native=heartbeat.get("futures_native_transport_probe")
