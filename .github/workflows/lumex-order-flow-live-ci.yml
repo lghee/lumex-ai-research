@@ -28,6 +28,10 @@ jobs:
       - name: Check Python Container packaging
         working-directory: production
         run: python3 tests/test_container_image_packaging_20261119.py -v
+      - name: Verify Phase 34 R2 audit Python and 8/8 fail-closed rules
+        run: |
+          python3 -m py_compile production/scripts/order-flow-live-audit.py
+          python3 production/tests/test_order_flow_live_audit_20261121.py -v
       - name: Run complete JavaScript regression including Phase33
         working-directory: production
         run: npm run check:js

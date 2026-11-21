@@ -39,6 +39,21 @@ const flow=new OrderFlowLiveLogic(ctx,{MARKET_DATA:{
  put:async (key,body)=>objects.set(key,JSON.parse(body))
 }});
 await flow.ready;
+const baseNow=Date.now();
+flow.state.multipliers={BTC_USDT:0.0001};
+flow.consume('um-futures',{event:'update',channel:'futures.trades',
+ result:[{id:'412',contract:'BTC_USDT',create_time_ms:baseNow-1000,size:'1.25',
+ price:'80000',is_internal:true}]});
+assert.equal(flow.state.filtered_internal_trades,1);
+assert.equal(flow.state.bad_events,0,'documented internal liquidation transfer must not count as malformed');
+flow.consume('um-futures',{event:'update',channel:'futures.trades',
+ result:[{id:'413',contract:'BTC_USDT',create_time_ms:baseNow-1000,size:'not_a_size',
+ price:'80000'}]});
+assert.equal(flow.state.rejected_trade_rows,1);
+assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
+assert.equal(flow.health().runtime_revision,'phase34.1_precision_20261121');
+assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
+
 await flow.persist();
 const status=objects.get('market-hub/order-flow/v1/live/gate/status.json');
 assert.equal(status?.schema,'lumex_gate_live_observation_health_v1');
@@ -47,3 +62,14 @@ assert.equal(status?.live_verified,false);
 assert.equal(status?.sources?.length,8);
 assert.equal(objects.size,1,'never invent minute snapshots when the source is silent');
 console.log('PASS phase33 observer heartbeat is independent of trade collection and fail-closed');
+
+let closedOld=0;const refreshed=[];
+flow.sockets.set('um-futures',{readyState:1,close:()=>{closedOld++;}});
+flow.state.futures_decimal_header_requested=false;
+flow.multipliers=async()=>true;
+flow.connect=async market=>{refreshed.push(market);};
+await flow.ensure();
+assert.equal(closedOld,1,'old futures connection must close for decimal rollover');
+assert.ok(refreshed.includes('um-futures'),'futures must reconnect instead of trusting integer websocket');
+assert.ok(flow.state.gaps.some(x=>x.reason==='precision_upgrade_reconnect'));
+console.log('PASS Phase34.1 legacy futures socket requires explicit decimal handshake rollover');

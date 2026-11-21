@@ -15,7 +15,9 @@ const cleanState=()=>({
  buckets:{},gaps:[],bad_events:0,duplicate_events:0,connection_failures:0,
  reconnects:0,multipliers:{},contracts_verified_ms:0,
  rest_replay_pending:[],rest_replay_checks:[],last_rest_replay_attempt_ms:0,
- futures_decimal_header_requested:false
+ futures_decimal_header_requested:false,
+ filtered_internal_trades:0,filtered_other_quote_trades:0,
+ rejected_trade_rows:0,malformed_ws_frames:0,subscription_failures:0
 });
 function recordGap(st,reason,source,at=Date.now()){
  const last=st.gaps.at(-1);
@@ -66,6 +68,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
+   runtime_revision:'phase34.1_precision_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
@@ -74,6 +77,13 @@ export class OrderFlowLiveLogic{
    rest_replay_pending:this.state.rest_replay_pending?.length||0,
    recent_rest_replay_checks:(this.state.rest_replay_checks||[]).slice(-12),
    invalid_messages:this.state.bad_events,duplicates:this.state.duplicate_events,
+   message_diagnostics:{
+     rejected_trade_rows:this.state.rejected_trade_rows||0,
+     filtered_internal_trades:this.state.filtered_internal_trades||0,
+     filtered_other_quote_trades:this.state.filtered_other_quote_trades||0,
+     malformed_ws_frames:this.state.malformed_ws_frames||0,
+     subscription_failures:this.state.subscription_failures||0
+   },
    connection_failures:this.state.connection_failures,reconnects:this.state.reconnects,
    unresolved_gaps:this.state.gaps.slice(-15),
    continuity_proven_24h:false,continuity_proven_7d:false,
@@ -143,6 +153,14 @@ export class OrderFlowLiveLogic{
   checks.push({...result,attempt_at_ms:now});this.state.rest_replay_checks=checks.slice(-40);
  }
  async ensure(){
+  // Runtime upgrades cannot reuse a futures socket created without exact
+  // decimal sizing. Reconnect with an explicit header, never integer fallback.
+  if(this.sockets.has('um-futures')&&!this.state.futures_decimal_header_requested){
+   try{this.sockets.get('um-futures').close(1000,'refresh_size_precision');}catch{}
+   this.sockets.delete('um-futures');
+   recordGap(this.state,'precision_upgrade_reconnect','um-futures');
+   this.queueRestGap('um-futures');
+  }
   // A websocket that connected previously but silently stopped emitting is untrusted.
   for(const [market,ws] of this.sockets){
    if(ws.readyState===3||ws.readyState===2){
@@ -182,7 +200,10 @@ export class OrderFlowLiveLogic{
     this.state.futures_decimal_header_requested=true;
    }else ws=new WebSocket(url);
    this.sockets.set(market,ws);this.connectionStarted[market]=Date.now();
+   let didSubscribe=false;
    const subscribe=()=>{
+    if(didSubscribe)return;
+    didSubscribe=true;
     this.state.reconnects++;
     try{ws.send(JSON.stringify({time:Math.floor(Date.now()/1000),
       channel,event:'subscribe',payload:FLOW_SYMBOLS.map(pair)}));}
@@ -192,14 +213,15 @@ export class OrderFlowLiveLogic{
    if(ws.readyState===1)subscribe();
    ws.addEventListener('message',event=>{
     try{
-     if(typeof event.data!=='string'||event.data.length>1200000){this.state.bad_events++;return;}
+     if(typeof event.data!=='string'||event.data.length>1200000){this.state.bad_events++;this.state.malformed_ws_frames=(this.state.malformed_ws_frames||0)+1;return;}
      const doc=JSON.parse(event.data);
      if(doc.channel!==channel)return;
      if(doc.event==='subscribe'&&doc.result?.status!=='success'){
+      this.state.subscription_failures=(this.state.subscription_failures||0)+1;
       recordGap(this.state,'subscription_rejected',market);try{ws.close();}catch{}return;
      }
      if(doc.event==='update')this.consume(market,doc);
-    }catch{this.state.bad_events++;}
+    }catch{this.state.bad_events++;this.state.malformed_ws_frames=(this.state.malformed_ws_frames||0)+1;}
    });
    ws.addEventListener('close',()=>{
     if(this.sockets.get(market)===ws)this.sockets.delete(market);
@@ -216,7 +238,17 @@ export class OrderFlowLiveLogic{
  }
  consume(market,doc){
   const now=Date.now(),trades=parseGatePacket(market,doc,this.state.multipliers,now);
-  if(doc.event==='update'&&trades.length===0){this.state.bad_events++;return;}
+  const raw=Array.isArray(doc.result)?doc.result:[doc.result];
+  const internal=raw.filter(r=>r?.is_internal===true).length;
+  const otherQuote=market==='spot'?raw.filter(r=>r?.is_internal!==true&&
+    ((r?.money&&r.money!=='USDT')||(r?.trade_quote&&r.trade_quote!=='USDT'))).length:0;
+  const rejected=Math.max(0,raw.length-trades.length-internal-otherQuote);
+  this.state.filtered_internal_trades=(this.state.filtered_internal_trades||0)+internal;
+  this.state.filtered_other_quote_trades=(this.state.filtered_other_quote_trades||0)+otherQuote;
+  this.state.rejected_trade_rows=(this.state.rejected_trade_rows||0)+rejected;
+  if(rejected>0)this.state.bad_events++;
+  // Normal internal liquidation takeovers are deliberately excluded, not malformed.
+  if(trades.length===0)return;
   for(const x of trades){
    const k=market+':'+x.symbol;
    if(!orderIdAfter(x.id,this.state.last_ids[k])){

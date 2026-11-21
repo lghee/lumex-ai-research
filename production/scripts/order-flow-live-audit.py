@@ -46,7 +46,7 @@ def audit(root, now_ms):
         except Exception as err:
             invalid.append(f"{file.name}: {type(err).__name__}")
     fresh = sorted(k for k,t in last.items() if now_ms-t < 8*60000)
-    proof = {"ok":bool(fresh) and not invalid,"schema":"lumex_gate_r2_audit_v1",
+    proof = {"ok":len(fresh)==8 and not invalid,"schema":"lumex_gate_r2_audit_v1",
       "latest_observed_markets":len(fresh),"total_markets":8,
       "recent_markets":fresh,"snapshots_read":checks,"invalid":invalid,
       "live_verified":False,"customer_launch_ready":False,
@@ -73,15 +73,26 @@ def main():
             heartbeat=None
     if heartbeat:
         proof["heartbeat_age_seconds"]=round((int(time.time()*1000)-heartbeat["status_written_at_ms"])/1000)
+        if not (0 <= proof["heartbeat_age_seconds"] <= 120):
+            proof["ok"]=False
+            proof["heartbeat_error"]="missing_current_heartbeat"
         proof["websocket_connections"]=heartbeat.get("websocket_connections",[])
         proof["websocket_details"]=heartbeat.get("websocket_details",{})
         proof["recent_gaps"]=heartbeat.get("unresolved_gaps",[])[-6:]
         proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
         proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
+        proof["collector_runtime_revision"]=heartbeat.get("runtime_revision","legacy_or_unknown")
+        proof["futures_decimal_header_requested"]=heartbeat.get("futures_decimal_header_requested") is True
+        proof["message_diagnostics"]=heartbeat.get("message_diagnostics",{})
+        if "um-futures" in proof["websocket_connections"] and not proof["futures_decimal_header_requested"]:
+            proof["ok"]=False
+            proof["precision_error"]="futures_socket_not_proven_decimal_header"
+
         proof["collector_counts"]={str(i.get("market"))+":"+str(i.get("symbol")):i.get("observed_count")
                                    for i in heartbeat.get("sources",[])}
     else:
         proof["heartbeat_state"]="missing_or_invalid"
+        proof["ok"]=False
     print(json.dumps(proof,ensure_ascii=False))
     with open("/tmp/lumex-flow-proof.md","w",encoding="utf-8") as f:
         f.write("## LUMEX Gate WebSocket minute snapshots\n\n")
@@ -92,8 +103,12 @@ def main():
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
+        f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
+        f.write(f"- Futures decimal request: {proof.get('futures_decimal_header_requested','unavailable')}\n")
+        f.write(f"- Filtered vs malformed: {proof.get('message_diagnostics',{})}\n")
+
         f.write("- **NOT a full market continuity/24h/7d certification. UID/PRO page remains hidden.**\n")
     if not proof["ok"]:
-        raise SystemExit("Gate observed trade snapshots absent, stale or malformed (no invented fallback)")
+        raise SystemExit("Gate observed trades missing/stale/malformed OR decimal future precision not verified")
 if __name__=="__main__":
     main()
