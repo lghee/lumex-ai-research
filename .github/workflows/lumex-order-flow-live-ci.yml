@@ -5,7 +5,7 @@ on:
     paths:
       - 'production/src/index.js'
       - 'production/src/order-flow-*.mjs'
-      - 'production/tests/test_order_flow_live_20261121.mjs'
+      - 'production/tests/test_order_flow_*.mjs'
       - 'production/wrangler.jsonc'
       - 'production/package.json'
       - '.github/workflows/lumex-worker-production-deploy.yml'
