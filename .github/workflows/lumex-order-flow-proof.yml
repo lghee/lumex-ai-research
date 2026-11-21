@@ -42,3 +42,5 @@ jobs:
                   print('ARCHIVE_SOURCE_UNAVAILABLE',folder,type(e).__name__,str(e)[:120])
                   raise
           PY
+      - name: Exercise all 8 source datasets (NO R2 writes; abort on any missing hour)
+        run: python3 production/scripts/order-flow-official-archive.py --out /tmp/flow-proof
