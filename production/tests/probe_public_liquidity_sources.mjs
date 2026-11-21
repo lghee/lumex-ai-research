@@ -18,6 +18,20 @@ for(const [name,url] of sources){
       'official_ts_path',name==='Bybit'?'result.ts':'T/E');
   }catch(e){console.log(name,'NETWORK',e.name||'unavailable')}
 }
+for(const [name,url] of [
+ ['Gate futures','https://api.gateio.ws/api/v4/futures/usdt/order_book?contract=BTC_USDT&limit=50'],
+ ['Gate contract','https://api.gateio.ws/api/v4/futures/usdt/contracts/BTC_USDT'],
+ ['OKX swap','https://www.okx.com/api/v5/market/books?instId=BTC-USDT-SWAP&sz=50'],
+ ['OKX contract','https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP']
+]){
+ try{
+  const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
+  const raw=response.ok?await response.json():null;
+  const count=name==='Gate futures'?raw?.bids?.length:name==='OKX swap'?raw?.data?.[0]?.bids?.length:null;
+  const multiplier=name==='Gate contract'?raw?.quanto_multiplier:name==='OKX contract'?raw?.data?.[0]?.ctVal:null;
+  console.log('ALTERNATIVE',name,'HTTP',response.status,'levels',count,'multiplier',multiplier);
+ }catch(e){console.log('ALTERNATIVE',name,'NETWORK',e.name||'error')}
+}
 try{
  const response=await fetch('https://lumex-ai-research2.kpiplus195.workers.dev/market-hub/v1/liquidity?symbol=BTCUSDT',{signal:AbortSignal.timeout(8000)});
  console.log('CURRENT_PRODUCTION_LIQUIDITY_ROUTE_HTTP',response.status,
