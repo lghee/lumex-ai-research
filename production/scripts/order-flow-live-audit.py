@@ -118,8 +118,18 @@ def main():
             proof["ok"]=False
             proof["heartbeat_error"]="missing_current_heartbeat"
         proof["websocket_connections"]=heartbeat.get("websocket_connections",[])
-        futures_ws="um-futures" in proof["websocket_connections"]
-        proof["futures_ws_connected_now"]=futures_ws
+        ws_connected="um-futures" in proof["websocket_connections"]
+        futures_sources=[x for x in heartbeat.get("sources",[])
+                         if x.get("market")=="um-futures"]
+        ws_futures_fresh=(len(futures_sources)==4 and
+            {x.get("symbol") for x in futures_sources}=={"BTC","ETH","SOL","XRP"} and
+            all(type(x.get("last_observed_ms")) is int and
+                0<=int(time.time()*1000)-x["last_observed_ms"]<=45000
+                for x in futures_sources))
+        futures_ws=(ws_connected and ws_futures_fresh and
+            int(heartbeat.get("futures_ws_circuit_until") or 0)<=int(time.time()*1000))
+        proof["futures_ws_connected_now"]=ws_connected
+        proof["futures_ws_recent_trades"]=ws_futures_fresh
         spot={"spot:BTC","spot:ETH","spot:SOL","spot:XRP"}
         rest=audit_futures_rest_standby(args.standby_dir,int(time.time()*1000))
         proof["futures_rest_standby"]=rest
@@ -129,10 +139,16 @@ def main():
             state_ok=status.get("source")=="gateio_rest" and status.get("websocket_merged") is False
             last_ok=status.get("last_http_ok_ms") or {}
             cursors=status.get("cursor") or {}
-            verified_all=all(type(last_ok.get(x)) is int and
-                             0<=int(time.time()*1000)-last_ok[x]<120000 and
-                             type(cursors.get(x)) is int
-                             for x in ("BTC","ETH","SOL","XRP"))
+            last_error=status.get("last_error") or {}
+            proof["futures_rest_unresolved_errors"]={
+                x:last_error.get(x) for x in ("BTC","ETH","SOL","XRP") if last_error.get(x)
+            }
+            verified_all=(not proof["futures_rest_unresolved_errors"] and all(
+                type(last_ok.get(x)) is int and
+                0<=int(time.time()*1000)-last_ok[x]<60000 and
+                type(cursors.get(x)) is int and
+                0<=int(time.time()*1000)-cursors[x]<60000
+                for x in ("BTC","ETH","SOL","XRP")))
             spot_sources=[x for x in heartbeat.get("sources",[]) if x.get("market")=="spot"]
             source_spot_ok=(len(spot_sources)==4 and
                 {x.get("symbol") for x in spot_sources}=={"BTC","ETH","SOL","XRP"} and
@@ -191,6 +207,7 @@ def main():
         f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
         f.write(f"- Collection mode: {proof.get('collection_mode','unknown')}\n")
         f.write(f"- REST backup evidence: {proof.get('futures_rest_standby',{})}\n")
+        f.write(f"- REST unresolved errors: {proof.get('futures_rest_unresolved_errors',{})}\n")
 
         f.write(f"- Futures decimal request: {proof.get('futures_decimal_header_requested','unavailable')}\n")
         f.write(f"- Filtered vs malformed: {proof.get('message_diagnostics',{})}\n")
