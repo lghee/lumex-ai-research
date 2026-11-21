@@ -110,7 +110,8 @@ def main():
         f.write(f"- Invalid payloads: {', '.join(proof['invalid']) or 'none'}\n")
         f.write(f"- Collector heartbeat age: {proof.get('heartbeat_age_seconds','unavailable')}s\n")
         f.write(f"- WebSocket connections: {proof.get('websocket_connections',[])}\n")
-        f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")        f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
+        f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
+        f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
         f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
 
         f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
