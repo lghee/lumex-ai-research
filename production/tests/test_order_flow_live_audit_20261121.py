@@ -57,5 +57,22 @@ class GateObservedAudit(unittest.TestCase):
    self.assertFalse(mod.audit_futures_rest_standby(folder,now)["ok"])
    (p/"XRP.json").write_text(json.dumps({**sample("XRP"),"checked_at_ms":now-200000}),encoding="utf-8")
    self.assertFalse(mod.audit_futures_rest_standby(folder,now)["ok"])
+ def test_contiguous_rest_status_rejects_errors_and_stale_cursors(self):
+  now=int(time.time()*1000)
+  at=now//10000*10000-10000
+  symbols=("BTC","ETH","SOL","XRP")
+  base={"last_http_ok_ms":{x:now-1000 for x in symbols},
+        "cursor":{x:at for x in symbols},
+        "last_error":{}}
+  self.assertTrue(mod.rest_contiguous_current(base,now))
+  self.assertFalse(mod.rest_contiguous_current(
+    {**base,"last_error":{"ETH":{"reason":"http_503","at_ms":now}}},now))
+  self.assertFalse(mod.rest_contiguous_current(
+    {**base,"cursor":{**base["cursor"],"BTC":now-180000}},now))
+  self.assertFalse(mod.rest_contiguous_current(
+    {**base,"last_http_ok_ms":{**base["last_http_ok_ms"],"XRP":now-80000}},now))
+  self.assertFalse(mod.rest_contiguous_current(
+    {**base,"cursor":{**base["cursor"],"SOL":None}},now))
+  self.assertFalse(mod.rest_contiguous_current({},now))
 if __name__=="__main__":
  unittest.main()
