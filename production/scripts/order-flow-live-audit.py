@@ -109,6 +109,16 @@ def rest_contiguous_current(status, now_ms):
         if at%10000!=0:return False
     return True
 
+def phase37_runtime_features_present(heartbeat):
+    """Verify actual running Phase37 DO capabilities, not deployment version alone."""
+    if not isinstance(heartbeat,dict):return False
+    standby=heartbeat.get("futures_rest_standby")
+    return (isinstance(standby,dict) and
+            standby.get("contiguous_success_cursor") is True and
+            isinstance(standby.get("pending_slice"),dict) and
+            type(heartbeat.get("futures_ws_circuit_trips")) is int)
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--dir",required=True)
@@ -186,6 +196,10 @@ def main():
         proof["invalid_messages"]=heartbeat.get("invalid_messages",0)
         proof["multiplier_check_ms"]=heartbeat.get("multiplier_check_ms")
         proof["collector_runtime_revision"]=heartbeat.get("runtime_revision","legacy_or_unknown")
+        proof["phase37_runtime_features_verified"]=phase37_runtime_features_present(heartbeat)
+        if not proof["phase37_runtime_features_verified"]:
+            proof["ok"]=False
+            proof["runtime_feature_error"]="deployed_DO_missing_phase37_contiguous_retry"
         if proof["collector_runtime_revision"] != "phase36_futures_rest_standby_20261121":
             proof["ok"]=False
             proof["runtime_error"]="old_durable_object_version"
@@ -214,6 +228,7 @@ def main():
         f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
 
         f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
+        f.write(f"- Phase37 DO runtime features verified: {proof.get('phase37_runtime_features_verified',False)}\n")
         f.write(f"- Runtime status: {proof.get('runtime_error','current')}\n")
         f.write(f"- Collection mode: {proof.get('collection_mode','unknown')}\n")
         f.write(f"- REST backup evidence: {proof.get('futures_rest_standby',{})}\n")
