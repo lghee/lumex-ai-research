@@ -126,7 +126,8 @@
     "AUTO_TOP50_UNIVERSE": "true",
     "AUTO_ORDER_FLOW_LIVE": "true",
     "AUTO_ORDER_FLOW_COVERAGE": "true",
-    "AUTO_ORDER_FLOW_REST_REPLAY": "true"
+    "AUTO_ORDER_FLOW_REST_REPLAY": "true",
+    "AUTO_GATE_FUTURES_REST_STANDBY": "true"
   },
   "keep_vars": true,
   "observability": {

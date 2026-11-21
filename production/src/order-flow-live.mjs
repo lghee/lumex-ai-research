@@ -5,6 +5,7 @@
  * Trading/payment/automated strategies are not touched.
  */
 import {FLOW_SYMBOLS,parseGatePacket,orderIdAfter} from './order-flow-live-contract.mjs';
+import {collectStandbySlice,standbyR2Key,decideRestStandby,lastClosedSlice} from './order-flow-futures-rest-standby.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
 export const gateReplayOptions=(market,now=Date.now())=>({now,limit:1000,maxPages:market==='um-futures'?6:3});
@@ -17,6 +18,9 @@ const cleanState=()=>({
  reconnects:0,multipliers:{},contracts_verified_ms:0,
  rest_replay_pending:[],rest_replay_checks:[],last_rest_replay_attempt_ms:0,
  futures_decimal_header_requested:false,
+ futures_1006_recent_ms:[],futures_ws_circuit_until:0,
+ futures_rest_cursor:{},futures_rest_last_ok_ms:{},futures_rest_last_trade_ms:{},
+ futures_rest_last_saved_ms:{},futures_rest_last_error:{},futures_rest_requests:0,
  filtered_internal_trades:0,filtered_other_quote_trades:0,
  rejected_trade_rows:0,malformed_ws_frames:0,subscription_failures:0
 });
@@ -70,7 +74,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:'phase35_flow_20261121',
+   runtime_revision:'phase36_futures_rest_standby_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
@@ -79,6 +83,20 @@ export class OrderFlowLiveLogic{
    websocket_retry_after_ms:this.retryUntil,
    websocket_close_details:(this.state.websocket_close_details||[]).slice(-8),
    futures_last_pong_ms:this.state.futures_last_pong_ms||null,
+   futures_ws_circuit_until:this.state.futures_ws_circuit_until||0,
+   futures_1006_last_3m:(this.state.futures_1006_recent_ms||[])
+     .filter(t=>now-t<180000).length,
+   futures_rest_standby:{
+     active:decideRestStandby(this.state,now).use_rest_standby||
+       this.sockets.get('um-futures')?.readyState!==1,
+     last_http_ok_ms:this.state.futures_rest_last_ok_ms||{},
+     last_trade_ms:this.state.futures_rest_last_trade_ms||{},
+     last_saved_ms:this.state.futures_rest_last_saved_ms||{},
+     last_error:this.state.futures_rest_last_error||{},
+     cursor:this.state.futures_rest_cursor||{},
+     requests:this.state.futures_rest_requests||0,
+     source:'gateio_rest',websocket_merged:false,customer_launch_ready:false
+   },
    rest_replay_pending:this.state.rest_replay_pending?.length||0,
    recent_rest_replay_checks:(this.state.rest_replay_checks||[]).slice(-12),
    invalid_messages:this.state.bad_events,duplicates:this.state.duplicate_events,
@@ -200,6 +218,7 @@ export class OrderFlowLiveLogic{
  async connect(market){
   if(this.sockets.has(market)||this.connecting.has(market))return;
   if(Date.now()<(this.retryUntil[market]||0))return;
+  if(market==='um-futures'&&Date.now()<(this.state.futures_ws_circuit_until||0))return;
   this.connecting.add(market);
   const url=market==='spot'?'wss://api.gateio.ws/ws/v4/':'wss://fx-ws.gateio.ws/v4/ws/usdt';
   const channel=market==='spot'?'spot.trades':'futures.trades';
@@ -256,6 +275,16 @@ export class OrderFlowLiveLogic{
     details.push({market,at_ms:Date.now(),code:Number(event?.code||0),
      clean:Boolean(event?.wasClean),reason:String(event?.reason||'').slice(0,55)});
     this.state.websocket_close_details=details.slice(-24);
+    if(market==='um-futures'&&Number(event?.code)===1006){
+     const at=Date.now();
+     const recent=(this.state.futures_1006_recent_ms||[]).filter(t=>at-t<180000);
+     recent.push(at);
+     this.state.futures_1006_recent_ms=recent.slice(-16);
+     if(recent.length>=3){
+      this.state.futures_ws_circuit_until=at+5*60000;
+      recordGap(this.state,'futures_ws_circuit_rest_standby','um-futures');
+     }
+    }
     const duration=Date.now()-(this.connectionStarted[market]||Date.now());
     this.failureStreak[market]=duration>120000?0:Math.min(4,(this.failureStreak[market]||0)+1);
     this.retryUntil[market]=Date.now()+Math.min(45000,2000*2**this.failureStreak[market]);
@@ -309,6 +338,58 @@ export class OrderFlowLiveLogic{
    a.last_trade_ms=Math.max(a.last_trade_ms,x.ts);
   }
  }
+ async runFuturesRestStandby(now=Date.now()){
+  if(this.env.AUTO_GATE_FUTURES_REST_STANDBY!=='true')return;
+  const active=this.sockets.get('um-futures')?.readyState===1;
+  if(active&&!decideRestStandby(this.state,now).use_rest_standby)return;
+  if(!this.env.MARKET_DATA){
+   recordGap(this.state,'futures_rest_standby_r2_unavailable','um-futures');return;
+  }
+  const end=lastClosedSlice(now),cursor=this.state.futures_rest_cursor||(this.state.futures_rest_cursor={});
+  const ok=this.state.futures_rest_last_ok_ms||(this.state.futures_rest_last_ok_ms={});
+  const tradeTs=this.state.futures_rest_last_trade_ms||(this.state.futures_rest_last_trade_ms={});
+  const saved=this.state.futures_rest_last_saved_ms||(this.state.futures_rest_last_saved_ms={});
+  const errors=this.state.futures_rest_last_error||(this.state.futures_rest_last_error={});
+  const tasks=[];
+  for(const symbol of FLOW_SYMBOLS){
+   // Two closed ten-second windows per 15-second alarm: enough to catch up
+   // over time, but never invent earlier data if an outage exceeds 2 min.
+   let last=Number(cursor[symbol]);
+   if(!Number.isSafeInteger(last)||last>end||end-last>120000){
+    if(Number.isSafeInteger(last)&&end-last>120000)
+     recordGap(this.state,'futures_rest_standby_cursor_skipped','um-futures:'+symbol);
+    last=end-20000;
+   }
+   for(const at of [last+10000,last+20000]){
+    if(at>end)break;
+    tasks.push({symbol,at});
+   }
+  }
+  // No requests beyond 8 per alarm, 1000 trades per 10s slice per market.
+  await Promise.all(tasks.slice(0,8).map(async ({symbol,at})=>{
+   let proof;
+   try{
+    proof=await collectStandbySlice(symbol,at,this.state.multipliers,{now});
+    await this.env.MARKET_DATA.put(standbyR2Key(symbol,at),JSON.stringify(proof),
+      {httpMetadata:{contentType:'application/json'}});
+    saved[symbol]=now;
+    cursor[symbol]=Math.max(Number(cursor[symbol])||0,at);
+    if(proof.ok){
+     ok[symbol]=now;
+     if(proof.last_trade_ms)tradeTs[symbol]=proof.last_trade_ms;
+     delete errors[symbol];
+    }else{
+     errors[symbol]={at_ms:now,reason:proof.status};
+     recordGap(this.state,'futures_rest_standby_'+proof.status,'um-futures:'+symbol);
+    }
+   }catch{
+    errors[symbol]={at_ms:now,reason:'rest_or_r2_failed'};
+    recordGap(this.state,'futures_rest_standby_io_failed','um-futures:'+symbol);
+    // Don't advance cursor: try the same 10s time slice again next alarm.
+   }
+   this.state.futures_rest_requests=(this.state.futures_rest_requests||0)+1;
+  }));
+ }
  async persist(){
   const now=Date.now(),closeBefore=Math.floor(now/MS_MIN)*MS_MIN;
   const minutes=Object.keys(this.state.buckets).map(Number).filter(n=>n<closeBefore).sort((a,b)=>a-b);
@@ -334,6 +415,7 @@ export class OrderFlowLiveLogic{
    for(const minute of remaining.map(Number).sort((a,b)=>a-b).slice(0,-12))delete this.state.buckets[minute];
   }
   await this.runOneRestReplay(now);
+  await this.runFuturesRestStandby(now);
   this.state.last_tick_ms=now;
   await this.ctx.storage.put('phase33:checkpoint',this.state);
   // Private diagnostic heartbeat. Does NOT create synthetic trade rows.

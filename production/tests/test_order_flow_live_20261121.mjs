@@ -37,6 +37,9 @@ assert.equal(orderIdAfter('100','100'),false);assert.equal(orderIdAfter('90','10
 console.log('PASS phase33 Gate source unit validation, venue isolation, IDs and futures multiplier');
 
 const {OrderFlowLiveLogic,gateReplayOptions}=await import('../src/order-flow-live.mjs');
+assert.equal((await import('../src/order-flow-futures-rest-standby.mjs')).decideRestStandby({
+ futures_1006_recent_ms:[Date.now()-10000,Date.now()-20000,Date.now()-30000]
+}).use_rest_standby,true);
 assert.equal(gateReplayOptions('um-futures').maxPages,6,'futures REST must inspect all six 10s windows');
 assert.equal(gateReplayOptions('spot').maxPages,3,'spot keeps bounded native page count');
 const objects=new Map();
@@ -62,7 +65,7 @@ flow.consume('um-futures',{event:'update',channel:'futures.trades',
  price:'80000'}]});
 assert.equal(flow.state.rejected_trade_rows,1);
 assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
-assert.equal(flow.health().runtime_revision,'phase35_flow_20261121');
+assert.equal(flow.health().runtime_revision,'phase36_futures_rest_standby_20261121');
 assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
 
 await flow.persist();
@@ -95,3 +98,15 @@ assert.equal(flow.state.rest_replay_pending.length,8,'at most eight pending prob
 for(let i=0;i<15;i++)flow.queueRestGap('um-futures',before+i*15000);
 assert.equal(flow.state.rest_replay_pending.length,8,'15s reconnect cycles must not grow replay queue');
 console.log('PASS Phase35 replay caller covers six futures slices without backlog saturation');
+
+flow.env.AUTO_GATE_FUTURES_REST_STANDBY='true';
+flow.state.futures_1006_recent_ms=[Date.now()-10000,Date.now()-20000,Date.now()-30000];
+const nowFail=Date.now();
+flow.state.futures_ws_circuit_until=nowFail+5*60000;
+await flow.connect('um-futures');
+assert.equal(flow.sockets.has('um-futures'),false,'must respect WS circuit, preserving spot');
+const standbyState=flow.health().futures_rest_standby;
+assert.equal(standbyState.active,true);
+assert.equal(standbyState.websocket_merged,false);
+assert.equal(flow.health().customer_launch_ready,false);
+console.log('PASS Phase36 futures 1006 circuit failover, source isolation and customer launch lock');
