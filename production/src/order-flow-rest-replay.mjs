@@ -60,7 +60,11 @@ export async function boundedGateRestReplay(market,symbol,minute,multipliers={},
   const sliceFrom=minute+(market==='um-futures'?i*SLICE*1000:0);
   const sliceEnd=market==='um-futures'?sliceFrom+SLICE*1000:minute+M;
   for(const item of body){
-   const trade=parseGateExecution(market,item,multipliers,now);
+   // Public spot REST rows may omit currency_pair. The exact requested market
+   // comes from this signed-off request URL; conflicting returned identity is rejected.
+   const normalized=market==='spot'?
+    {...item,currency_pair:item.currency_pair??symbol+'_USDT'}:item;
+   const trade=parseGateExecution(market,normalized,multipliers,now);
    if(!trade||trade.ts<sliceFrom||trade.ts>=sliceEnd)
     return {...base,status:'rest_time_or_schema_mismatch',pages,rows};
    if(seen.has(trade.id))return {...base,status:'rest_duplicate_or_unstable_page',pages,rows};
