@@ -65,7 +65,7 @@ flow.consume('um-futures',{event:'update',channel:'futures.trades',
  price:'80000'}]});
 assert.equal(flow.state.rejected_trade_rows,1);
 assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
-assert.equal(flow.health().runtime_revision,'phase35_flow_20261121');
+assert.equal(flow.health().runtime_revision,'phase36_futures_rest_standby_20261121');
 assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
 
 await flow.persist();
