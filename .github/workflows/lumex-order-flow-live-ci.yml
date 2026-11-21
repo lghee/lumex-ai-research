@@ -52,6 +52,10 @@ jobs:
           assert.match(root,/hubAuthorized\(request,env\)/);
           assert.match(src,/customer_launch_ready:false/);
           assert.match(src,/X-Gate-Size-Decimal/,'futures must request precise contract sizes');
+          assert.match(src,/nativeProbeState/);
+          assert.match(src,/runFuturesRestStandby\(now\)/);
+          assert.equal(config.vars.AUTO_GATE_NATIVE_TRANSPORT_PROBE,'true');
+
           assert.match(src,/boundedGateRestReplay/,'REST probes must be separate from WS aggregation');
           assert.match(src,/historical_binance_archive_combined:false/);
           assert.ok(config.exports.OrderFlowLiveCollector);
