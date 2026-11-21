@@ -25,7 +25,8 @@ assert.equal(new URL(urls[0]).searchParams.get('from'),String(minute/1000));
 assert.equal(new URL(urls[1]).searchParams.get('page'),'2');
 let futureUrls=[];
 const f=await boundedGateRestReplay('um-futures','BTC',minute,
- {BTC_USDT:0.0001},{now,limit:2,maxPages:2,fetchFn:async url=>{
+ {BTC_USDT:0.0001},{now,limit:2,maxPages:2,fetchFn:async (url,opts)=>{
+  assert.equal(opts.headers['X-Gate-Size-Decimal'],'1');
   futureUrls.push(url);return new Response(JSON.stringify([future(10,minute+200)]));}});
 assert.equal(f.status,'bounded_rest_pages_exhausted');
 assert.equal(f.observed_sell_quote_usdt,0.12);
