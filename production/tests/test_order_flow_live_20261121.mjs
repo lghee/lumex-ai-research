@@ -254,3 +254,42 @@ assert.ok(flow.health().futures_decimal_ws_uptime_ms>=90000);
 flow.connectionStarted['um-futures']=Date.now()-10000;
 assert.equal(flow.health().futures_decimal_ws_stable_90s,false);
 console.log('PASS Phase38.1 90s precision WS uptime telemetry cannot be faked by connection alone');
+
+
+// Phase38.1 one-time repair: an old 30-minute 1006 circuit stored in the
+// Durable Object must not block the first attempt with the fixed handshake.
+const oldCircuitMs=Date.now()+30*60000;
+const previousState={
+ schema:'lumex_gate_live_collector_v1',gaps:[],
+ futures_ws_circuit_until:oldCircuitMs,futures_ws_circuit_trips:7,
+ futures_1006_recent_ms:[Date.now()-1000],
+ last_ids:{'um-futures:BTC':'999999999999999999'},
+ futures_rest_cursor:{BTC:1763760010000},
+ futures_rest_pending_slice:{ETH:1763760020000},buckets:{test:{observed_trades:5}}
+};
+const restoreCtx={storage:{
+ get:async()=>structuredClone(previousState),
+ put:async()=>{},
+ setAlarm:async()=>{}
+}};
+const repaired=new OrderFlowLiveLogic(restoreCtx,{});
+await repaired.ready;
+assert.equal(repaired.state.futures_ws_circuit_until,0,
+ 'old pre-fix 1006 backoff must be cleared exactly once on new transport');
+assert.equal(repaired.state.futures_ws_circuit_trips,0);
+assert.deepEqual(repaired.state.futures_1006_recent_ms,[]);
+assert.equal(repaired.state.last_ids['um-futures:BTC'],'999999999999999999');
+assert.equal(repaired.state.futures_rest_cursor.BTC,1763760010000);
+assert.equal(repaired.state.futures_rest_pending_slice.ETH,1763760020000);
+assert.equal(repaired.state.buckets.test.observed_trades,5);
+const newCircuitMs=Date.now()+100000;
+const restoredAgain=new OrderFlowLiveLogic({storage:{
+ get:async()=>({...structuredClone(repaired.state),futures_ws_circuit_until:newCircuitMs,
+  futures_ws_circuit_trips:2}),
+ put:async()=>{},setAlarm:async()=>{}
+}},{});
+await restoredAgain.ready;
+assert.equal(restoredAgain.state.futures_ws_circuit_until,newCircuitMs,
+ 'reboots after the transport fix must keep a newly-earned safety backoff');
+assert.equal(restoredAgain.state.futures_ws_circuit_trips,2);
+console.log('PASS Phase38.1 one-time WS circuit clearance preserves trade and R2 checkpoints');
