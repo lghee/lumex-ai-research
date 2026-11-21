@@ -4162,6 +4162,16 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./exchange-history.mjs')).serveExchangeHistory(request,env);
   }
+  if(path==='/market-hub/v1/pro-regime50'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    const symbol=String(u.searchParams.get('symbol')||'');
+    try{return hubReply(await (await import('./pro50-fourhour.mjs')).regimeFourHourFallback(env,symbol,500))}
+    catch{return hubReply({ok:false,error:'verified_4h_unavailable'},503)}
+  }
+  if(path==='/market-hub/v1/pro-top50-venues'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./pro-venue-matrix.mjs')).serveVenueMatrix(request,env);
+  }
   if(path==='/market-hub/v1/pro-top50'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-top50.mjs')).serveTop50(env);
@@ -4838,8 +4848,12 @@ export default{
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_TOP50_UNIVERSE==='true')
-      ctx.waitUntil(import('./pro-top50.mjs').then(m=>m.collectTop50(env)).then(r=>{
-        if(r?.ok!==true)console.warn('top50_public_universe_unavailable',String(r?.reason||'unverified').slice(0,65));
+      ctx.waitUntil(import('./pro-top50.mjs').then(m=>m.collectTop50(env)).then(async r=>{
+        if(r?.ok!==true){
+          console.warn('top50_public_universe_unavailable',String(r?.reason||'unverified').slice(0,65));return;
+        }
+        const x=await (await import('./pro-venue-matrix.mjs')).collectVenueMatrix(env);
+        if(x?.ok!==true)console.warn('top50_venue_matrix_incomplete',String(x?.reason||'unverified').slice(0,65));
       }).catch(()=>console.warn('top50_public_universe_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
       ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
