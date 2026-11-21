@@ -4176,6 +4176,10 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-venue-matrix.mjs')).serveVenueMatrix(request,env);
   }
+  if(path==='/market-hub/v1/liquidity'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./liquidity-intelligence.mjs')).serveLiquidity(request,env);
+  }
   if(path==='/market-hub/v1/pro-top50'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-top50.mjs')).serveTop50(env);

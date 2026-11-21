@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import {normalizeBook,depthStats,simulateOrder,sampleLiquidity,serveLiquidity} from '../src/liquidity-intelligence.mjs';
+const now=Date.UTC(2026,10,21,8,0);
+const a={retCode:0,ts:now,result:{s:'BTCUSDT',b:[['100','2'],['99','3']],a:[['101','3'],['102','4']]}};
+const b={lastUpdateId:12,T:now,bids:[['99.9','2'],['99.8','3']],asks:[['100.3','3'],['100.4','4']]};
+const book=normalizeBook('Bybit',a,'BTCUSDT',now);
+assert.equal(book.best_bid,100);
+assert.ok(Math.abs(book.spread_bps-99.502)<0.001);
+assert.equal(depthStats(book,.5).bid_usdt,200);
+assert.equal(simulateOrder(book,'buy',100).fully_covered,true);
+assert.equal(simulateOrder(book,'sell',100000).fully_covered,false);
+assert.equal(simulateOrder(book,'sell',100000).avg_price,null);
+assert.equal(normalizeBook('Bybit',{...a,ts:now-20000},'BTCUSDT',now),null);
+assert.equal(normalizeBook('Bybit',{...a,result:{...a.result,b:[['100','2'],['100','3']]}},'BTCUSDT',now),null);
+assert.equal(normalizeBook('Binance',b,'BTCUSDT',now).best_ask,100.3);
+const fakeFetch=async url=>({ok:true,headers:new Headers(),text:async()=>JSON.stringify(url.includes('bybit')?a:b)});
+const payload=await sampleLiquidity('BTCUSDT',{now,fetchImpl:fakeFetch});
+assert.equal(payload.venues.length,2);assert.equal(payload.orders_enabled,false);
+const store=new Map([['market-hub/universe/bybit-linear-top50-v1.json',{
+ schema:'lumex_uid_top50_v1',generated_at_ms:now-1000,items:[{symbol:'BTCUSDT',venue:'Bybit'}]}]]);
+let calls=0;
+const env={MARKET_DATA:{get:async key=>store.has(key)?{json:async()=>store.get(key)}:null,
+ put:async(k,v)=>store.set(k,JSON.parse(v))}};
+const fetchCount=async url=>{calls++;return fakeFetch(url)};
+const ok=await serveLiquidity(new Request('https://worker/market-hub/v1/liquidity?symbol=BTCUSDT'),env,{now,fetchImpl:fetchCount});
+assert.equal(ok.status,200);assert.equal((await ok.json()).venues.length,2);
+assert.equal(calls,2);
+const hit=await serveLiquidity(new Request('https://worker/market-hub/v1/liquidity?symbol=BTCUSDT'),env,{now:now+4000,fetchImpl:fetchCount});
+assert.equal(hit.status,200);assert.equal(calls,2);
+const no=await serveLiquidity(new Request('https://worker/market-hub/v1/liquidity?symbol=HACKUSDT'),env,{now,fetchImpl:fakeFetch});
+assert.equal(no.status,503);
+const stale=await serveLiquidity(new Request('https://worker/market-hub/v1/liquidity?symbol=BTCUSDT'),env,{now:now+16*60000,fetchImpl:fakeFetch});
+assert.equal(stale.status,503);
+console.log('PASS liquidity: strict base qty, gaps/stale, two-venue simulation, read-cache, allowlist');
