@@ -1,0 +1,24 @@
+name: LUMEX Hyperliquid whale chart source diagnostic
+on:
+  pull_request:
+    paths:
+      - 'production/src/hyperliquid-whale-history.mjs'
+      - 'production/src/hyperliquid-whales.mjs'
+      - 'production/tests/probe_whale_history_live_20261121.mjs'
+      - '.github/workflows/lumex-whale-history-diagnostic.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run strict read-only regression
+        run: |
+          node production/tests/test_whale_history_20261121.mjs
+      - name: Diagnose public historical price and portfolio source
+        run: node production/tests/probe_whale_history_live_20261121.mjs
