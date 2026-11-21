@@ -30,8 +30,12 @@ const noTs=structuredClone(spot);noTs.rows[3][0]*=1000;
 assert.equal(validateHourlyArchive(noTs,'BTC','spot',now),null);
 const short=structuredClone(spot);short.rows=short.rows.slice(-2000);short.start_ms=short.rows[0][0];short.count=2000;
 assert.equal(validateHourlyArchive(short,'BTC','spot',now),null);
-const store=new Map([['market-hub/order-flow/v1/hourly/BTC-spot.json',spot],
- ['market-hub/order-flow/v1/hourly/BTC-um-futures.json',futures]]);
+const release='44890559970-1',root='market-hub/order-flow/v1/hourly/releases/'+release+'/';
+const pointer={schema:'lumex_flow_archive_pointer_v1',complete:true,release_id:release,
+ source:'official_binance_public_1h_klines',market_count:8,created_at_ms:now,
+ symbols:['BTC','ETH','SOL','XRP'],markets:['spot','um-futures']};
+const store=new Map([['market-hub/order-flow/v1/current.json',pointer],
+ [root+'BTC-spot.json',spot],[root+'BTC-um-futures.json',futures]]);
 const env={MARKET_DATA:{get:async key=>store.has(key)?{size:JSON.stringify(store.get(key)).length,json:async()=>store.get(key)}:null}};
 let r=await serveOrderFlowHistory(new Request('https://worker/market-hub/v1/order-flow-history?symbol=BTC'),env,{now});
 assert.equal(r.status,200);assert.equal((await r.json()).daily.length,90);
@@ -42,4 +46,12 @@ assert.equal(r.status,400);
 const stale=now+50*H;
 assert.equal(computeOrderFlow(validateHourlyArchive(spot,'BTC','spot',stale),
  validateHourlyArchive(futures,'BTC','um-futures',stale),stale),null);
+store.delete('market-hub/order-flow/v1/current.json');
+r=await serveOrderFlowHistory(new Request('https://worker/market-hub/v1/order-flow-history?symbol=BTC'),env,{now});
+assert.equal(r.status,503);
+store.set('market-hub/order-flow/v1/current.json',pointer);
+store.delete(root+'BTC-spot.json');
+r=await serveOrderFlowHistory(new Request('https://worker/market-hub/v1/order-flow-history?symbol=BTC'),env,{now});
+assert.equal(r.status,503);
+store.set(root+'BTC-spot.json',spot);
 console.log('PASS 90d source-specific CVD, average fills, exact coverage, no gap, no future data, no fake live launch');
