@@ -1,0 +1,22 @@
+name: LUMEX liquidity official provider diagnostic (read only)
+on:
+  pull_request:
+    paths:
+      - 'production/src/liquidity-intelligence.mjs'
+      - 'production/tests/test_liquidity_intelligence_20261121.mjs'
+      - '.github/workflows/lumex-liquidity-source-probe.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Worker liquidity source regression
+        run: node production/tests/test_liquidity_intelligence_20261121.mjs
+      - name: Probe published public exchange orderbooks (no credentials, no orders)
+        run: node production/tests/probe_public_liquidity_sources.mjs
