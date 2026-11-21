@@ -46,7 +46,7 @@ def audit(root, now_ms):
         except Exception as err:
             invalid.append(f"{file.name}: {type(err).__name__}")
     fresh = sorted(k for k,t in last.items() if now_ms-t < 8*60000)
-    proof = {"ok":bool(fresh) and not invalid,"schema":"lumex_gate_r2_audit_v1",
+    proof = {"ok":len(fresh)==8 and not invalid,"schema":"lumex_gate_r2_audit_v1",
       "latest_observed_markets":len(fresh),"total_markets":8,
       "recent_markets":fresh,"snapshots_read":checks,"invalid":invalid,
       "live_verified":False,"customer_launch_ready":False,
@@ -73,6 +73,9 @@ def main():
             heartbeat=None
     if heartbeat:
         proof["heartbeat_age_seconds"]=round((int(time.time()*1000)-heartbeat["status_written_at_ms"])/1000)
+        if not (0 <= proof["heartbeat_age_seconds"] <= 120):
+            proof["ok"]=False
+            proof["heartbeat_error"]="missing_current_heartbeat"
         proof["websocket_connections"]=heartbeat.get("websocket_connections",[])
         proof["websocket_details"]=heartbeat.get("websocket_details",{})
         proof["recent_gaps"]=heartbeat.get("unresolved_gaps",[])[-6:]
@@ -89,6 +92,7 @@ def main():
                                    for i in heartbeat.get("sources",[])}
     else:
         proof["heartbeat_state"]="missing_or_invalid"
+        proof["ok"]=False
     print(json.dumps(proof,ensure_ascii=False))
     with open("/tmp/lumex-flow-proof.md","w",encoding="utf-8") as f:
         f.write("## LUMEX Gate WebSocket minute snapshots\n\n")
