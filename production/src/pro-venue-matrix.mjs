@@ -67,6 +67,109 @@ async function json(url){
   return JSON.parse(txt);
  }finally{clearTimeout(timeout)}
 }
+/* Write a single immutable, provider-separated 50-symbol market matrix per UTC hour.
+ * History starts at the first successful deployment; no synthetic backfill.
+ */
+const HISTORY_PREFIX='market-hub/universe/venue-history/v1/';
+const HOUR_MS=3600000;
+const bucketKey=ms=>HISTORY_PREFIX+String(Math.floor(ms/HOUR_MS)*HOUR_MS)+'.json';
+export async function archiveVenueHour(env,snapshot,now=Date.now()){
+ if(snapshot?.schema!=='lumex_uid_top50_venue_matrix_v1'||
+    snapshot?.ok!==true||snapshot?.order_execution!==false||
+    snapshot?.generated_at_ms!==now||!Array.isArray(snapshot.supported_symbols)||
+    snapshot.supported_symbols.length<1||snapshot.supported_symbols.length>50)
+   return {ok:false,reason:'snapshot_unverified'};
+ const key=bucketKey(now);
+ try{
+  const prior=await env.MARKET_DATA.get(key);
+  if(prior){
+   const old=await prior.json();
+   if(old?.schema!=='lumex_uid_top50_venue_matrix_v1'||
+      old?.order_execution!==false||
+      old?.snapshot_hour_ms!==Math.floor(now/HOUR_MS)*HOUR_MS)
+     return {ok:false,reason:'archived_hour_corrupt'};
+   return {ok:true,stored:false};
+  }
+  const archived={...snapshot,snapshot_hour_ms:Math.floor(now/HOUR_MS)*HOUR_MS};
+  const payload=JSON.stringify(archived);
+  if(payload.length>450000)return {ok:false,reason:'history_snapshot_oversized'};
+  await env.MARKET_DATA.put(key,payload,{httpMetadata:{contentType:'application/json'}});
+  const check=await env.MARKET_DATA.get(key);
+  if(!check)return {ok:false,reason:'history_readback_missing'};
+  const confirmed=await check.json();
+  if(confirmed?.schema!==archived.schema||
+     confirmed?.snapshot_hour_ms!==archived.snapshot_hour_ms||
+     confirmed?.generated_at_ms!==archived.generated_at_ms||
+     confirmed?.order_execution!==false||
+     !Array.isArray(confirmed.supported_symbols)||
+     confirmed.supported_symbols.length!==archived.supported_symbols.length)
+     return {ok:false,reason:'history_readback_invalid'};
+  return {ok:true,stored:true};
+ }catch{return {ok:false,reason:'history_archive_unavailable'}}
+}
+
+/** Same-provider hourly observations for a single verified top50 symbol.
+ * 25 fixed keys, including current UTC hour; no scanning and no interpolating.
+ */
+export async function top50VenueHistory(env,symbol,now=Date.now()){
+ if(!/^[A-Z0-9]{2,20}USDT$/.test(symbol)||!env?.MARKET_DATA)
+   throw Error('invalid_history_symbol');
+ const current=await env.MARKET_DATA.get(KEY);
+ const latest=current?await current.json():null;
+ if(latest?.schema!=='lumex_uid_top50_venue_matrix_v1'||
+   latest?.order_execution!==false||!Array.isArray(latest.supported_symbols)||
+   !latest.supported_symbols.includes(symbol)||
+   !Number.isSafeInteger(latest.generated_at_ms)||
+   latest.generated_at_ms>now+120000||now-latest.generated_at_ms>15*60000)
+   throw Error('current_universe_unavailable');
+ const base=Math.floor(now/HOUR_MS)*HOUR_MS;
+ const times=Array.from({length:25},(_,i)=>base-(24-i)*HOUR_MS);
+ const snapshots=[];
+ for(let i=0;i<times.length;i+=5){
+  const batch=await Promise.all(times.slice(i,i+5).map(async hour=>{
+   try{
+    const obj=await env.MARKET_DATA.get(bucketKey(hour));
+    if(!obj||obj.size>450000)return null;
+    const doc=await obj.json(),at=Number(doc?.generated_at_ms);
+    if(doc?.ok!==true||doc.schema!=='lumex_uid_top50_venue_matrix_v1'||
+       doc.order_execution!==false||doc.aggregation!=='none'||
+       doc.snapshot_hour_ms!==hour||!Number.isSafeInteger(at)||
+       at<hour||at>=hour+HOUR_MS||at>now+120000||at<now-26*HOUR_MS||
+       !Array.isArray(doc.markets?.[symbol])||doc.markets[symbol].length!==5)
+       return null;
+    const exchanges=[];
+    for(let index=0;index<NAMES.length;index++){
+     const venue=doc.markets[symbol][index],exchange=NAMES[index];
+     if(venue?.exchange!==exchange||venue?.symbol!==symbol||
+       !['observed','unavailable'].includes(venue.status))return null;
+     const stamp=Number(venue.observed_ms);
+     const oi=Number(venue.oi_usd);
+     const validOI=venue.status==='observed'&&venue.oi_usd!==null&&
+       Number.isFinite(oi)&&oi>0&&oi<=1e20&&Number.isSafeInteger(stamp)&&
+       Math.abs(stamp-at)<=26*60000;
+     exchanges.push({exchange,account:null,funding:null,
+       open_interest:validOI?{value:oi,unit:'USD',asof_ms:stamp}:null});
+    }
+    return {at_ms:at,exchanges};
+   }catch{return null}
+  }));
+  snapshots.push(...batch.filter(Boolean));
+ }
+ snapshots.sort((a,b)=>a.at_ms-b.at_ms);
+ return {ok:true,schema:'lumex_exchange_history_v1',symbol,window_hours:24,
+   source_scope:'source_isolated_observed_public_exchange_history',market_total_estimate:false,
+   missing_is_zero:false,order_execution:false,snapshots,
+   generated_at_ms:now,history_started:snapshots.length>0,
+   series_scope:'same_venue_hourly_observed_oi_usd_only',no_historical_backfill:true};
+}
+export async function serveTop50VenueHistory(request,env,now=Date.now()){
+ const u=new URL(request.url),symbol=String(u.searchParams.get('symbol')||'');
+ const reply=(doc,status=200)=>new Response(JSON.stringify(doc),{status,headers:{
+  'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'}});
+ try{return reply(await top50VenueHistory(env,symbol,now))}
+ catch{return reply({ok:false,error:'verified_top50_history_unavailable'},503)}
+}
+
 export async function collectVenueMatrix(env,now=Date.now()){
  if(!env?.MARKET_DATA)return {ok:false,reason:'r2_missing'};
  const o=await env.MARKET_DATA.get('market-hub/universe/bybit-linear-top50-v1.json');
@@ -79,7 +182,9 @@ export async function collectVenueMatrix(env,now=Date.now()){
  const verified=await check.json();
  if(verified?.schema!==result.schema||verified?.generated_at_ms!==now||Object.keys(verified.markets||{}).length!==result.supported_symbols.length)
    return {ok:false,reason:'readback_bad'};
- return {ok:true,symbols:result.supported_symbols.length,sources:Object.values(result.observed_sources).filter(Boolean).length};
+ const archive=await archiveVenueHour(env,result,now);
+ return {ok:true,symbols:result.supported_symbols.length,sources:Object.values(result.observed_sources).filter(Boolean).length,
+   archive_ok:archive.ok===true,archive_status:archive.ok===true?(archive.stored?'stored':'already_recorded'):archive.reason};
 }
 export async function serveVenueMatrix(request,env,now=Date.now()){
  const u=new URL(request.url),symbol=String(u.searchParams.get('symbol')||'');
