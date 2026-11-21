@@ -13,7 +13,9 @@ const cleanState=()=>({
  schema:'lumex_gate_live_collector_v1',first_started_ms:Date.now(),last_tick_ms:0,
  last_r2_write_ms:0,last_r2_key:null,counts:{},last_ids:{},last_event_ms:{},
  buckets:{},gaps:[],bad_events:0,duplicate_events:0,connection_failures:0,
- reconnects:0,multipliers:{},contracts_verified_ms:0
+ reconnects:0,multipliers:{},contracts_verified_ms:0,
+ rest_replay_pending:[],rest_replay_checks:[],last_rest_replay_attempt_ms:0,
+ futures_decimal_header_requested:false
 });
 function recordGap(st,reason,source,at=Date.now()){
  const last=st.gaps.at(-1);
@@ -68,6 +70,9 @@ export class OrderFlowLiveLogic{
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
    last_archive_key:this.state.last_r2_key||null,
+   futures_decimal_header_requested:!!this.state.futures_decimal_header_requested,
+   rest_replay_pending:this.state.rest_replay_pending?.length||0,
+   recent_rest_replay_checks:(this.state.rest_replay_checks||[]).slice(-12),
    invalid_messages:this.state.bad_events,duplicates:this.state.duplicate_events,
    connection_failures:this.state.connection_failures,reconnects:this.state.reconnects,
    unresolved_gaps:this.state.gaps.slice(-15),
@@ -100,15 +105,54 @@ export class OrderFlowLiveLogic{
   this.state.multipliers=result;this.state.contracts_verified_ms=Date.now();
   return true;
  }
+ queueRestGap(market,at=Date.now()){
+  if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
+  const queue=this.state.rest_replay_pending||(this.state.rest_replay_pending=[]);
+  const minute=Math.floor((at-3*MS_MIN)/MS_MIN)*MS_MIN;
+  for(const symbol of FLOW_SYMBOLS){
+   const key=market+':'+symbol+':'+minute;
+   if(!queue.some(x=>x.key===key)&&queue.length<48)
+    queue.push({key,market,symbol,minute,queued_at_ms:at});
+  }
+  if(queue.length>=48)recordGap(this.state,'rest_replay_queue_bounded','all');
+ }
+ async runOneRestReplay(now=Date.now()){
+  if(this.env.AUTO_ORDER_FLOW_REST_REPLAY!=='true')return;
+  const queue=this.state.rest_replay_pending||[];
+  if(!queue.length||now-(this.state.last_rest_replay_attempt_ms||0)<MS_MIN)return;
+  this.state.last_rest_replay_attempt_ms=now;
+  const task=queue.shift();
+  const result={market:task.market,symbol:task.symbol,minute_ms:task.minute};
+  try{
+   const mod=await import('./order-flow-rest-replay.mjs');
+   const proof=await mod.boundedGateRestReplay(task.market,task.symbol,task.minute,
+     this.state.multipliers,{now,limit:1000,maxPages:3});
+   result.status=proof.status;result.pages=proof.pages;result.rows=proof.rows;
+   if(this.env.MARKET_DATA){
+    await this.env.MARKET_DATA.put(mod.recoveryKey(task.market,task.symbol,task.minute),
+     JSON.stringify(proof),{httpMetadata:{contentType:'application/json'}});
+   }else result.status='r2_unavailable';
+   if(proof.status!=='bounded_rest_pages_exhausted')
+    recordGap(this.state,'rest_replay_'+String(proof.status).slice(0,50),
+      task.market+':'+task.symbol);
+  }catch{
+   result.status='rest_replay_unavailable';
+   recordGap(this.state,'rest_replay_exception',task.market+':'+task.symbol);
+  }
+  const checks=this.state.rest_replay_checks||(this.state.rest_replay_checks=[]);
+  checks.push({...result,attempt_at_ms:now});this.state.rest_replay_checks=checks.slice(-40);
+ }
  async ensure(){
   // A websocket that connected previously but silently stopped emitting is untrusted.
   for(const [market,ws] of this.sockets){
    if(ws.readyState===3||ws.readyState===2){
     this.sockets.delete(market);recordGap(this.state,'websocket_closed',market);
+    this.queueRestGap(market);
    }else if(this.connectionStarted[market]&&Date.now()-this.connectionStarted[market]>90000&&
     !FLOW_SYMBOLS.some(s=>fresh(this.state.last_event_ms[market+':'+s]))){
     try{ws.close(1000,'reconnect_stale');}catch{}
     this.sockets.delete(market);recordGap(this.state,'websocket_stale',market);
+    this.queueRestGap(market);
    }
   }
   const valid=await this.multipliers();
@@ -124,14 +168,28 @@ export class OrderFlowLiveLogic{
   const url=market==='spot'?'wss://api.gateio.ws/ws/v4/':'wss://fx-ws.gateio.ws/v4/ws/usdt';
   const channel=market==='spot'?'spot.trades':'futures.trades';
   try{
-   const ws=new WebSocket(url);
+   let ws;
+   if(market==='um-futures'){
+    // Gate futures truncates fractional sizes unless decimal mode is requested.
+    const upgraded=await fetch('https://fx-ws.gateio.ws/v4/ws/usdt',{
+      headers:{Upgrade:'websocket','X-Gate-Size-Decimal':'1'},
+      signal:AbortSignal.timeout(10000)});
+    if(upgraded.status!==101||!upgraded.webSocket){
+     recordGap(this.state,'futures_decimal_upgrade_unavailable',market);
+     this.state.connection_failures++;return;
+    }
+    ws=upgraded.webSocket;ws.accept();
+    this.state.futures_decimal_header_requested=true;
+   }else ws=new WebSocket(url);
    this.sockets.set(market,ws);this.connectionStarted[market]=Date.now();
-   ws.addEventListener('open',()=>{
+   const subscribe=()=>{
     this.state.reconnects++;
     try{ws.send(JSON.stringify({time:Math.floor(Date.now()/1000),
       channel,event:'subscribe',payload:FLOW_SYMBOLS.map(pair)}));}
     catch{recordGap(this.state,'subscribe_failed',market);}
-   });
+   };
+   ws.addEventListener('open',subscribe);
+   if(ws.readyState===1)subscribe();
    ws.addEventListener('message',event=>{
     try{
      if(typeof event.data!=='string'||event.data.length>1200000){this.state.bad_events++;return;}
@@ -146,6 +204,7 @@ export class OrderFlowLiveLogic{
    ws.addEventListener('close',()=>{
     if(this.sockets.get(market)===ws)this.sockets.delete(market);
     recordGap(this.state,'websocket_disconnected',market);
+    this.queueRestGap(market);
    });
    ws.addEventListener('error',()=>{this.state.connection_failures++;
     recordGap(this.state,'websocket_error',market);
@@ -195,7 +254,7 @@ export class OrderFlowLiveLogic{
    const body={schema:'lumex_gate_ws_observed_minute_v1',source:'gateio',
     observed_minute_ms:minute,closed_at_ms:now,rows,
     complete_trades_verified:false,synthetic_values:false,
-    gaps_observed:this.state.gaps.length>0,
+    gaps_observed:this.state.gaps.some(x=>x.at_ms>=minute&&x.at_ms<minute+MS_MIN),
     scope:'observed_websocket_messages_only_not_exchange_complete',
     historical_binance_archive_combined:false,customer_launch_ready:false};
    await this.env.MARKET_DATA.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'}});
@@ -207,6 +266,7 @@ export class OrderFlowLiveLogic{
    recordGap(this.state,'buffer_overflow','all');
    for(const minute of remaining.map(Number).sort((a,b)=>a-b).slice(0,-12))delete this.state.buckets[minute];
   }
+  await this.runOneRestReplay(now);
   this.state.last_tick_ms=now;
   await this.ctx.storage.put('phase33:checkpoint',this.state);
   // Private diagnostic heartbeat. Does NOT create synthetic trade rows.

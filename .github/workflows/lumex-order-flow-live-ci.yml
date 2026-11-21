@@ -5,7 +5,7 @@ on:
     paths:
       - 'production/src/index.js'
       - 'production/src/order-flow-*.mjs'
-      - 'production/tests/test_order_flow_live_20261121.mjs'
+      - 'production/tests/test_order_flow_*.mjs'
       - 'production/wrangler.jsonc'
       - 'production/package.json'
       - '.github/workflows/lumex-worker-production-deploy.yml'
@@ -43,6 +43,8 @@ jobs:
           assert.match(root,/order-flow-live-health/);
           assert.match(root,/hubAuthorized\(request,env\)/);
           assert.match(src,/customer_launch_ready:false/);
+          assert.match(src,/X-Gate-Size-Decimal/,'futures must request precise contract sizes');
+          assert.match(src,/boundedGateRestReplay/,'REST probes must be separate from WS aggregation');
           assert.match(src,/historical_binance_archive_combined:false/);
           assert.ok(config.exports.OrderFlowLiveCollector);
           assert.equal(config.vars.AUTO_ORDER_FLOW_LIVE,'true');
