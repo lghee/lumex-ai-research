@@ -6,6 +6,8 @@
  */
 import {FLOW_SYMBOLS,parseGatePacket,orderIdAfter} from './order-flow-live-contract.mjs';
 import {collectStandbySlice,standbyR2Key,decideRestStandby,lastClosedSlice} from './order-flow-futures-rest-standby.mjs';
+import {NATIVE_PROBE_URL,PROBE_SAMPLE_MS,nativeProbeState,shouldRunNativeProbe,
+ nativeProbeSubscription,processNativeProbeFrame,nativeProbeClose} from './order-flow-native-transport-probe.mjs';
 const ROOT='market-hub/order-flow/v1/live/gate/';
 const MS_MIN=60000;
 export const gateReplayOptions=(market,now=Date.now())=>({now,limit:1000,maxPages:market==='um-futures'?6:3});
@@ -21,6 +23,7 @@ const cleanState=()=>({
  futures_1006_recent_ms:[],futures_ws_circuit_until:0,
  futures_rest_cursor:{},futures_rest_pending_slice:{},futures_rest_last_ok_ms:{},futures_rest_last_trade_ms:{},
  futures_rest_last_saved_ms:{},futures_rest_last_error:{},futures_rest_requests:0,
+ futures_native_probe:{},
  filtered_internal_trades:0,filtered_other_quote_trades:0,
  rejected_trade_rows:0,malformed_ws_frames:0,subscription_failures:0
 });
@@ -37,6 +40,7 @@ export class OrderFlowLiveLogic{
   this.ctx=ctx;this.env=env;
   this.sockets=new Map();this.connecting=new Set();this.connectionStarted={};
   this.retryUntil={};this.failureStreak={};this.lastPingMs={};
+  this.nativeProbeSocket=null;
   this.state=cleanState();
   this.ready=ctx.storage.get('phase33:checkpoint').then(previous=>{
    if(previous?.schema==='lumex_gate_live_collector_v1'){
@@ -74,7 +78,7 @@ export class OrderFlowLiveLogic{
   const connected=[...this.sockets.keys()].filter(x=>this.sockets.get(x)?.readyState===1);
   return {ok:true,schema:'lumex_gate_live_observation_health_v1',scope:'gateio_only',
    phase:'collection_proof',sampling:'gate_public_websocket_messages',
-   runtime_revision:'phase36_futures_rest_standby_20261121',
+   runtime_revision:'phase38_native_gate_transport_probe_20261121',
    websocket_connections:connected,source_count:sources.length,sources,
    multiplier_check_ms:this.state.contracts_verified_ms||null,
    last_archive_ms:this.state.last_r2_write_ms||null,
@@ -83,6 +87,7 @@ export class OrderFlowLiveLogic{
    websocket_retry_after_ms:this.retryUntil,
    websocket_close_details:(this.state.websocket_close_details||[]).slice(-8),
    futures_last_pong_ms:this.state.futures_last_pong_ms||null,
+   futures_native_transport_probe:nativeProbeState(this.state.futures_native_probe,now),
    futures_ws_circuit_until:this.state.futures_ws_circuit_until||0,
    futures_ws_circuit_trips:this.state.futures_ws_circuit_trips||0,
    futures_1006_last_3m:(this.state.futures_1006_recent_ms||[])
@@ -183,7 +188,64 @@ export class OrderFlowLiveLogic{
   const checks=this.state.rest_replay_checks||(this.state.rest_replay_checks=[]);
   checks.push({...result,attempt_at_ms:now});this.state.rest_replay_checks=checks.slice(-40);
  }
+ ensureNativeProbe(now=Date.now()){
+  // Never connect native WS if the experiment is disabled. Native WS cannot
+  // send the mandatory decimal precision header, so metadata only is recorded.
+  if(this.env.AUTO_GATE_NATIVE_TRANSPORT_PROBE!=='true')return;
+  const st=this.state.futures_native_probe||(this.state.futures_native_probe={});
+  if(this.nativeProbeSocket&&this.nativeProbeSocket.readyState===1){
+   if(now-(st.connected_at_ms||now)>PROBE_SAMPLE_MS){
+    try{this.nativeProbeSocket.close(1000,'phase38_sample_complete');}catch{}
+    return;
+   }
+   if(now-(st.last_ping_at_ms||0)>20000){
+    try{
+     this.nativeProbeSocket.send(JSON.stringify({time:Math.floor(now/1000),channel:'futures.ping'}));
+     st.last_ping_at_ms=now;
+    }catch{st.last_error_at_ms=now;}
+   }
+   return;
+  }
+  if(this.nativeProbeSocket&&this.nativeProbeSocket.readyState===0 &&
+     now-(st.last_attempt_at_ms||0)<20000)return;
+  if(this.nativeProbeSocket&&this.nativeProbeSocket.readyState!==1){
+   try{this.nativeProbeSocket.close(1000,'phase38_recover_stalled_handshake');}catch{}
+   this.nativeProbeSocket=null;
+   st.state='closed';
+  }
+  if(st.state==='connected'&&!this.nativeProbeSocket)
+   st.state='interrupted_by_DO_restart';
+  const recent=(this.state.futures_1006_recent_ms||[]).filter(t=>now-t<180000);
+  const gateDegraded=(this.state.futures_ws_circuit_until||0)>now||
+    recent.length>0||this.state.websocket_close_details?.some(x=>
+      x.market==='um-futures'&&x.code===1006&&now-x.at_ms<180000);
+  if(!gateDegraded||!shouldRunNativeProbe(st,now))return;
+  st.state='connecting';st.last_attempt_at_ms=now;
+  st.attempts=(st.attempts||0)+1;
+  try{
+   const ws=new WebSocket(NATIVE_PROBE_URL);
+   this.nativeProbeSocket=ws;
+   ws.addEventListener('open',()=>{
+    st.state='connected';st.connected_at_ms=Date.now();
+    try{ws.send(nativeProbeSubscription());}catch{
+     st.last_error_at_ms=Date.now();try{ws.close(1011,'subscribe_send_failed');}catch{}
+    }
+   });
+   ws.addEventListener('message',event=>{
+    processNativeProbeFrame(st,event.data,Date.now());
+   });
+   ws.addEventListener('close',event=>{
+    if(this.nativeProbeSocket===ws)this.nativeProbeSocket=null;
+    nativeProbeClose(st,Number(event.code||0),event.reason,Date.now());
+   });
+   ws.addEventListener('error',()=>{st.last_error_at_ms=Date.now();});
+  }catch{
+   this.nativeProbeSocket=null;
+   st.state='connect_failed';st.last_error_at_ms=Date.now();
+  }
+ }
  async ensure(){
+  this.ensureNativeProbe();
   // Gate protocol ping/pong is automatic at WebSocket layer. Add an
   // application-level liveness probe to distinguish silent futures sockets.
   const future=this.sockets.get('um-futures');
@@ -445,8 +507,15 @@ export class OrderFlowLiveLogic{
    recordGap(this.state,'buffer_overflow','all');
    for(const minute of remaining.map(Number).sort((a,b)=>a-b).slice(0,-12))delete this.state.buckets[minute];
   }
-  await this.runOneRestReplay(now);
+  // Current 10-second futures observations take priority over historical
+  // REST replay, which can consume up to 12 seconds per tick. Never let a
+  // lower-priority repair cause current source gaps during WS outages.
   await this.runFuturesRestStandby(now);
+  const futuresConnection=this.sockets.get('um-futures')?.readyState===1;
+  const futuresCurrent=FLOW_SYMBOLS.every(symbol=>fresh(
+   this.state.last_event_ms['um-futures:'+symbol],now));
+  if(futuresConnection&&futuresCurrent)
+   await this.runOneRestReplay(now);
   this.state.last_tick_ms=now;
   await this.ctx.storage.put('phase33:checkpoint',this.state);
   // Private diagnostic heartbeat. Does NOT create synthetic trade rows.

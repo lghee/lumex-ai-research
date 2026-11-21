@@ -127,7 +127,8 @@
     "AUTO_ORDER_FLOW_LIVE": "true",
     "AUTO_ORDER_FLOW_COVERAGE": "true",
     "AUTO_ORDER_FLOW_REST_REPLAY": "true",
-    "AUTO_GATE_FUTURES_REST_STANDBY": "true"
+    "AUTO_GATE_FUTURES_REST_STANDBY": "true",
+    "AUTO_GATE_NATIVE_TRANSPORT_PROBE": "true"
   },
   "keep_vars": true,
   "observability": {

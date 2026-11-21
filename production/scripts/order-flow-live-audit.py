@@ -200,9 +200,17 @@ def main():
         if not proof["phase37_runtime_features_verified"]:
             proof["ok"]=False
             proof["runtime_feature_error"]="deployed_DO_missing_phase37_contiguous_retry"
-        if proof["collector_runtime_revision"] != "phase36_futures_rest_standby_20261121":
+        if proof["collector_runtime_revision"] != "phase38_native_gate_transport_probe_20261121":
             proof["ok"]=False
             proof["runtime_error"]="old_durable_object_version"
+        native=heartbeat.get("futures_native_transport_probe")
+        proof["native_ws_transport_probe"]=native if isinstance(native,dict) else {}
+        if (not isinstance(native,dict) or
+            native.get("trade_notional_usable") is not False or
+            native.get("precision_header_requested") is not False or
+            native.get("customer_launch_ready") is not False):
+            proof["ok"]=False
+            proof["native_probe_error"]="untrusted_or_missing_native_transport_evidence"
         proof["futures_decimal_header_requested"]=heartbeat.get("futures_decimal_header_requested") is True
         proof["message_diagnostics"]=heartbeat.get("message_diagnostics",{})
         if "um-futures" in proof["websocket_connections"] and not proof["futures_decimal_header_requested"]:
@@ -226,6 +234,8 @@ def main():
         f.write(f"- Last recorded gaps: {proof.get('recent_gaps',[])}\n")
         f.write(f"- WS close codes: {proof.get('websocket_close_details',[])}\n")
         f.write(f"- Futures pong age: {proof.get('futures_last_pong_age_seconds','unknown')}s\n")
+        f.write(f"- Native WS A/B probe: {proof.get('native_ws_transport_probe',{})}\n")
+
 
         f.write(f"- Collector revision: {proof.get('collector_runtime_revision','unavailable')}\n")
         f.write(f"- Phase37 DO runtime features verified: {proof.get('phase37_runtime_features_verified',False)}\n")

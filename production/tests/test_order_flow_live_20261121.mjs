@@ -65,7 +65,7 @@ flow.consume('um-futures',{event:'update',channel:'futures.trades',
  price:'80000'}]});
 assert.equal(flow.state.rejected_trade_rows,1);
 assert.equal(flow.state.bad_events,1,'genuinely malformed trade must be counted');
-assert.equal(flow.health().runtime_revision,'phase36_futures_rest_standby_20261121');
+assert.equal(flow.health().runtime_revision,'phase38_native_gate_transport_probe_20261121');
 assert.equal(flow.health().message_diagnostics.filtered_internal_trades,1);
 
 await flow.persist();
@@ -175,3 +175,71 @@ assert.equal(flow37.state.futures_rest_cursor.XRP,newEnd37);
 assert.equal(flow37.state.futures_rest_pending_slice.XRP,undefined);
 assert.equal(flow37.state.futures_rest_last_error.XRP,undefined);
 console.log('PASS Phase37 sequential per-symbol standby retries, no false cursor advancement on Gate 503/R2 outage');
+
+
+// Phase38: native WebSocket transport is metadata-only A/B diagnostics.
+// Gate's unlabelled native WebSocket may round fractional futures size, so
+// this socket cannot write a trade amount or customer notional to any bucket.
+const {processNativeProbeFrame,nativeProbeState,shouldRunNativeProbe}=await import(
+ '../src/order-flow-native-transport-probe.mjs');
+const rawProbe={};
+assert.equal(processNativeProbeFrame(rawProbe,JSON.stringify({
+ channel:'futures.trades',event:'update',
+ result:[{size:1.7,price:'100',contract:'BTC_USDT',id:'1234'}]
+}),Date.now()),true);
+assert.equal(rawProbe.observed_trade_frames,1);
+assert.equal(Object.prototype.hasOwnProperty.call(rawProbe,'result'),false);
+assert.equal(JSON.stringify(rawProbe).includes('1234'),false,
+ 'the native diagnostic must not store IDs, quantities, prices or trade data');
+assert.equal(nativeProbeState(rawProbe).trade_notional_usable,false);
+assert.equal(nativeProbeState(rawProbe).precision_header_requested,false);
+assert.equal(nativeProbeState(rawProbe).customer_launch_ready,false);
+assert.equal(processNativeProbeFrame(rawProbe,'<invalid',Date.now()),false);
+assert.equal(shouldRunNativeProbe({state:'closed',last_attempt_at_ms:100000},279999),false);
+assert.equal(shouldRunNativeProbe({state:'closed',last_attempt_at_ms:100000},280000),true);
+const actualWebSocket=globalThis.WebSocket;
+class FakeNativeWS {
+ static instances=[];
+ constructor(url){this.url=url;this.readyState=0;this.listeners={};this.sent=[];
+   FakeNativeWS.instances.push(this);}
+ addEventListener(type,fn){(this.listeners[type]||(this.listeners[type]=[])).push(fn);}
+ dispatch(type,event={}){for(const fn of this.listeners[type]||[])fn(event);}
+ send(payload){this.sent.push(payload);}
+ close(code,reason){this.readyState=3;this.dispatch('close',{code,reason});}
+}
+try{
+ globalThis.WebSocket=FakeNativeWS;
+ const now38=Date.now();
+ const flow38=new OrderFlowLiveLogic({storage:{
+   get:async()=>null,put:async()=>{},setAlarm:async()=>{}
+ }},{AUTO_GATE_NATIVE_TRANSPORT_PROBE:'true'});
+ await flow38.ready;
+ flow38.state.futures_1006_recent_ms=[now38-10000];
+ flow38.ensureNativeProbe(now38);
+ assert.equal(FakeNativeWS.instances.length,1);
+ const ws=FakeNativeWS.instances[0];
+ assert.match(ws.url,/fx-ws\.gateio\.ws/);
+ ws.readyState=1;ws.dispatch('open');
+ assert.ok(ws.sent.some(x=>JSON.parse(x).channel==='futures.trades'));
+ ws.dispatch('message',{data:JSON.stringify({
+   channel:'futures.trades',event:'subscribe',result:{status:'success'}})});
+ ws.dispatch('message',{data:JSON.stringify({
+   channel:'futures.trades',event:'update',
+   result:{contract:'BTC_USDT',price:'100',size:'1.123',id:'111'}
+ })});
+ assert.equal(flow38.state.futures_native_probe.subscriptions_ok,1);
+ assert.equal(flow38.state.futures_native_probe.observed_trade_frames,1);
+ assert.equal(flow38.state.buckets&&Object.keys(flow38.state.buckets).length,0);
+ assert.equal(Object.keys(flow38.state.last_ids).length,0,
+  'A/B diagnostic must never alter the production trade-ID high-water mark');
+ assert.equal(flow38.health().futures_native_transport_probe.trade_notional_usable,false);
+ ws.close(1006,'simulated abnormal close');
+ assert.equal(flow38.health().futures_native_transport_probe.last_close_code,1006);
+ assert.equal(flow38.nativeProbeSocket,null);
+ flow38.ensureNativeProbe(now38+120000);
+ assert.equal(FakeNativeWS.instances.length,1,'3-minute rate limit prevents probe connection storms');
+}finally{
+ if(actualWebSocket===undefined)delete globalThis.WebSocket;
+ else globalThis.WebSocket=actualWebSocket;
+}
+console.log('PASS Phase38 native WS A/B metadata only, no trade volumes, dedup IDs or client metrics');
