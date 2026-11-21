@@ -88,6 +88,10 @@ export class OrderFlowLiveLogic{
    websocket_retry_after_ms:this.retryUntil,
    websocket_close_details:(this.state.websocket_close_details||[]).slice(-8),
    futures_last_pong_ms:this.state.futures_last_pong_ms||null,
+   futures_decimal_ws_uptime_ms:connected.includes('um-futures')?
+     Math.max(0,now-(this.connectionStarted['um-futures']||now)):null,
+   futures_decimal_ws_stable_90s:connected.includes('um-futures')&&
+     now-(this.connectionStarted['um-futures']||now)>=90000,
    futures_native_transport_probe:nativeProbeState(this.state.futures_native_probe,now),
    futures_ws_circuit_until:this.state.futures_ws_circuit_until||0,
    futures_ws_circuit_trips:this.state.futures_ws_circuit_trips||0,
@@ -342,7 +346,9 @@ export class OrderFlowLiveLogic{
     if(this.sockets.get(market)===ws)this.sockets.delete(market);
     const details=this.state.websocket_close_details||(this.state.websocket_close_details=[]);
     details.push({market,at_ms:Date.now(),code:Number(event?.code||0),
-     clean:Boolean(event?.wasClean),reason:String(event?.reason||'').slice(0,55)});
+     clean:Boolean(event?.wasClean),reason:String(event?.reason||'').slice(0,55),
+     session_duration_ms:Math.max(0,Date.now()-
+       (this.connectionStarted[market]||Date.now()))});
     this.state.websocket_close_details=details.slice(-24);
     if(market==='um-futures'&&Number(event?.code)===1006){
      const at=Date.now();
