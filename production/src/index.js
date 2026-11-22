@@ -3683,9 +3683,13 @@ export function nativeWhaleWatchlistBackfillProof(status,now=Date.now()){
  * Uses the existing 35-day public event hot ledger plus 60-minute verified
  * BTC futures close solely to estimate USD, not to infer exchange balances.
  */
-export function nativeWhales30d(rows,candles,now=Date.now()){
+export function nativeWhales30d(rows,candles,now=Date.now(),collectorSuccessMs=null){
   if(!Array.isArray(rows)||rows.length>5000||!Array.isArray(candles)||candles.length<720)
     throw Error('native_whale_input_limit');
+  // Freshness = the BTC watchlist collector's own last successful poll, not
+  // the read time. The public route passes/overrides the verified value.
+  const given=Number(collectorSuccessMs);
+  const success=Number.isSafeInteger(given)&&given>0&&given<=now+120000?given:now;
   const priceByHour=new Map();
   for(const bar of candles){
     const ts=Number(bar?.t),close=Number(bar?.c);
@@ -3693,12 +3697,15 @@ export function nativeWhales30d(rows,candles,now=Date.now()){
       throw Error('native_whale_candle_invalid');
     priceByHour.set(ts,close);
   }
+  // Daily keys use the same KST calendar day as the WordPress flow series, so
+  // a price point is never drawn on the neighbouring day's bar.
   const dailyPrice={};
   for(const bar of candles){
-    const dt=new Date(Number(bar.t)).toISOString().slice(0,10);
+    const dt=new Date(Number(bar.t)+9*3600000).toISOString().slice(0,10);
     dailyPrice[dt]=Number(bar.c);
   }
   const latestClose=Number(candles.at(-1)?.c||0);
+  const latestCloseUnix=Math.floor((Number(candles.at(-1)?.t||0)+3600000)/1000);
   const from=now-30*86400000,out=[],ids=new Set();
   for(const row of rows){
     let e;try{e=JSON.parse(row.payload)}catch{throw Error('native_whale_payload_invalid')}
@@ -3724,9 +3731,10 @@ export function nativeWhales30d(rows,candles,now=Date.now()){
     order_execution:false,days:30,provider:'esplora',price_method:'verified_r2_btc_usdt_60m_close_estimate',
     data_coverage:'only_confirmed_watchlist_address_net_changes',
     source_caught_up:true,read_verified_unix:Math.floor(now/1000),
-    archived_last_success_unix:Math.floor(now/1000),
+    archived_last_success_unix:Math.floor(success/1000),
+    collector_last_success_unix:Math.floor(success/1000),
     archived_total:out.length,chunks_verified:0,
-    price_usd:latestClose,price_updated_unix:Math.floor(now/1000),
+    price_usd:latestClose,price_updated_unix:Math.min(Math.floor(now/1000),latestCloseUnix),
     price_series:dailyPrice,
     cron_retirement_authorized:false};
 }
@@ -4457,7 +4465,11 @@ async function hubRoute(request,env){
     const upstream=await env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch('https://hub/native-whales-30d');
     if(!upstream.ok)return upstream;
     const x=await upstream.json();
+    // archived_last_success_unix = the collector's real last successful poll,
+    // not the read time (the proof above already bounds it to 20 minutes).
+    const success=Math.floor(Number(report.last_success_ms)/1000);
     return hubReply({...x,tracked_addresses:watch.length,
+      archived_last_success_unix:success,collector_last_success_unix:success,
       backfill_complete:watch.length,backfill_total:watch.length,
       watchlist_last_success_ms:report.last_success_ms,
       watchlist_source:report.source});
