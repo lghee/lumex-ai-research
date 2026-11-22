@@ -54,9 +54,10 @@ globalThis.fetch=async input=>{
 };
 const waits=[];await worker.scheduled({cron:'*/5 * * * *'},env,{waitUntil:p=>waits.push(p)});
 await Promise.all(waits);
-assert.equal(requests.filter(x=>x.includes('api.bybit.com')).length,3);
-assert.equal(requests.filter(x=>x.includes('fapi.binance.com')).length,3);
-assert.equal(requests.filter(x=>x.includes('api.gateio.ws')).length,1);
+// 1.3.2: one coin, both 7d and 30d frames per Cron (bounded 3+3+1 requests per frame).
+assert.equal(requests.filter(x=>x.includes('api.bybit.com')).length,6);
+assert.equal(requests.filter(x=>x.includes('fapi.binance.com')).length,6);
+assert.equal(requests.filter(x=>x.includes('api.gateio.ws')).length,2);
 const health=JSON.parse(store.get('market-hub/oi/v1/health.json'));
 const id=Object.keys(health.sources)[0];
 assert.equal(health.sources[id].ok,true);assert.equal(health.sources[id].source,'Gate');
