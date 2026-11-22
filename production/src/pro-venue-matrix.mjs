@@ -9,7 +9,9 @@ const SOURCES=[
  ['Gate','https://api.gateio.ws/api/v4/futures/usdt/tickers'],
  ['Binance','https://fapi.binance.com/fapi/v1/premiumIndex'],
  ['OKX','https://www.okx.com/api/v5/public/open-interest?instType=SWAP'],
- ['Bitget','https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES']
+ ['Bitget','https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'],
+ // OKX open-interest has no price: mark price is a separate official bulk endpoint.
+ ['OKX_MARK','https://www.okx.com/api/v5/public/mark-price?instType=SWAP']
 ];
 const n=(v,low,high)=>{if(v===null||v===undefined||v===''||typeof v==='boolean')return null;const x=Number(v);return Number.isFinite(x)&&x>=low&&x<=high?x:null;};
 const safe=(x)=>n(x,0.000000000001,1e10);
@@ -26,8 +28,17 @@ function key(venue,item){
  if(venue==='OKX')return String(item?.instId||'').replace('-USDT-SWAP','USDT');
  return String(item?.symbol||'');
 }
-export function parseVenueBulk(venue,raw,allowlist,now=Date.now()){
- const rows=items(venue,raw);
+function okxMarks(raw,allowlist){
+ const out=new Map();
+ if(raw?.code!=='0'||!Array.isArray(raw?.data)||raw.data.length>4500)return out;
+ for(const r of raw.data){const symbol=key('OKX',r);if(allowlist.has(symbol)&&!out.has(symbol)){const p=safe(r?.markPx);if(p!==null)out.set(symbol,p);}}
+ return out;
+}
+export function parseVenueBulk(venue,raw,allowlist,now=Date.now(),markRaw=null){
+ const marks=venue==='OKX'?okxMarks(markRaw,allowlist):null;
+ let rows=items(venue,raw);
+ // OKX OI request failed but mark prices arrived: keep the venue's own price only.
+ if(venue==='OKX'&&!Array.isArray(rows)&&marks.size)rows=[...marks.keys()].map(s=>({instId:s.replace('USDT','-USDT-SWAP')}));
  if(!Array.isArray(rows)||rows.length<1||rows.length>4500)return null;
  const map=new Map();
  for(const r of rows){
@@ -37,7 +48,7 @@ export function parseVenueBulk(venue,raw,allowlist,now=Date.now()){
   if(venue==='Bybit'){price=safe(r?.markPrice||r?.lastPrice);oi=n(r?.openInterestValue,0.00001,1e20);funding=pct(r?.fundingRate);}
   if(venue==='Gate'){price=safe(r?.mark_price||r?.last);oi=n(r?.open_interest_usd,0.00001,1e20);funding=pct(r?.funding_rate);}
   if(venue==='Binance'){price=safe(r?.markPrice);funding=pct(r?.lastFundingRate);}
-  if(venue==='OKX'){oi=n(r?.oiUsd,0.00001,1e20);}
+  if(venue==='OKX'){oi=n(r?.oiUsd,0.00001,1e20);price=marks.get(symbol)??null;}
   if(venue==='Bitget'){price=safe(r?.markPrice||r?.lastPr);funding=pct(r?.fundingRate);}
   if(price===null&&oi===null&&funding===null)continue;
   map.set(symbol,{symbol,exchange:venue,mark_price:price,oi_usd:oi,funding_pct:funding,
@@ -49,7 +60,7 @@ export function matrix(top50,rawByVenue,now=Date.now()){
  if(top50?.schema!=='lumex_uid_top50_v1'||!Array.isArray(top50?.items)||top50.items.length<1||
    top50.items.length>50||top50?.generated_at_ms>now+120000||now-top50.generated_at_ms>15*60000)return null;
  const symbols=top50.items.map(x=>x.symbol),allowed=new Set(symbols);
- const lookup=Object.fromEntries(NAMES.map(venue=>[venue,parseVenueBulk(venue,rawByVenue[venue],allowed,now)]));
+ const lookup=Object.fromEntries(NAMES.map(venue=>[venue,parseVenueBulk(venue,rawByVenue[venue],allowed,now,venue==='OKX'?rawByVenue.OKX_MARK:null)]));
  const markets=Object.fromEntries(symbols.map(symbol=>[symbol,NAMES.map(exchange=>lookup[exchange]?.get(symbol)||{
    symbol,exchange,status:'unavailable',mark_price:null,oi_usd:null,funding_pct:null,observed_ms:null,oi_unit:null
  })]));

@@ -43,6 +43,13 @@ function funding(rate,interval,ts,now,source){
   return {rate_pct:Number((v*100).toFixed(6)),interval_hours:hours===null?null:hours,
     asof_ms:stamp,source,rate_kind:'latest_or_next_exchange_indicated'};
 }
+/** Venue-own USDT perpetual price; independent of account/OI/funding coverage. */
+function price(value,change,ts,now,source){
+  const v=num(value,0.00000001,1e9),stamp=safeTime(ts,now,true);
+  if(v===null||stamp===null)return null;
+  const c=num(change,-0.95,10);
+  return {value:v,change_24h_pct:c===null?null:Number((c*100).toFixed(4)),asof_ms:stamp,source};
+}
 async function fetchJson(url,fetchImpl){
   const response=await fetchImpl(url,{headers:{Accept:'application/json'},signal:AbortSignal.timeout(7200)});
   if(!response.ok)throw Error('http_'+response.status);
@@ -64,9 +71,9 @@ async function fetchJson(url,fetchImpl){
 }
 async function safeFetch(url,fetchImpl){try{return {ok:true,body:await fetchJson(url,fetchImpl)};}catch(e){return {ok:false,error:String(e?.message||e).replace(/[^a-zA-Z0-9_-]/g,'').slice(0,35)};}}
 function row(name,now){return {exchange:name,symbol:null,observed_at_ms:now,status:'unavailable',
-  account:null,open_interest:null,funding:null,missing:[],errors:[],market_scope:'usdt_perpetual_public'};}
+  account:null,open_interest:null,funding:null,price:null,missing:[],errors:[],market_scope:'usdt_perpetual_public'};}
 function finish(x,now){
-  for(const k of ['account','open_interest','funding']){
+  for(const k of ['account','open_interest','funding','price']){
     const v=x[k];
     if(v && (!Number.isFinite(v.asof_ms)||v.asof_ms>now+120000||now-v.asof_ms>25*60000)){
       x[k]=null;x.errors.push(k+':source_stale');
@@ -76,6 +83,9 @@ function finish(x,now){
   // A 200 response with a wrong schema is NOT evidence of a current metric.
   for(const k of x.missing)if(!x.errors.some(e=>e.startsWith(k+':')))
     x.errors.push(k+':missing_or_invalid');
+  // Price is reported separately and never changes the three-metric status.
+  if(x.price===undefined)x.price=null;
+  if(x.price===null&&!x.errors.some(e=>e.startsWith('price:')))x.errors.push('price:missing_or_invalid');
   x.status=x.missing.length===0?'ok':x.missing.length===3?'unavailable':'partial';
   return x;
 }
@@ -90,7 +100,8 @@ export async function readBinance(coin,fetchImpl=fetch,now=Date.now()){
   rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);
   if(a.ok){const v=stampLatest(a.body,now,'timestamp');if(v)x.account=account(v.longAccount,v.shortAccount,v.timestamp,now,'binance_global_long_short_accounts_5m');}
   if(b.ok){const v=stampLatest(b.body,now,'timestamp');if(v)x.open_interest=oi(v.sumOpenInterestValue,'USDT',v.timestamp,now,'binance_futures_open_interest_hist_5m');}
-  if(c.ok && !Array.isArray(c.body)){const v=c.body;x.funding=funding(v.lastFundingRate,null,v.time||now,now,'binance_premium_index_last_funding_rate');}
+  if(c.ok && !Array.isArray(c.body)){const v=c.body;x.funding=funding(v.lastFundingRate,null,v.time||now,now,'binance_premium_index_last_funding_rate');
+    x.price=price(v.markPrice,null,v.time||now,now,'binance_premium_index_mark_price');}
   return finish(x,now);
 }
 /** Both mainnet API domains are officially documented by Bybit. No private APIs.
@@ -120,6 +131,7 @@ export async function readBybit(coin,fetchImpl=fetch,now=Date.now()){
   if(b.ok&&b.body?.retCode===0){const v=b.body?.result?.list?.find(z=>z.symbol===sym);if(v){
     x.open_interest=oi(v.openInterestValue,'USDT',now,now,'bybit_linear_ticker_open_interest_value');
     x.funding=funding(v.fundingRate,null,now,now,'bybit_linear_ticker_current_funding_rate');
+    x.price=price(v.markPrice||v.lastPrice,v.price24hPcnt,now,now,'bybit_linear_ticker_mark_price');
   }}
   return finish(x,now);
 }
@@ -132,9 +144,10 @@ export async function readOKX(coin,fetchImpl=fetch,now=Date.now()){
     encodeURIComponent(sym)+'&period=5m&limit=2';
   const paths=[accountUrl,
     base+'/api/v5/public/open-interest?instType=SWAP&instId='+sym,
-    base+'/api/v5/public/funding-rate?instId='+sym];
+    base+'/api/v5/public/funding-rate?instId='+sym,
+    base+'/api/v5/market/ticker?instId='+sym];
   const response=await Promise.all(paths.map(url=>safeFetch(url,fetchImpl)));
-  const fields=['accounts','oi','funding'];
+  const fields=['accounts','oi','funding','price'];
   // OKX public endpoints occasionally HTTP 429 from shared Cloudflare egress.
   // Respect the limit: one bounded retry per failed field after a 2.3s
   // backoff, with further requests staggered. No retry storm or fake values.
@@ -148,8 +161,13 @@ export async function readOKX(coin,fetchImpl=fetch,now=Date.now()){
       else x.errors.push(fields[i]+'_retry:'+retried.error);
     }
   }
-  const [a,b,c]=response;
-  rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);
+  const [a,b,c,d]=response;
+  rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);rerr(x,'price',d);
+  if(d?.ok&&d.body?.code==='0'){
+    const v=d.body?.data?.find(z=>z.instId===sym);
+    if(v){const last=num(v.last,0.00000001,1e9),open=num(v.sodUtc0??v.open24h,0.00000001,1e9);
+      x.price=price(last,last!==null&&open?last/open-1:null,v.ts||now,now,'okx_public_swap_ticker_last');}
+  }
   if(a.ok&&a.body?.code==='0'){
     const d=Array.isArray(a.body.data)?a.body.data:[];
     const v=d.filter(z=>Array.isArray(z)&&z.length>=2).sort((p,q)=>Number(q[0])-Number(p[0]))[0];
@@ -173,6 +191,12 @@ export async function readBitget(coin,fetchImpl=fetch,now=Date.now()){
     safeFetch(base+'open-interest-history?symbol='+sym+'&period=5m',fetchImpl),
     safeFetch(base+'current-fund-rate?category=USDT-FUTURES&symbol='+sym,fetchImpl)]);
   rerr(x,'accounts',a);rerr(x,'oi',b);rerr(x,'funding',c);
+  const t=await safeFetch('https://api.bitget.com/api/v2/mix/market/ticker?symbol='+sym+'&productType=USDT-FUTURES',fetchImpl);
+  rerr(x,'price',t);
+  if(t.ok&&t.body?.code==='00000'){
+    const v=(Array.isArray(t.body?.data)?t.body.data:[t.body?.data]).find(z=>z&&z.symbol===sym);
+    if(v)x.price=price(v.markPrice||v.lastPr,v.change24h,v.ts||now,now,'bitget_v2_mix_ticker_mark_price');
+  }
   if(a.ok&&a.body?.code==='00000'){
     const d=Array.isArray(a.body?.data)?a.body.data:[];
     const v=stampLatest(d,now,'ts');if(v)x.account=account(v.longAccountRatio,v.shortAccountRatio,v.ts,now,'bitget_futures_account_long_short_5m');
@@ -217,7 +241,9 @@ export async function readGate(coin,fetchImpl=fetch,now=Date.now()){
     }
   }
   if(b.ok&&Array.isArray(b.body)){
-    const v=b.body.find(z=>z.contract===sym);if(v)x.funding=funding(v.funding_rate,null,now,now,'gate_usdt_futures_ticker_funding_rate');
+    const v=b.body.find(z=>z.contract===sym);if(v){x.funding=funding(v.funding_rate,null,now,now,'gate_usdt_futures_ticker_funding_rate');
+      const cp=num(v.change_percentage,-95,1000);
+      x.price=price(v.mark_price||v.last,cp===null?null:cp/100,now,now,'gate_usdt_futures_ticker_mark_price');}
   }
   return finish(x,now);
 }
@@ -230,9 +256,10 @@ export function buildExchangeComparison(coin,rows,now=Date.now()){
   const ties=rows.filter(r=>r.account!==null&&r.account.long_pct===r.account.short_pct).length;
   const counts={account:rows.filter(r=>r.account).length,open_interest:rows.filter(r=>r.open_interest).length,
     funding:rows.filter(r=>r.funding).length};
+  const priceCount=rows.filter(r=>r.price).length;
   return {ok:true,schema,symbol:coin+'USDT',generated_at_ms:now,exchanges:rows,
     coverage:{...counts,total_exchanges:5,long_dominant:up,short_dominant:down,balanced:ties,
-      unavailable_account:5-counts.account},
+      unavailable_account:5-counts.account,price:priceCount},
     aggregation:'none',missing_as_zero:false,
     interpretation:'계정 수 비율, 미결제약정 거래소별 규모, 펀딩비는 서로 독립된 관측 지표입니다.',
     order_execution:false,private_api_used:false};
