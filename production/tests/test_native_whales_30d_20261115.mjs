@@ -25,6 +25,16 @@ assert.equal(obs.live_ledger_merged,false);
 assert.equal(obs.price_method,'verified_r2_btc_usdt_60m_close_estimate');
 assert(Object.keys(obs.price_series).length>=30);
 assert(obs.price_usd>100);
+// 2026-11-22: freshness is the collector success time, never the read time.
+const success=now-7*60000;
+const timed=nativeWhales30d([ev('a',now-120000)],candles,now,success);
+assert.equal(timed.archived_last_success_unix,Math.floor(success/1000),'collector time, not read time');
+assert.equal(timed.collector_last_success_unix,Math.floor(success/1000));
+assert.equal(timed.read_verified_unix,Math.floor(now/1000));
+assert.equal(timed.price_updated_unix,Math.min(Math.floor(now/1000),Math.floor((candles.at(-1).t+3600000)/1000)),'price time = last candle close, never future');
+// price series keyed by KST day: the 15:00 UTC candle belongs to the next KST date
+const kstKey=new Date(candles.at(-1).t+9*3600000).toISOString().slice(0,10);
+assert.equal(timed.price_series[kstKey],candles.at(-1).c,'KST calendar key');
 assert.throws(()=>nativeWhales30d([ev('a',now-120000),ev('a',now-130000)],candles,now),/event_invalid/);
 assert.throws(()=>nativeWhales30d([ev('a',now-32*86400000)],candles,now),/event_invalid/);
 assert.throws(()=>nativeWhales30d([ev('a',now-3600000)],candles.slice(0,400),now),/input_limit/);
