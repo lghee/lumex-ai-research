@@ -4203,6 +4203,10 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./paper-league.mjs')).serveLeague(env);
   }
+  if(path==='/market-hub/v1/paper-league-signals'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./paper-league-signals.mjs')).serveSignals(env);
+  }
   if(path==='/market-hub/v1/paper-league-detail'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./paper-league.mjs')).serveDetail(request,env);
