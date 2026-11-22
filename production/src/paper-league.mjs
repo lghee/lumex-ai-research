@@ -16,6 +16,7 @@
 import {STRATEGIES as BASE} from './paper-league-strategies.mjs';
 import {ADVANCED} from './paper-league-advanced.mjs';
 import {carryTick,fetchCore} from './paper-league-carry.mjs';
+import {signalTick,SIGNALS} from './paper-league-signals.mjs';
 /** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced.
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
 export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED];
@@ -315,7 +316,10 @@ export async function paperLeagueTick(env,{now=Date.now(),fetchImpl=fetch,strate
       stops:'1-minute bars between ticks; gaps fill at the minute open',funding:'Bybit funding history applied to held positions',replay:'none (forward only)'},
     retired:Object.values(st.accounts).filter(a=>a.status==='retired').map(a=>a.id),
     strategies:strategies.map(d=>out[d.id])};
+  // Copy-trading ledger: target holdings per strategy, new sequence only when holdings change.
+  const ledger=signalTick(st,strategies,now);
   await write(STATE,st);
+  await write(SIGNALS,ledger);
   return {ok:true,strategies:strategies.length};
 }
 
