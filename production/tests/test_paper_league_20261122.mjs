@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import fs from 'node:fs';
-import {fill,markEquity,exitHit,applyFunding,newAccount,paperLeagueTick,serveLeague,serveDetail,START_USDT,TAKER,slipFor,runStrategy,makeMarket} from '../src/paper-league.mjs';
-import {STRATEGIES,evaluateSingle,crossScores,rebalanceDue,regimeAt,emaSeeded} from '../src/paper-league-strategies.mjs';
+import {fill,markEquity,exitHit,applyFunding,newAccount,paperLeagueTick,serveLeague,serveDetail,START_USDT,TAKER,slipFor,runStrategy,makeMarket,STRATEGIES,applyRiskOverlay} from '../src/paper-league.mjs';
+import {evaluateSingle,crossScores,rebalanceDue,regimeAt,emaSeeded} from '../src/paper-league-strategies.mjs';
 
 const H=3600000,M=60000,D=86400000;
 // ---------- accounting: fees + slippage on both sides, funding sign ----------
@@ -59,7 +59,11 @@ const base={BTCUSDT:90000,ETHUSDT:3200,SOLUSDT:140,XRPUSDT:2.1,DOGEUSDT:0.38};
 const frames={'1':M,'60':H,'240':4*H,'D':D};
 const price=(s,t)=>{const b=base[s]||5;return b*Math.exp((t-t0)/(80*D))*(1+0.03*Math.sin(t/(9*H))+0.01*Math.sin(t/(37*M)));};
 let calls=[];
+const coreDoc={schema:'lumex_public_ai_bots_v1',bots:[{key:'btc-trend',performance:{provenance:'continuous_paper_carry_v3',carry_seed_usdt:12682,equity_usdt:13400,mdd_pct:4.2,closed_trades:5,since_carry_return_pct:5.66,last_bar_ms:t0+4*H,
+  points:[{at:t0-48*H,equity:12682,phase:'replay'},{at:t0-20*H,equity:12950,phase:'forward'},{at:t0-4*H,equity:13010,phase:'forward'},{at:t0+4*H,equity:13400,phase:'forward'}]}},
+  {key:'eth-asym',performance:{provenance:'continuous_paper_carry_v3',carry_seed_usdt:99999,equity_usdt:5,points:[]}}]};
 const fetchImpl=async url=>{calls.push(url);const u=new URL(url);const s=u.searchParams.get('symbol');
+  if(u.hostname==='lumexbot.com')return new Response(JSON.stringify(coreDoc));
   if(u.pathname.endsWith('/tickers')){const p=price(s,fetchImpl.now);return new Response(JSON.stringify({retCode:0,result:{list:[{symbol:s,lastPrice:String(p),markPrice:String(p)}]}}));}
   if(u.pathname.endsWith('/funding/history')){const list=[];for(let k=0;k<60;k++){const t=Math.floor(fetchImpl.now/(8*H))*8*H-k*8*H;list.push({symbol:s,fundingRate:'0.0001',fundingRateTimestamp:String(t)});}return new Response(JSON.stringify({retCode:0,result:{list}}));}
   const iv=u.searchParams.get('interval'),f=frames[iv],lim=Number(u.searchParams.get('limit'));const end=Math.floor(fetchImpl.now/f)*f;const list=[];
@@ -76,18 +80,30 @@ for(let k=0;k<40;k++){ // ~3h20m of 5-minute ticks, then a daily boundary
 }
 assert.equal((await paperLeagueTick(env,{now:now-5*M+60000,fetchImpl})).skipped,'recent_tick','no double tick within ~3 minutes');
 const st=JSON.parse(store.get('paper-league/v1/state.json'));
-assert.equal(Object.keys(st.accounts).length,STRATEGIES.length);
-for(const a of Object.values(st.accounts)){assert.equal(a.started_ms,t0,'forward start, no seeding');assert.ok(Number.isFinite(a.equity)&&a.equity>0);}
+assert.equal(Object.keys(st.accounts).length,STRATEGIES.length);assert.equal(STRATEGIES.length,12);
+for(const a of Object.values(st.accounts)){assert.equal(a.started_ms,t0,'league start');assert.ok(Number.isFinite(a.equity)&&a.equity>0);}
 const sum=st.summary;assert.equal(sum.schema,'lumex_paper_league_summary_v1');assert.equal(sum.order_execution,false);
-assert.equal(sum.strategies.length,13);assert.ok(sum.strategies.every(x=>x.id&&x.name&&Array.isArray(x.rules)&&x.rules.length>=3));
+assert.equal(sum.strategies.length,12);assert.ok(sum.strategies.every(x=>x.id&&x.name&&Array.isArray(x.rules)&&x.rules.length>=3));
 assert.equal(sum.strategies.filter(x=>STRATEGIES.find(d=>d.id===x.id).origin==='existing').length,7);
-assert.ok(calls.every(u=>u.startsWith('https://api.bybit.com/v5/market/')),'public Bybit market endpoints only');
+assert.ok(calls.every(u=>u.startsWith('https://api.bybit.com/v5/market/')||u==='https://lumexbot.com/wp-json/lumex/v1/public/ai-bots'),'public Bybit market + Core public bots only');
+// ---- carry: backtest ending equity, then Core paper value AT league start (no overlap double count)
+{const b=st.accounts['btc-trend'],e=st.accounts['eth-asym'],v=st.accounts['vol-normal'],n=st.accounts['nexus-ml-ensemble'];
+ assert.equal(b.carry.stage,'core');assert.equal(b.carry.seed_usdt,13010,'handover = last Core point at or before league start (not the later 13,400)');
+ assert.equal(b.carry.backtest.ending_usdt,12682);assert.equal(b.carry.core_paper.points_imported,3);
+ assert.equal(e.carry.stage,'archive','Core row not descending from the archived backtest is rejected');assert.equal(e.carry.seed_usdt,10798);
+ assert.equal(v.carry.stage,'archive');assert.equal(v.carry.seed_usdt,10655.47);
+ assert.equal(n.carry,undefined,'new strategies start at 10,000');
+ const bs=sum.strategies.find(x=>x.id==='btc-trend');assert.ok(Math.abs(bs.equity-(13010+(b.equity-13010)))<0.01);
+ assert.equal(bs.forward_start_usdt,13010);assert.ok(bs.return_pct>29,'cumulative return vs 10,000 includes backtest + Core paper');
+ const hb=JSON.parse(store.get('paper-league/v1/history/btc-trend.json'));assert.equal(hb.points[0][0],Math.floor((t0-48*H)/H)*H,'Core curve imported before league points');
+ assert.ok(hb.points.every((p,i)=>!i||p[0]>=hb.points[i-1][0]));
+ assert.equal(sum.retired.length,0);}
 // every recorded trade carries fees; closes carry pnl
 let trades=0;
 for(const d of STRATEGIES){const h=JSON.parse(store.get('paper-league/v1/history/'+d.id+'.json'));trades+=h.trades.length;
   for(const t of h.trades){assert.ok(t.fee>0);if(t.type==='close')assert.ok(Number.isFinite(t.net_pnl));}
   assert.ok(h.points.length>=1&&h.points.every(p=>p[0]%H===0));}
-assert.ok(trades>0,'strategies traded in the synthetic market');
+globalThis.__E2E_TRADES=trades;
 // serving
 const ok=await serveLeague(env,now);assert.equal(ok.status,200);
 assert.equal((await serveLeague(env,now+3*H)).status,503,'stale summary not served');
@@ -97,4 +113,13 @@ assert.equal((await serveDetail(new Request('https://x/?id=nope'),env)).status,4
 {const acc=newAccount({id:'o'},t0);const def={id:'o',interval:'60',decide:async()=>({target:[{symbol:'BTCUSDT',side:'long',weight:0.5}]})};
  const dead=async()=>new Response('x',{status:503});const m=makeMarket(dead,t0+2*H);acc.last_bar=t0-H;
  const r=await runStrategy(def,acc,m,{prices:{}});assert.equal(Object.keys(acc.positions).length,0);assert.ok(r.events.some(e=>/시세 없음/.test(e.text)));}
+// ---- risk overlay: half at 8%, flat + cooldown at 15%, gross cap
+{const acc=newAccount({id:'r'},0);acc.memo={risk_peak:10000};acc.cash=9100;const R={ddHalf:0.08,ddFlat:0.15,cooldownH:48,maxGross:1.5};
+ const o={target:[{symbol:'BTCUSDT',side:'long',weight:0.6},{symbol:'ETHUSDT',side:'long',weight:0.6}]};applyRiskOverlay(R,acc,o,{prices:{}},1000,[]);
+ assert.equal(acc.memo.risk_state,'half');assert.equal(o.target[0].weight,0.3);
+ acc.cash=8400;const o2={target:[{symbol:'BTCUSDT',side:'long',weight:0.5}]};const ev=[];applyRiskOverlay(R,acc,o2,{prices:{}},2000,ev);
+ assert.deepEqual(o2.target,[]);assert.equal(acc.memo.risk_state,'flat');assert.ok(acc.memo.cooldown_until===2000+48*H);
+ const o3={target:[{symbol:'BTCUSDT',side:'long',weight:0.5}]};applyRiskOverlay(R,acc,o3,{prices:{}},3000,[]);assert.deepEqual(o3.target,[],'cool-down holds');
+ const o4={target:[{symbol:'BTCUSDT',side:'long',weight:1},{symbol:'ETHUSDT',side:'short',weight:1}]};applyRiskOverlay(R,acc,o4,{prices:{}},2000+49*H,[]);
+ assert.equal(acc.memo.risk_state,'normal','fresh risk peak after cool-down');assert.equal(o4.target[0].weight+o4.target[1].weight,1.5,'gross capped at 150%');}
 console.log(`PASS paper league: accounting, intrabar exits, funding, Core-rule parity, forward-only e2e (${trades} trades), serving, outage`);

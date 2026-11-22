@@ -13,7 +13,12 @@
  *  - missed bars are never replayed into trades.
  * Bybit public endpoints only. Accounts, keys, LYRA, Core demo/live trading are untouched.
  */
-import {STRATEGIES} from './paper-league-strategies.mjs';
+import {STRATEGIES as BASE} from './paper-league-strategies.mjs';
+import {ADVANCED} from './paper-league-advanced.mjs';
+import {carryTick,fetchCore} from './paper-league-carry.mjs';
+/** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced.
+ * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'
@@ -176,6 +181,8 @@ export async function runStrategy(def,acc,market,ctx){
     if(!out||out.error){acc.status='data_unavailable';events.push({at_ms:now,type:'data',text:'판단 보류: '+(out?.error||'자료 없음')});}
     else{
       acc.status='observing';acc.last_signal=out.note||acc.last_signal;
+      if(out.diag)acc.memo.diag={...out.diag,at_ms:now};
+      if(def.risk_overlay&&out.target)applyRiskOverlay(def.risk_overlay,acc,out,ctx,now,events);
       if(missed)events.push({at_ms:now,type:'gap',text:'놓친 확정봉은 거래로 재현하지 않고 최신 봉으로만 판단'});
       if(out.target){ // null target = hold
         const eq=markEquity(acc,ctx.prices);
@@ -208,8 +215,23 @@ export async function runStrategy(def,acc,market,ctx){
   markEquity(acc,ctx.prices);
   return {events,trades};
 }
+/** Account-level risk brake for advanced strategies: drawdown from the rolling risk peak halves
+ * exposure at ddHalf, goes flat with a cool-down at ddFlat, and caps gross exposure. */
+export function applyRiskOverlay(R,acc,out,ctx,now,events){
+  const eq=markEquity(acc,ctx.prices);const m=acc.memo;
+  if(!fin(m.risk_peak))m.risk_peak=eq;
+  if(fin(m.cooldown_until)&&now<m.cooldown_until){out.target=[];out.exit_reason='위험 관리 휴식';out.note=(out.note||'')+' · 위험 관리 휴식 중';m.risk_state='cooldown';return;}
+  if(fin(m.cooldown_until)&&now>=m.cooldown_until){m.cooldown_until=null;m.risk_peak=eq;}
+  m.risk_peak=Math.max(m.risk_peak,eq);const dd=(m.risk_peak-eq)/m.risk_peak;m.risk_dd_pct=Number((dd*100).toFixed(2));
+  if(dd>=R.ddFlat){out.target=[];out.exit_reason='낙폭 한도 · 전량 청산';m.cooldown_until=now+R.cooldownH*HOUR;m.risk_state='flat';
+    events.push({at_ms:now,type:'risk',text:`계좌 낙폭 ${(dd*100).toFixed(1)}% · 전량 청산 후 ${R.cooldownH}시간 휴식`});return;}
+  let scale=1;if(dd>=R.ddHalf){scale=0.5;m.risk_state='half';}else m.risk_state='normal';
+  const gross=out.target.reduce((a,l)=>a+l.weight,0)*scale;if(gross>R.maxGross)scale*=R.maxGross/gross;
+  if(scale<1)out.target=out.target.map(l=>({...l,weight:Number((l.weight*scale).toFixed(4))}));
+  if(m.risk_state==='half')out.note=(out.note||'')+` · 낙폭 ${(dd*100).toFixed(1)}%로 비중 절반`;
+}
 function pickRisk(l,entry,now,keepExisting){
-  const o={};const long=l.side==='long';
+  const o={};const long=l.side==='long';if(l.regime_tag)o.regime_tag=l.regime_tag;
   if(fin(l.stop_pct))o.stop=entry*(1+(long?-1:1)*l.stop_pct);
   if(fin(l.stop_price))o.stop=l.stop_price;
   if(fin(l.take_pct))o.take=entry*(1+(long?1:-1)*l.take_pct);
@@ -228,7 +250,13 @@ export function summarize(acc,def,hist,now){
   const dr=[];for(let i=1;i<daily.length;i++)dr.push(daily[i][1]/daily[i-1][1]-1);
   const mean=dr.length?dr.reduce((a,b)=>a+b,0)/dr.length:null,sd=dr.length>1?Math.sqrt(dr.reduce((a,b)=>a+(b-mean)**2,0)/(dr.length-1)):null;
   const ago=ms=>{const t=now-ms;let best=null;for(const p of pts)if(p[0]<=t)best=p;return best?rd((acc.equity/best[1]-1)*100,3):null;};
-  return {id:def.id,name:def.name,family:def.family,risk:def.risk,kind:def.kind,symbols:def.symbols_label,interval:def.interval_label,summary:def.summary,rules:def.rules,
+  const base=acc.carry?.seed_usdt??START_USDT;
+  const extra={origin:def.origin,tier:def.tier||'registered',ai:!!def.ai,
+    forward_start_usdt:rd(base,2),forward_return_pct:rd((acc.equity/base-1)*100,3),
+    carry:acc.carry?{stage:acc.carry.stage,seed_usdt:rd(acc.carry.seed_usdt,2),handover_ms:acc.carry.handover_ms??acc.started_ms,backtest:acc.carry.backtest,core_paper:acc.carry.core_paper}:null,
+    model:acc.memo?.diag||null,risk_state:def.risk_overlay?{state:acc.memo?.risk_state||'normal',drawdown_pct:acc.memo?.risk_dd_pct??0,cooldown_until_ms:acc.memo?.cooldown_until??null,
+      rules:{half_at_pct:def.risk_overlay.ddHalf*100,flat_at_pct:def.risk_overlay.ddFlat*100,cooldown_hours:def.risk_overlay.cooldownH}}:null};
+  return {...extra,id:def.id,name:def.name,family:def.family,risk:def.risk,kind:def.kind,symbols:def.symbols_label,interval:def.interval_label,summary:def.summary,rules:def.rules,
     started_ms:acc.started_ms,days:rd(days,2),equity:rd(acc.equity,2),return_pct:rd(ret,3),return_7d_pct:ago(7*86400000),return_30d_pct:ago(30*86400000),
     mdd_pct:rd(acc.mdd_pct,3),trades:acc.trades,win_rate_pct:acc.trades?rd(acc.wins/acc.trades*100,1):null,
     profit_factor:acc.gross_loss>0?rd(acc.gross_win/acc.gross_loss,2):(acc.gross_win>0?null:null),
@@ -257,11 +285,19 @@ export async function paperLeagueTick(env,{now=Date.now(),fetchImpl=fetch,strate
   const needed=new Set();
   for(const def of strategies){const a=st.accounts[def.id];if(a)for(const p of Object.values(a.positions))needed.add(p.symbol);}
   for(const s of needed){const p=await market.price(s);if(p)ctx.prices[s]=p.mark;}
-  const out={};
+  const out={},hists={};
   for(const def of strategies){
-    let acc=st.accounts[def.id];
-    if(!acc){acc=newAccount(def,now);st.accounts[def.id]=acc;}
-    const hist=(await read(HIST+def.id+'.json'))||{schema:'lumex_paper_league_history_v1',id:def.id,points:[],trades:[],events:[]};
+    if(!st.accounts[def.id])st.accounts[def.id]=newAccount(def,now);
+    hists[def.id]=(await read(HIST+def.id+'.json'))||{schema:'lumex_paper_league_history_v1',id:def.id,points:[],trades:[],events:[]};
+  }
+  // Registered strategies continue from their history: backtest ending equity, then Core paper P&L.
+  const needCore=strategies.some(d=>d.origin==='existing'&&st.accounts[d.id].carry?.stage!=='core'&&(!st.accounts[d.id].carry||now-st.accounts[d.id].carry.applied_ms<7*24*HOUR));
+  let coreDoc=null;
+  if(needCore&&(!st.core_try_ms||now-st.core_try_ms>=30*MIN)){st.core_try_ms=now;coreDoc=await fetchCore(fetchImpl,env.LUMEX_SITE_ORIGIN||'https://lumexbot.com');}
+  const carried=carryTick(st,hists,strategies,coreDoc,now);
+  for(const c of carried){const [id,stage]=c.split(':');hists[id].events.push({at_ms:now,type:'carry',text:stage==='core'?'Core 모의거래 평가금(백테스트 종료금 + 이후 손익) 이관':'백테스트 종료 평가금 이관'});}
+  for(const def of strategies){
+    const acc=st.accounts[def.id],hist=hists[def.id];
     let r;try{r=await runStrategy(def,acc,market,ctx);}catch(e){r={events:[{at_ms:now,type:'error',text:String(e?.message||e).slice(0,80)}],trades:[]};acc.status='error';}
     for(const p of Object.values(acc.positions))if(!ctx.prices[p.symbol]){const px=await market.price(p.symbol);if(px)ctx.prices[p.symbol]=px.mark;}
     markEquity(acc,ctx.prices);
@@ -277,6 +313,7 @@ export async function paperLeagueTick(env,{now=Date.now(),fetchImpl=fetch,strate
   st.summary={ok:true,schema:'lumex_paper_league_summary_v1',generated_at_ms:now,order_execution:false,start_usdt:START_USDT,
     execution:{fee_taker_pct:TAKER*100,slippage_pct:{BTCUSDT:0.02,ETHUSDT:0.02,others:0.05},fills:'Bybit last price at the first 5-minute tick after a closed bar ± slippage',
       stops:'1-minute bars between ticks; gaps fill at the minute open',funding:'Bybit funding history applied to held positions',replay:'none (forward only)'},
+    retired:Object.values(st.accounts).filter(a=>a.status==='retired').map(a=>a.id),
     strategies:strategies.map(d=>out[d.id])};
   await write(STATE,st);
   return {ok:true,strategies:strategies.length};
