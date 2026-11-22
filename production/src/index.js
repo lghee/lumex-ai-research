@@ -4199,6 +4199,14 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-venue-matrix.mjs')).serveTop50VenueHistory(request,env);
   }
+  if(path==='/market-hub/v1/pro50-scanner'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./pro50-scanner.mjs')).serveScanner(env);
+  }
+  if(path==='/market-hub/v1/pro50-series'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./pro50-scanner.mjs')).serveSeries(request,env);
+  }
   if(path==='/market-hub/v1/pro-top50-venues'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-venue-matrix.mjs')).serveVenueMatrix(request,env);
@@ -4920,6 +4928,9 @@ export default{
         }
         const x=await (await import('./pro-venue-matrix.mjs')).collectVenueMatrix(env);
         if(x?.ok!==true)console.warn('top50_venue_matrix_incomplete',String(x?.reason||'unverified').slice(0,65));
+        // PRO 50 scanner: rolling hourly history, batched multi-timeframe regimes, served snapshot.
+        const y=await (await import('./pro50-scanner.mjs')).updatePro50(env).catch(()=>({ok:false,reason:'exception'}));
+        if(y?.ok!==true)console.warn('pro50_scanner_incomplete',String(y?.reason||'unverified').slice(0,65));
       }).catch(()=>console.warn('top50_public_universe_collect_failed')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
       ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
