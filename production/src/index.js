@@ -406,10 +406,17 @@ async function oiFromGate(coin,days,now){
   throw Error('gate_oi_provider_unavailable_'+error);
 }
 
+// 1.3.2 cadence: every 5-minute Cron refreshes ONE coin for BOTH 7d and 30d frames,
+// so each coin/frame is at most ~20 minutes old (was 8 slots = 40 minutes). This keeps
+// WordPress risk/scenario freshness (30 min) satisfied. A failed combination still takes
+// priority over the normal rotation for its own frame, at most one per Cron.
+function oiRotationTargets(now){
+  const coin=OI_COINS[Math.floor(now/300000)%OI_COINS.length];
+  return OI_INTERVALS.map(days=>({coin,days,priorityRecovery:false}));
+}
 async function collectOiMirror(env){
   if(env.AUTO_OI_MIRROR_FETCH!=='true'||!env.MARKET_DATA)return {ok:false,disabled:true};
-  const now=Date.now(),slot=Math.floor(now/300000)%8;
-  let coin=OI_COINS[slot%4],days=OI_INTERVALS[Math.floor(slot/4)],priorityRecovery=false;
+  const now=Date.now(),targets=oiRotationTargets(now);
   // Repair previously failed slots ahead of normal rotation, at most one per
   // 5-minute Cron. 10-minute retry cooldown prevents a blocked provider from
   // starving healthy combinations; Gate is always kept source-separated.
@@ -423,8 +430,16 @@ async function collectOiMirror(env){
       Math.floor(now/1000)-item.checked_unix>=600)
       .sort((a,b)=>a[1].checked_unix-b[1].checked_unix);
     if(failures.length){const match=/^(BTC|ETH|SOL|XRP)-(7|30)$/.exec(failures[0][0]);
-      coin=match[1];days=Number(match[2]);priorityRecovery=true;}
+      const idx=targets.findIndex(t=>t.days===Number(match[2]));
+      if(idx>=0)targets[idx]={coin:match[1],days:Number(match[2]),priorityRecovery:true};}
   }catch{}
+  const reports=[];
+  // Sequential on purpose: health.json is read-modify-write.
+  for(const t of targets)reports.push(await collectOiMirrorOne(env,t.coin,t.days,now,t.priorityRecovery));
+  return {ok:reports.every(r=>r.ok),reports};
+}
+
+async function collectOiMirrorOne(env,coin,days,now,priorityRecovery){
   const id=coin+'-'+days;
   let report={symbol:coin+'USDT',days,priority_recovery:priorityRecovery,checked_unix:Math.floor(now/1000),
     ok:false,source:null,error:null,order_execution:false};
