@@ -1395,7 +1395,7 @@ async function binanceLiquidationId(e){
 }
 async function watchlistDigest(items){
   const addresses=Array.from(new Set(items.map(x=>x.address))).sort();
-  if(addresses.length<1||addresses.length>20||addresses.some(x=>!btcAddress(x)))
+  if(addresses.length<1||addresses.length>150||addresses.some(x=>!btcAddress(x)))
     throw Error('watchlist_invalid');
   const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(addresses.join('\n')));
   return {count:addresses.length,sha256:Array.from(new Uint8Array(digest),
@@ -1443,6 +1443,55 @@ export function decodeBtcAddressFlow(tx,address,label='watched reserve address')
     capture:'confirmed_chain_poll',watched_address:address,
     watch_label:String(label).slice(0,80)};
 }
+
+/** Consolidate all verified watched addresses in a single transaction BEFORE
+ * classifying an exchange's net movement. A self-transfer across two watched
+ * addresses is zero and a second address poll shares the same stable event id.
+ * A mixed-exchange transaction or an ambiguous external-input withdrawal is
+ * discarded rather than misrepresented as a customer deposit/withdrawal.
+ */
+export function decodeBtcTrackedNet(tx,items){
+  if(!tx||typeof tx!=='object'||!tx.status?.confirmed||
+     !/^[a-fA-F0-9]{64}$/.test(String(tx.txid||'')))return null;
+  const ts=Number(tx.status.block_time)*1000;
+  if(!Number.isSafeInteger(ts)||ts<1500000000000||ts>Date.now()+120000)return null;
+  const known=new Map();
+  for(const i of items||[])if(btcAddress(i?.address)&&typeof i?.label==='string')
+    known.set(i.address,String(i.label).slice(0,80));
+  const nets=new Map(),touches=new Map();
+  let untrackedInput=false;
+  function record(address,satoshis,sign=1){
+    if(!known.has(address))return;
+    const val=sats(satoshis);if(val===null)throw Error('btc_invalid_satoshis');
+    const ex=known.get(address);nets.set(ex,(nets.get(ex)||0)+sign*val);
+    if(!touches.has(ex))touches.set(ex,new Set());touches.get(ex).add(address);
+  }
+  try{
+    for(const out of Array.isArray(tx.vout)?tx.vout:[])
+      record(out?.scriptpubkey_address,out?.value);
+    for(const input of Array.isArray(tx.vin)?tx.vin:[]){
+      const p=input?.prevout;
+      if(!p||!known.has(p.scriptpubkey_address)){
+        untrackedInput=true;continue;
+      }
+      const val=sats(p.value);if(val===null)return null;
+      record(p.scriptpubkey_address,val,-1);
+    }
+  }catch{return null;}
+  if(nets.size!==1)return null;
+  const [exchange,net]=nets.entries().next().value;
+  if(!Number.isSafeInteger(net)||net===0||(net<0&&untrackedInput))return null;
+  const address=[...(touches.get(exchange)||[])].sort()[0];
+  if(!address)return null;
+  const quantity=Math.abs(net)/100000000;
+  if(!Number.isFinite(quantity)||quantity<=0)return null;
+  return {kind:'whale_transfer',source:'blockstream',symbol:'BTCUSDT',
+    id:'btc:exchangeflow:'+tx.txid.toLowerCase()+':'+exchange.replace(/[^A-Za-z0-9_-]/g,'_').slice(0,40),
+    ts,price:0,quantity,side:net>0?'in':'out',
+    txhash:tx.txid.toLowerCase(),capture:'confirmed_chain_poll',
+    watched_address:address,watch_label:exchange};
+}
+
 /**
  * LUMEX public-market legacy archive importer.
  * Copies only the three explicitly allowlisted WordPress public-observation
@@ -1819,7 +1868,7 @@ export class BtcReserveCollector extends DurableObject{
         if(r.ok){
           const json=await r.json();
           const data=Array.isArray(json.watchlist)?json.watchlist:[];
-          const valid=data.filter(v=>btcAddress(v?.address)).slice(0,20).map(v=>({
+          const valid=data.filter(v=>btcAddress(v?.address)).slice(0,150).map(v=>({
             address:v.address,label:String(v.exchange||'observed reserve address').slice(0,80)}));
           return {items:valid,mode:'wordpress_configured'};
         }
@@ -1856,46 +1905,59 @@ export class BtcReserveCollector extends DurableObject{
       state.watchlist_count=fingerprint.count;
       state.watchlist_sha256=fingerprint.sha256;
       state.watchlist_checked_ms=now;
-      const a=items[Number(state.nextIndex||0)%items.length];
-      state.nextIndex=(Number(state.nextIndex||0)+1)%items.length;
-      const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
-      const newest=await this.fetchPage(a.address);state.requests++;
-      const pages=[newest];
-      // One bounded historic page per poll to build a 35-day history.
-      const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
-      if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
-        pages.push(await this.fetchPage(a.address,cursor));state.requests++;
-      }
-      const unique=new Map();
-      for(const page of pages)for(const tx of page){
-        if(/^[a-fA-F0-9]{64}$/.test(String(tx?.txid||''))&&tx.status?.confirmed)unique.set(tx.txid,tx);
-      }
-      const events=[...unique.values()].map(tx=>decodeBtcAddressFlow(tx,a.address,a.label)).filter(Boolean);
-      // Only retain the last 35 days; old rows are part of historical coverage metadata.
-      const keep=events.filter(e=>e.ts>=now-35*86400000);
-      let accepted=0;
-      for(let i=0;i<keep.length;i+=90){
-        const batch=keep.slice(i,i+90);
-        const res=await this.env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch(new Request('https://hub/ingest',{
-          method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTCUSDT',events:batch})}));
-        if(!res.ok)throw Error('whale_hub_http_'+res.status);
-        const result=await res.json();accepted+=Number(result.accepted||0);
-      }
-      prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
-      // Historic pagination ends when the last page has <25 rows or older than 35 days.
-      const lastPage=pages.at(-1),oldest=lastPage.at(-1);
-      prior.backfill_complete=lastPage.length<25||
-        (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
-      prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
-      // There may be >25 newly confirmed transactions between polls.
-      prior.gap_possible=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
-      prior.head=newest[0]?.txid||prior.head||null;
-      prior.error=null;state.addresses[a.address]=prior;
-      state.accepted+=accepted;state.last_success_ms=now;state.error=null;
+      // Six independent reserve addresses per scheduled poll; no unbounded scan.
+      const take=Math.min(6,items.length),from=Number(state.nextIndex||0)%items.length;
+      const selected=Array.from({length:take},(_,i)=>items[(from+i)%items.length]);
+      state.nextIndex=(from+take)%items.length;
+      const results=await Promise.all(selected.map(async a=>{
+        const prior=state.addresses[a.address]||{label:a.label,backfill_complete:false,observed:0};
+        try{
+          const newest=await this.fetchPage(a.address);state.requests++;
+          const pages=[newest];
+          const cursor=prior.backfill_cursor||(!prior.backfill_complete&&newest.length===25?newest.at(-1)?.txid:'');
+          if(cursor&&/^[0-9a-fA-F]{64}$/.test(cursor)){
+            pages.push(await this.fetchPage(a.address,cursor));state.requests++;
+          }
+          const unique=new Map();
+          for(const page of pages)for(const tx of page){
+            if(/^[a-fA-F0-9]{64}$/.test(String(tx?.txid||''))&&tx.status?.confirmed)unique.set(tx.txid,tx);
+          }
+          const events=[...unique.values()].map(tx=>decodeBtcTrackedNet(tx,items)).filter(Boolean);
+          const keep=events.filter(e=>e.ts>=now-35*86400000);
+          let accepted=0;
+          for(let i=0;i<keep.length;i+=90){
+            const batch=keep.slice(i,i+90);
+            const res=await this.env.MARKET_EVENT_HUB.getByName('BTCUSDT').fetch(new Request('https://hub/ingest',{
+              method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({symbol:'BTCUSDT',events:batch})}));
+            if(!res.ok)throw Error('whale_hub_http_'+res.status);
+            const result=await res.json();accepted+=Number(result.accepted||0);
+          }
+          prior.label=a.label;prior.checked_ms=now;prior.observed=(prior.observed||0)+accepted;
+          const lastPage=pages.at(-1),oldest=lastPage.at(-1);
+          prior.backfill_complete=lastPage.length<25||
+            (Number(oldest?.status?.block_time||0)*1000<now-35*86400000);
+          prior.backfill_cursor=prior.backfill_complete?null:oldest?.txid||null;
+          prior.gap_possible=Boolean(prior.head&&newest.length===25&&!newest.some(tx=>tx.txid===prior.head));
+          prior.head=newest[0]?.txid||prior.head||null;
+          prior.error=null;state.addresses[a.address]=prior;
+          return {ok:true,accepted,events:keep.length,gap:prior.gap_possible};
+        }catch(e){
+          const code=String(e?.message||e||'unknown').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,90);
+          prior.error=code;prior.last_attempt_ms=now;state.addresses[a.address]=prior;
+          return {ok:false,error:code};
+        }
+      }));
+      const successes=results.filter(r=>r.ok),failures=results.filter(r=>!r.ok);
+      state.accepted+=successes.reduce((n,r)=>n+r.accepted,0);
+      state.errors+=failures.length;
+      if(successes.length)state.last_success_ms=now;
+      state.error=failures.length?('partial_'+failures.length+'_of_'+take+'_'+failures[0].error):null;
       await this.ctx.storage.put('state',state);
-      return {ok:true,address_suffix:a.address.slice(-8),watchlist_source:mode,
-        accepted,observed_events:keep.length,backfill_complete:prior.backfill_complete,
-        gap_possible:prior.gap_possible};
+      return {ok:successes.length>0,watchlist_source:mode,address_count:items.length,
+        checked:take,successful:successes.length,failed:failures.length,
+        accepted:successes.reduce((n,r)=>n+r.accepted,0),
+        observed_events:successes.reduce((n,r)=>n+r.events,0),
+        gap_possible:successes.some(r=>r.gap),error:state.error};
     }catch(error){
       state.errors++;state.error=String(error?.message||error||'unknown').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,90);
       await this.ctx.storage.put('state',state);
@@ -2934,6 +2996,17 @@ export class MarketEventHub extends DurableObject{
         if(!event){invalid.push('invalid_event');continue;}
         const found=this.ctx.storage.sql.exec('SELECT id FROM hub_events WHERE id=?',event.id).toArray();
         if(found.length)continue;
+        // During migration, a previously observed BTC tx may already have
+        // the old per-address id. Do not count the same tx a second time just
+        // because the new per-exchange id differs. The public on-chain hash
+        // is stable and contains no untrusted SQL wildcard characters.
+        if(event.kind==='whale_transfer'&&event.source==='blockstream'&&
+           /^[a-f0-9]{64}$/.test(event.txhash||'')){
+          const legacy='btc:addressflow:'+event.txhash+':%';
+          const prior=this.ctx.storage.sql.exec(
+            "SELECT id FROM hub_events WHERE kind='whale_transfer' AND id LIKE ? LIMIT 1",legacy).toArray();
+          if(prior.length)continue;
+        }
         this.ctx.storage.sql.exec('INSERT INTO hub_events(id,kind,source,ts,payload,archived) VALUES (?,?,?,?,?,0)',
           event.id,event.kind,event.source,event.ts,JSON.stringify(event));
         accepted.push(event);
@@ -3483,7 +3556,7 @@ async function hubRoute(request,env){
     const report=await status.json(),now=Date.now();
     const watch=report.watchlist||[];
     if(report.enabled!==true||report.source!=='wordpress_configured'||
-       !Array.isArray(watch)||watch.length<1||watch.length>20||
+       !Array.isArray(watch)||watch.length<1||watch.length>150||
        watch.some(w=>w.backfill_complete!==true||w.gap_possible===true||w.error)||
        now-Number(report.last_success_ms||0)>1200000)
        return hubReply({ok:false,error:'native_whale_watchlist_parity_not_ready'},503);
