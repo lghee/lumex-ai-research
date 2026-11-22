@@ -4,7 +4,7 @@
  * target every connected customer account follows. This module publishes, per strategy,
  * a monotonically increasing sequence number that changes ONLY when the league account's
  * holdings change (a fill), together with the target legs frozen at that moment:
- *   {symbol, side, weight (notional ÷ account equity), stop, take}
+ *   {symbol, side, weight (notional ÷ account equity), entry (league fill), opened_ms, stop, take}
  * No customer data, keys or orders here. Core reads the ledger with the hub token, checks the
  * HMAC signature (same shared token) and freshness, and executes per customer.
  */
@@ -20,7 +20,7 @@ export function holdingsKey(acc){
 export function legsOf(acc){
   const eq=Number(acc?.equity);if(!fin(eq)||eq<=0)return [];
   return Object.values(acc.positions||{}).map(p=>{const mark=fin(p.last_mark)?p.last_mark:p.entry;
-    const leg={symbol:p.symbol,side:p.side,weight:rd(Math.abs(p.qty*mark)/eq,4)};
+    const leg={symbol:p.symbol,side:p.side,weight:rd(Math.abs(p.qty*mark)/eq,4),entry:rd(p.entry,10),opened_ms:p.opened_ms||null};
     if(fin(p.stop)&&p.stop>0)leg.stop=rd(p.stop,10);if(fin(p.take)&&p.take>0)leg.take=rd(p.take,10);
     return leg;}).filter(l=>l.weight>0).sort((a,b)=>a.symbol.localeCompare(b.symbol));
 }

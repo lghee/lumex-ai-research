@@ -4,7 +4,7 @@ const now=Date.UTC(2026,10,22,12);
 const acc={equity:10000,positions:{BTCUSDT:{symbol:'BTCUSDT',side:'long',qty:0.02,entry:100000,last_mark:100000,stop:95000,take:110000,opened_ms:now-3600000}},memo:{}};
 const st={accounts:{a:acc}};const defs=[{id:'a'}];
 let d=signalTick(st,defs,now);assert.equal(d.strategies[0].seq,1);
-assert.deepEqual(d.strategies[0].legs,[{symbol:'BTCUSDT',side:'long',weight:0.2,stop:95000,take:110000}]);
+assert.deepEqual(d.strategies[0].legs,[{symbol:'BTCUSDT',side:'long',weight:0.2,entry:100000,opened_ms:now-3600000,stop:95000,take:110000}]);
 assert.equal(d.order_execution,false);
 // price moves, trailing stop moves: same seq, stop updated, weight frozen
 acc.positions.BTCUSDT.last_mark=105000;acc.positions.BTCUSDT.stop=99000;acc.equity=10100;
