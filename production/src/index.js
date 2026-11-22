@@ -4199,6 +4199,14 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro-venue-matrix.mjs')).serveTop50VenueHistory(request,env);
   }
+  if(path==='/market-hub/v1/paper-league'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./paper-league.mjs')).serveLeague(env);
+  }
+  if(path==='/market-hub/v1/paper-league-detail'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./paper-league.mjs')).serveDetail(request,env);
+  }
   if(path==='/market-hub/v1/pro50-scanner'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro50-scanner.mjs')).serveScanner(env);
@@ -4932,6 +4940,11 @@ export default{
         const y=await (await import('./pro50-scanner.mjs')).updatePro50(env).catch(()=>({ok:false,reason:'exception'}));
         if(y?.ok!==true)console.warn('pro50_scanner_incomplete',String(y?.reason||'unverified').slice(0,65));
       }).catch(()=>console.warn('top50_public_universe_collect_failed')));
+    // PRO paper-trading league: forward-only simulated accounts, public Bybit data, no orders.
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_PAPER_LEAGUE==='true')
+      ctx.waitUntil(import('./paper-league.mjs').then(m=>m.paperLeagueTick(env)).then(r=>{
+        if(r?.ok!==true)console.warn('paper_league_tick_incomplete',String(r?.reason||'unverified').slice(0,65));
+      }).catch(e=>console.warn('paper_league_tick_failed',String(e?.message||e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_EXCHANGE_COMPARE_FETCH==='true')
       ctx.waitUntil(import('./exchange-compare.mjs').then(m=>m.collectExchangeCompare(env)).catch(e=>
         console.error('exchange_compare_collect_failed',String(e?.message||e).slice(0,70))));

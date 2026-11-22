@@ -122,6 +122,7 @@
     "LUMEX_GITHUB_DISPATCH_FALLBACK": "true",
     "AUTO_BINANCE_TAKER_FETCH": "false",
     "AUTO_LYRA_SHADOW_PAPER": "true",
+    "AUTO_PAPER_LEAGUE": "true",
     "AUTO_PUBLIC_HEATMAP": "true",
     "AUTO_OFFICIAL_NEWS": "true",
     "AUTO_TOP50_UNIVERSE": "true",
