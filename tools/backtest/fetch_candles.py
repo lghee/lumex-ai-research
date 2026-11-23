@@ -1,4 +1,4 @@
-"""Fetch ~50 days of public USDT-perpetual candles (no keys) for backtesting.
+"""Fetch ~50 days of public USDT-perpetual candles (no keys) for backtesting (v2: commit to PR branch).
 Tries Bybit, then OKX, then Gate per symbol/interval; records which venue answered. Output: CSV per series."""
 import json, sys, time, urllib.request, pathlib, csv
 OUT = pathlib.Path(sys.argv[1]); OUT.mkdir(parents=True, exist_ok=True)
