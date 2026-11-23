@@ -1,0 +1,232 @@
+{
+ "BTC_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "BTC_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "BTC_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "BTC_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ },
+ "ETH_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "ETH_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "ETH_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "ETH_funding": {
+  "source": "gate+okx",
+  "rows": 289,
+  "from": 1787155200
+ },
+ "SOL_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "SOL_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "SOL_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "SOL_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ },
+ "XRP_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "XRP_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "XRP_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "XRP_funding": {
+  "source": "gate+okx",
+  "rows": 314,
+  "from": 1787155200
+ },
+ "DOGE_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "DOGE_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "DOGE_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "DOGE_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ },
+ "BNB_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "BNB_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "BNB_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "BNB_funding": {
+  "source": "gate+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "ADA_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "ADA_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "ADA_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "ADA_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ },
+ "LINK_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "LINK_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "LINK_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "LINK_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ },
+ "AVAX_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "AVAX_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "AVAX_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "AVAX_funding": {
+  "source": "gate+okx",
+  "rows": 312,
+  "from": 1787155200
+ },
+ "SUI_15": {
+  "venue": "okx",
+  "rows": 17279,
+  "from": 1779853500,
+  "to": 1795403700
+ },
+ "SUI_60": {
+  "venue": "okx",
+  "rows": 8759,
+  "from": 1763870400,
+  "to": 1795399200
+ },
+ "SUI_240": {
+  "venue": "okx",
+  "rows": 2189,
+  "from": 1763870400,
+  "to": 1795377600
+ },
+ "SUI_funding": {
+  "source": "gate+okx",
+  "rows": 287,
+  "from": 1787155200
+ }
+}
