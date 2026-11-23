@@ -5,11 +5,13 @@
  *  - rolling-v1   : one point per UTC hour per symbol (Bybit price/OI/funding/turnover,
  *                   Binance funding). Seeded only from the existing hourly venue archive;
  *                   missing hours stay missing (never interpolated).
- *  - regimes-v1   : 1H / 4H / 1D rule-based regime (same EMA20/50 + RSI14 + ATR14-vs-60-bar
+ *  - regimes-v1   : 1H / 4H / 1D rule-based regime (+ LUMEX signature tags: purity, coil, divergence, profile)
+ *                   (same EMA20/50 + RSI14 + ATR14-vs-60-bar
  *                   rules as Core Lumex_Pro_Regime), refreshed in batches from Bybit klines.
  *  - scanner-v1   : the served snapshot (current values + facts derived from the two above).
  * Every derived figure carries its sample count; below the minimum it is null, not a guess.
  */
+import {signatureTag} from './signature-math.mjs';
 const UNI='market-hub/universe/bybit-linear-top50-v1.json';
 const VENUE='market-hub/universe/top50-five-venues-v1.json';
 const VENUE_HIST='market-hub/universe/venue-history/v1/';
@@ -147,6 +149,8 @@ export async function refreshRegimeBatch(env,u,reg,now,fetchImpl=fetch){
         const txt=await res.text();if(txt.length<20||txt.length>400000){entry[tf]={status:'unavailable'};return;}
         const rows=parseKlines(JSON.parse(txt),ms,now);
         entry[tf]=rows?classify(rows,ms,now):{status:'unavailable'};
+        // 2026-11-23: LUMEX signature tags from the same closed bars (no extra requests)
+        if(rows&&entry[tf].status==='ok'){try{const sig=signatureTag(rows,ms);if(sig)entry[tf].signature=sig;}catch{}}
       }catch{entry[tf]={status:'unavailable'};}
     }));
     if(Object.keys(FRAMES).some(tf=>entry[tf]?.status==='ok'))ok++;
@@ -207,7 +211,8 @@ export function buildScanner(u,venue,roll,reg,now){
     method:{regime:'EMA20/50 + RSI14 + ATR14 vs 60-bar baseline, closed bars only',
       funding_percentile:`rank of current Bybit funding among own hourly samples (≤30d, min ${MIN_PCTL_SAMPLES})`,
       oi_change:'Bybit OI now vs archived hourly point 24h ago (±1h)',turnover_vs_7d:`Bybit 24h turnover / mean of hourly samples over prior 7d (min ${MIN_TURNOVER_SAMPLES})`,
-      flow_quadrant:'sign of 24h price change × 24h OI change (|OI change| < 1% = flat); descriptive only'},
+      flow_quadrant:'sign of 24h price change × 24h OI change (|OI change| < 1% = flat); descriptive only',
+      signature:'LUMEX signature math on the same closed 1H/4H/1D bars: purity (signed ER 20), coil (BB width ≤ 10th pct of 120 bars, 2-close breakout ≤ 12 bars ago), pressure divergence (CLV×volume vs pivots, ≤ 24 bars ago), volume profile position (200 bars)'},
     rolling:{symbols:Object.keys(roll.points).length,backfill_checked_to_ms:roll.backfill_checked_to_ms??null,
       oldest_hour_ms:(()=>{const m=Math.min(...Object.values(roll.points).map(a=>a[0]?.[0]??Infinity));return Number.isFinite(m)?m:null;})()},
     count:items.length,items};
