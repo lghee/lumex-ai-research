@@ -1,0 +1,23 @@
+name: LUMEX backtest candles (once, public data, read-only)
+on:
+  pull_request:
+    paths:
+      - 'tools/backtest/fetch_candles.py'
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch public USDT-perpetual candles (no keys)
+        run: python tools/backtest/fetch_candles.py out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-candles
+          path: out/
+          retention-days: 3
