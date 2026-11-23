@@ -80,10 +80,10 @@ for(let k=0;k<40;k++){ // ~3h20m of 5-minute ticks, then a daily boundary
 }
 assert.equal((await paperLeagueTick(env,{now:now-5*M+60000,fetchImpl})).skipped,'recent_tick','no double tick within ~3 minutes');
 const st=JSON.parse(store.get('paper-league/v1/state.json'));
-assert.equal(Object.keys(st.accounts).length,STRATEGIES.length);assert.equal(STRATEGIES.length,12);
+assert.equal(Object.keys(st.accounts).length,STRATEGIES.length);assert.equal(STRATEGIES.length,13);
 for(const a of Object.values(st.accounts)){assert.equal(a.started_ms,t0,'league start');assert.ok(Number.isFinite(a.equity)&&a.equity>0);}
 const sum=st.summary;assert.equal(sum.schema,'lumex_paper_league_summary_v1');assert.equal(sum.order_execution,false);
-assert.equal(sum.strategies.length,12);assert.ok(sum.strategies.every(x=>x.id&&x.name&&Array.isArray(x.rules)&&x.rules.length>=3));
+assert.equal(sum.strategies.length,13);assert.ok(sum.strategies.every(x=>x.id&&x.name&&Array.isArray(x.rules)&&x.rules.length>=3));
 assert.equal(sum.strategies.filter(x=>STRATEGIES.find(d=>d.id===x.id).origin==='existing').length,7);
 assert.ok(calls.every(u=>u.startsWith('https://api.bybit.com/v5/market/')||u==='https://lumexbot.com/wp-json/lumex/v1/public/ai-bots'),'public Bybit market + Core public bots only');
 // ---- carry: backtest ending equity, then Core paper value AT league start (no overlap double count)

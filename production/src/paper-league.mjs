@@ -17,9 +17,10 @@ import {STRATEGIES as BASE} from './paper-league-strategies.mjs';
 import {ADVANCED} from './paper-league-advanced.mjs';
 import {carryTick,fetchCore} from './paper-league-carry.mjs';
 import {signalTick,SIGNALS} from './paper-league-signals.mjs';
-/** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced.
+import {trend} from './paper-league-trend.mjs';
+/** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23).
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
-export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED];
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'
@@ -190,6 +191,7 @@ export async function runStrategy(def,acc,market,ctx){
         const want=new Map(out.target.map(l=>[l.symbol,l]));
         if(def.groupExit)want.clear(); // registered paired rules exit every leg at each rebalance, then re-enter fresh
         for(const p of Object.values(acc.positions)){const w=want.get(p.symbol);
+          if(!w&&Array.isArray(out.keep_missing)&&out.keep_missing.includes(p.symbol))continue; // data gap this tick: hold, never force-exit
           if(!w||w.side!==p.side){const px=await market.price(p.symbol);if(!px){events.push({at_ms:now,type:'data',text:p.symbol+' 시세 없음 · 청산 보류'});continue;}
             trades.push(fill(acc,{symbol:p.symbol,side:p.side,qty:p.qty,ref:px.last,kind:'close',reason:out.exit_reason||'신호 전환',now}));}}
         for(const l of out.target){
