@@ -1,0 +1,272 @@
+{
+ "BTC_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BTC_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "BTC_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BTC_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "BTC_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BTC_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "ETH_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ETH_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "ETH_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ETH_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "ETH_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ETH_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "SOL_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SOL_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "SOL_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SOL_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "SOL_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SOL_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "XRP_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "XRP_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "XRP_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "XRP_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "XRP_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "XRP_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "DOGE_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "DOGE_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "DOGE_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "DOGE_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "DOGE_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "DOGE_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "BNB_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BNB_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "BNB_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BNB_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "BNB_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "BNB_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "ADA_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ADA_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "ADA_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ADA_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "ADA_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "ADA_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "LINK_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "LINK_15": {
+  "venue": "okx",
+  "rows": 3999,
+  "from": 1791804600,
+  "to": 1795402800
+ },
+ "LINK_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "LINK_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "LINK_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "LINK_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "AVAX_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "AVAX_15": {
+  "venue": "okx",
+  "rows": 3998,
+  "from": 1791805500,
+  "to": 1795402800
+ },
+ "AVAX_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "AVAX_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "AVAX_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "AVAX_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ },
+ "SUI_15_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SUI_15": {
+  "venue": "okx",
+  "rows": 3998,
+  "from": 1791805500,
+  "to": 1795402800
+ },
+ "SUI_60_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SUI_60": {
+  "venue": "okx",
+  "rows": 1199,
+  "from": 1791086400,
+  "to": 1795399200
+ },
+ "SUI_240_errors": [
+  "bybit: HTTP Error 403: Forbidden"
+ ],
+ "SUI_240": {
+  "venue": "okx",
+  "rows": 299,
+  "from": 1791086400,
+  "to": 1795377600
+ }
+}
