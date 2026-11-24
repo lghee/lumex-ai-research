@@ -4215,6 +4215,10 @@ async function hubRoute(request,env){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro50-scanner.mjs')).serveScanner(env);
   }
+  if(path==='/market-hub/v1/pro50-scorecard'&&method==='GET'){
+    if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
+    return (await import('./signature-scorecard.mjs')).serveScorecard(env);
+  }
   if(path==='/market-hub/v1/pro50-series'&&method==='GET'){
     if(!hubAuthorized(request,env))return hubReply({ok:false,error:'unauthorized'},401);
     return (await import('./pro50-scanner.mjs')).serveSeries(request,env);

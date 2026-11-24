@@ -253,7 +253,9 @@ export async function updatePro50(env,{now=Date.now(),fetchImpl=fetch}={}){
   await writeJson(env,SCAN,scan);
   const check=await readJson(env,SCAN,2000000);
   if(!validScanner(check,now)||check.generated_at_ms!==now)return {ok:false,reason:'scanner_readback_failed'};
-  return {ok:true,symbols:scan.count,seeded_points:seeded,regime_batch:rb.batch,regime_ok:rb.ok,backfill_checked_to_ms:roll.backfill_checked_to_ms};
+  // 2026-11-24 signal scorecard: forward-only record of signature signals + their later moves (never blocks the scanner)
+  const sc=await (await import('./signature-scorecard.mjs')).scorecardTick(env,scan,roll,now).catch(()=>({ok:false}));
+  return {ok:true,symbols:scan.count,seeded_points:seeded,regime_batch:rb.batch,regime_ok:rb.ok,backfill_checked_to_ms:roll.backfill_checked_to_ms,scorecard:sc};
 }
 
 const reply=(doc,status=200)=>new Response(JSON.stringify(doc),{status,headers:{'content-type':'application/json','cache-control':'no-store','x-content-type-options':'nosniff'}});
