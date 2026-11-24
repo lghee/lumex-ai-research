@@ -18,9 +18,11 @@ import {ADVANCED} from './paper-league-advanced.mjs';
 import {carryTick,fetchCore} from './paper-league-carry.mjs';
 import {signalTick,SIGNALS} from './paper-league-signals.mjs';
 import {trend} from './paper-league-trend.mjs';
-/** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23).
+import {chartsig} from './paper-league-chartsig.mjs';
+/** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23)
+ * + SIGNAL · 차트 신호 4H (2026-11-24, partial take + break-even stop).
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
-export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend];
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'
@@ -147,15 +149,26 @@ export function applyFunding(p,rows,fromMs,toMs){
   return paid;
 }
 
+/** Close part of a position: the closed part carries its share of fees and funding; the rest keeps the remainder. */
+export function partialClose(acc,p,qty,ref,reason,now){
+  const share=Math.min(1,qty/p.qty),keep={...p,qty:p.qty-qty,fees:p.fees*(1-share),funding:p.funding*(1-share)};
+  acc.positions[p.symbol]={...p,fees:p.fees*share,funding:p.funding*share};
+  const t=fill(acc,{symbol:p.symbol,side:p.side,qty,ref,kind:'close',reason,now});
+  acc.positions[p.symbol]=keep;t.partial=true;return t;
+}
 // ------------------------------------------------------------------ tick ----
 export async function runStrategy(def,acc,market,ctx){
   const now=market.now,events=[],trades=[];
   const from=Math.max(acc.last_tick,now-16*60*MIN);
   // 1) intrabar exits + funding for open positions
-  for(const p of Object.values(acc.positions)){
+  for(const p0 of Object.values(acc.positions)){let p=p0;
     const mins=await market.minutes(p.symbol,Math.floor(from/MIN)*MIN);
     if(mins)for(const m of mins){if(m.t<p.opened_ms-MIN)continue;const hit=exitHit(p,m);
-      if(hit){trades.push(fill(acc,{symbol:p.symbol,side:p.side,qty:p.qty,ref:hit.ref,kind:'close',reason:hit.reason,now:Math.min(now,m.t+MIN)}));break;}
+      // 2026-11-24 partial take (chart-signal strategy): close take_frac at the target, optionally move the stop to entry, keep walking
+      if(hit&&hit.reason.startsWith('익절')&&fin(p.take_frac)&&p.take_frac>0&&p.take_frac<1){
+        trades.push(partialClose(acc,p,p.qty*p.take_frac,hit.ref,'분할 익절 '+Math.round(p.take_frac*100)+'%',Math.min(now,m.t+MIN)));
+        p=acc.positions[p.symbol];p.take=null;p.take_frac=null;if(p.be_after_take){p.stop=p.entry;p.be_after_take=false;}continue;}
+      if(hit){trades.push(fill(acc,{symbol:p.symbol,side:p.side,qty:p.qty,ref:hit.ref,kind:'close',reason:p.stop===p.entry&&hit.reason.startsWith('손절')?'본절 청산':hit.reason,now:Math.min(now,m.t+MIN)}));break;}
       if(def.trailAtr&&fin(p.trail_atr)){const best=p.side==='long'?m.h:m.l;p.best=p.side==='long'?Math.max(p.best??best,best):Math.min(p.best??best,best);
         const t=p.side==='long'?p.best-p.trail_atr:p.best+p.trail_atr;p.stop=p.side==='long'?Math.max(p.stop??-Infinity,t):Math.min(p.stop??Infinity,t);}}
     else events.push({at_ms:now,type:'data',text:p.symbol+' 1분봉 확인 실패 · 이번 회차 손절 점검 보류'});
@@ -241,6 +254,7 @@ function pickRisk(l,entry,now,keepExisting){
   if(fin(l.take_price))o.take=l.take_price;
   if(fin(l.hold_ms)&&!keepExisting)o.time_stop_ms=now+l.hold_ms;
   if(fin(l.trail_atr))o.trail_atr=l.trail_atr;
+  if(!keepExisting&&fin(l.take_frac)&&l.take_frac>0&&l.take_frac<1){o.take_frac=l.take_frac;o.be_after_take=!!l.be_after_take;}
   if(keepExisting){delete o.stop;delete o.take;if(fin(l.trail_atr))o.trail_atr=l.trail_atr;} // keep the original risk levels of a held trade
   return o;
 }
