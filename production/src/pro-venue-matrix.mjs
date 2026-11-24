@@ -11,8 +11,25 @@ const SOURCES=[
  ['OKX','https://www.okx.com/api/v5/public/open-interest?instType=SWAP'],
  ['Bitget','https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES'],
  // OKX open-interest has no price: mark price is a separate official bulk endpoint.
- ['OKX_MARK','https://www.okx.com/api/v5/public/mark-price?instType=SWAP']
+ ['OKX_MARK','https://www.okx.com/api/v5/public/mark-price?instType=SWAP'],
+ // 2026-11-24: funding rate + next settlement time where the bulk tickers do not carry them
+ ['OKX_FUND','https://www.okx.com/api/v5/public/funding-rate?instId=ANY'],
+ ['GATE_CONTRACTS','https://api.gateio.ws/api/v4/futures/usdt/contracts'],
+ ['BITGET_FUND','https://api.bitget.com/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES']
 ];
+/** Next funding settlement in ms: seconds or ms accepted; only (now, now+9h] is believed. */
+export function nextMs(v,now){const x=n(v,1,1e14);if(x===null)return null;const ms=x<1e12?x*1000:x;return ms>now&&ms<=now+9*3600000?Math.round(ms):null;}
+/** symbol → {funding_pct?, next_ms} from the extra funding sources. Pure. */
+export function fundingExtras(venue,raw,allowlist,now){
+ const out=new Map();
+ if(venue==='OKX'){if(raw?.code!=='0'||!Array.isArray(raw?.data)||raw.data.length>4500)return out;
+  for(const r of raw.data){const s=key('OKX',r);if(allowlist.has(s)&&!out.has(s))out.set(s,{funding_pct:pct(r?.fundingRate),next_ms:nextMs(r?.fundingTime,now)});}}
+ if(venue==='Gate'){if(!Array.isArray(raw)||raw.length>4500)return out;
+  for(const r of raw){const s=key('Gate',{contract:r?.name});if(allowlist.has(s)&&!out.has(s))out.set(s,{next_ms:nextMs(r?.funding_next_apply,now)});}}
+ if(venue==='Bitget'){if(raw?.code!=='00000'||!Array.isArray(raw?.data)||raw.data.length>4500)return out;
+  for(const r of raw.data){const s=String(r?.symbol||'');if(allowlist.has(s)&&!out.has(s))out.set(s,{next_ms:nextMs(r?.nextUpdate??r?.nextFundingTime,now)});}}
+ return out;
+}
 const n=(v,low,high)=>{if(v===null||v===undefined||v===''||typeof v==='boolean')return null;const x=Number(v);return Number.isFinite(x)&&x>=low&&x<=high?x:null;};
 const safe=(x)=>n(x,0.000000000001,1e10);
 const pct=(x)=>{const y=n(x,-0.2,0.2);return y===null?null:Number((y*100).toFixed(7));};
@@ -34,8 +51,9 @@ function okxMarks(raw,allowlist){
  for(const r of raw.data){const symbol=key('OKX',r);if(allowlist.has(symbol)&&!out.has(symbol)){const p=safe(r?.markPx);if(p!==null)out.set(symbol,p);}}
  return out;
 }
-export function parseVenueBulk(venue,raw,allowlist,now=Date.now(),markRaw=null){
+export function parseVenueBulk(venue,raw,allowlist,now=Date.now(),markRaw=null,extraRaw=null){
  const marks=venue==='OKX'?okxMarks(markRaw,allowlist):null;
+ const extra=fundingExtras(venue,extraRaw,allowlist,now);
  let rows=items(venue,raw);
  // OKX OI request failed but mark prices arrived: keep the venue's own price only.
  if(venue==='OKX'&&!Array.isArray(rows)&&marks.size)rows=[...marks.keys()].map(s=>({instId:s.replace('USDT','-USDT-SWAP')}));
@@ -44,14 +62,16 @@ export function parseVenueBulk(venue,raw,allowlist,now=Date.now(),markRaw=null){
  for(const r of rows){
   const symbol=key(venue,r);if(!allowlist.has(symbol))continue;
   if(map.has(symbol))continue;
-  let price=null,oi=null,funding=null;
-  if(venue==='Bybit'){price=safe(r?.markPrice||r?.lastPrice);oi=n(r?.openInterestValue,0.00001,1e20);funding=pct(r?.fundingRate);}
+  let price=null,oi=null,funding=null,next=null;const ex=extra.get(symbol);
+  if(venue==='Bybit'){price=safe(r?.markPrice||r?.lastPrice);oi=n(r?.openInterestValue,0.00001,1e20);funding=pct(r?.fundingRate);next=nextMs(r?.nextFundingTime,now);}
   if(venue==='Gate'){price=safe(r?.mark_price||r?.last);oi=n(r?.open_interest_usd,0.00001,1e20);funding=pct(r?.funding_rate);}
-  if(venue==='Binance'){price=safe(r?.markPrice);funding=pct(r?.lastFundingRate);}
-  if(venue==='OKX'){oi=n(r?.oiUsd,0.00001,1e20);price=marks.get(symbol)??null;}
+  if(venue==='Binance'){price=safe(r?.markPrice);funding=pct(r?.lastFundingRate);next=nextMs(r?.nextFundingTime,now);}
+  if(venue==='OKX'){oi=n(r?.oiUsd,0.00001,1e20);price=marks.get(symbol)??null;funding=ex?.funding_pct??null;}
   if(venue==='Bitget'){price=safe(r?.markPrice||r?.lastPr);funding=pct(r?.fundingRate);}
+  if(next===null)next=ex?.next_ms??null;
+  if(funding===null)next=null; // a settlement time without the venue's own rate is not shown
   if(price===null&&oi===null&&funding===null)continue;
-  map.set(symbol,{symbol,exchange:venue,mark_price:price,oi_usd:oi,funding_pct:funding,
+  map.set(symbol,{symbol,exchange:venue,mark_price:price,oi_usd:oi,funding_pct:funding,next_funding_ms:next,
     observed_ms:now,oi_unit:oi===null?null:'USD_approx_or_reported_quote',status:'observed'});
  }
  return map;
@@ -60,9 +80,10 @@ export function matrix(top50,rawByVenue,now=Date.now()){
  if(top50?.schema!=='lumex_uid_top50_v1'||!Array.isArray(top50?.items)||top50.items.length<1||
    top50.items.length>50||top50?.generated_at_ms>now+120000||now-top50.generated_at_ms>15*60000)return null;
  const symbols=top50.items.map(x=>x.symbol),allowed=new Set(symbols);
- const lookup=Object.fromEntries(NAMES.map(venue=>[venue,parseVenueBulk(venue,rawByVenue[venue],allowed,now,venue==='OKX'?rawByVenue.OKX_MARK:null)]));
+ const EXTRA={OKX:'OKX_FUND',Gate:'GATE_CONTRACTS',Bitget:'BITGET_FUND'};
+ const lookup=Object.fromEntries(NAMES.map(venue=>[venue,parseVenueBulk(venue,rawByVenue[venue],allowed,now,venue==='OKX'?rawByVenue.OKX_MARK:null,EXTRA[venue]?rawByVenue[EXTRA[venue]]:null)]));
  const markets=Object.fromEntries(symbols.map(symbol=>[symbol,NAMES.map(exchange=>lookup[exchange]?.get(symbol)||{
-   symbol,exchange,status:'unavailable',mark_price:null,oi_usd:null,funding_pct:null,observed_ms:null,oi_unit:null
+   symbol,exchange,status:'unavailable',mark_price:null,oi_usd:null,funding_pct:null,next_funding_ms:null,observed_ms:null,oi_unit:null
  })]));
  return {ok:true,schema:'lumex_uid_top50_venue_matrix_v1',generated_at_ms:now,universe_generated_ms:top50.generated_at_ms,
     order_execution:false,source_scope:'public_futures_source_isolated',aggregation:'none',market_total_estimate:false,
