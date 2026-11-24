@@ -4948,6 +4948,11 @@ export default{
         const y=await (await import('./pro50-scanner.mjs')).updatePro50(env).catch(()=>({ok:false,reason:'exception'}));
         if(y?.ok!==true)console.warn('pro50_scanner_incomplete',String(y?.reason||'unverified').slice(0,65));
       }).catch(()=>console.warn('top50_public_universe_collect_failed')));
+    // 외부 감시: site home, WordPress health (order scheduler, live accounts), league/ledger freshness → operator Telegram.
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_SITE_MONITOR==='true')
+      ctx.waitUntil(import('./site-monitor.mjs').then(m=>m.siteMonitorTick(env)).then(r=>{
+        if(r?.ok!==true)console.warn('site_monitor_incomplete',String(r?.reason||'unverified').slice(0,65));
+      }).catch(e=>console.warn('site_monitor_failed',String(e?.message||e).slice(0,65))));
     // PRO paper-trading league: forward-only simulated accounts, public Bybit data, no orders.
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PAPER_LEAGUE==='true')
       ctx.waitUntil(import('./paper-league.mjs').then(m=>m.paperLeagueTick(env)).then(r=>{
