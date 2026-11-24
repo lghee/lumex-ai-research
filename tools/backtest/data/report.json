@@ -1,0 +1,173 @@
+{
+ "generated": 1795493801,
+ "BTC_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "BTC_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "BTC_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "ETH_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "ETH_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "ETH_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "SOL_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "SOL_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "SOL_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "XRP_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "XRP_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "XRP_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "DOGE_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "DOGE_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "DOGE_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "BNB_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "BNB_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "BNB_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "ADA_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "ADA_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "ADA_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "LINK_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "LINK_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "LINK_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "AVAX_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "AVAX_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "AVAX_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ },
+ "SUI_60": {
+  "venue": "okx",
+  "rows": 26279,
+  "from": 1700888400,
+  "to": 1795489200
+ },
+ "SUI_240": {
+  "venue": "okx",
+  "rows": 6569,
+  "from": 1700899200,
+  "to": 1795478400
+ },
+ "SUI_funding": {
+  "source": "gate failed: HTTP Error 400: Bad Request+okx",
+  "rows": 290,
+  "from": 1787155200
+ }
+}
