@@ -3672,11 +3672,20 @@ export function nativeWhaleWatchlistBackfillProof(status,now=Date.now()){
      !Number.isSafeInteger(latest)||latest>now+120000||now-latest>1200000)
     return false;
   const maxAge=Math.max(1800000,Math.ceil(count/4)*60000+600000);
-  return watch.every(entry=>entry?.backfill_complete===true&&
-    entry?.gap_possible===false&&!entry?.error&&
-    Number.isSafeInteger(Number(entry.last_checked_ms))&&
-    Number(entry.last_checked_ms)<=now+120000&&
-    now-Number(entry.last_checked_ms)<=maxAge);
+  // One Esplora 429/timeout leaves an address flagged until its next turn in
+  // the rotation (count/4 minutes). That used to take the whole 30-day page
+  // off the native path. An address whose latest poll failed still counts if
+  // its last successful check is recent (2x the normal age); only a small
+  // share of the watchlist may be in that state at once.
+  const checkedWithin=(entry,limit)=>{const t=Number(entry?.last_checked_ms);
+    return Number.isSafeInteger(t)&&t>0&&t<=now+120000&&now-t<=limit;};
+  let erroring=0;
+  for(const entry of watch){
+    if(entry?.backfill_complete!==true||entry?.gap_possible!==false)return false;
+    if(entry?.error){erroring++;if(!checkedWithin(entry,maxAge*2))return false;continue;}
+    if(!checkedWithin(entry,maxAge))return false;
+  }
+  return erroring<=Math.max(2,Math.floor(count*0.15));
 }
 
 /** Native confirmed BTC reserve observation adapter.

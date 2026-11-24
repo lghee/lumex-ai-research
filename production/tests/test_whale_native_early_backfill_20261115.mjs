@@ -16,7 +16,15 @@ assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[]},now),fal
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,last_success_ms:now-1200001},now),false);
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),entry(false),entry(),entry()]},now),false);
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),entry(true,true),entry(),entry()]},now),false);
-assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),{...entry(),error:'esplora_http_429'},entry(),entry()]},now),false);
+// 2026-11-25: a transient error on one address no longer drops the native page
+// while that address's last success is recent; stale or widespread failures still fail closed.
+assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),{...entry(),error:'esplora_http_429'},entry(),entry()]},now),true,'one transient 429 with recent success');
+assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),{...entry(true,false,now-3700000),error:'esplora_http_429'},entry(),entry()]},now),false,'errored address with stale success');
+assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[{...entry(),error:'x'},{...entry(),error:'x'},{...entry(),error:'x'},entry()]},now),false,'3 of 4 erroring');
+assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),{...entry(false),error:'x'},entry(),entry()]},now),false,'errored address without full history');
+const many={...report,watchlist_count:63,watchlist:Array.from({length:63},(_,i)=>i<9?{...entry(),error:'esplora_timeout'}:entry())};
+assert.equal(nativeWhaleWatchlistBackfillProof(many,now),true,'9 of 63 (<=15%) transient');
+assert.equal(nativeWhaleWatchlistBackfillProof({...many,watchlist:many.watchlist.map((e,i)=>i<10?{...entry(),error:'x'}:e)},now),false,'10 of 63 erroring fails closed');
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist:[entry(),entry(true,false,now-4000000),entry(),entry()]},now),false);
 assert.equal(nativeWhaleWatchlistBackfillProof({...report,watchlist_count:0},now),false);
 const expanded={...report,watchlist_count:63,watchlist:Array.from({length:63},()=>entry())};
