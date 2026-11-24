@@ -1,6 +1,8 @@
 name: LUMEX backtest candles 3y (once, public data, read-only)
 on:
-  pull_request:
+  push:
+    branches:
+      - 'data/backtest-candles-3y-20261124'
     paths:
       - 'tools/backtest/fetch_candles.py'
 permissions:
@@ -12,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -22,4 +24,4 @@ jobs:
         run: |
           mkdir -p tools/backtest/data && cp out/* tools/backtest/data/ && gzip -9 tools/backtest/data/*.csv
           git config user.name "lumex-backtest-bot"; git config user.email "actions@users.noreply.github.com"
-          git add tools/backtest/data && git commit -m "data: backtest candles $(date -u +%FT%TZ)" && git push origin HEAD:${{ github.head_ref }}
+          git add tools/backtest/data && git commit -m "data: backtest candles $(date -u +%FT%TZ)" && git push origin HEAD:${{ github.ref_name }}
