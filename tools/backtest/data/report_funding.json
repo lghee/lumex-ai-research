@@ -1,0 +1,83 @@
+{
+ "generated": 1795505635,
+ "BTC_funding": {
+  "source": "gate",
+  "rows": 3329,
+  "from": 1699632000,
+  "notes": [
+   "gate: 3329 rows, 1109 days"
+  ]
+ },
+ "ETH_funding": {
+  "source": "gate",
+  "rows": 3330,
+  "from": 1699603200,
+  "notes": [
+   "gate: 3330 rows, 1110 days"
+  ]
+ },
+ "SOL_funding": {
+  "source": "gate",
+  "rows": 3329,
+  "from": 1699632000,
+  "notes": [
+   "gate: 3329 rows, 1109 days"
+  ]
+ },
+ "XRP_funding": {
+  "source": "gate",
+  "rows": 3329,
+  "from": 1699632000,
+  "notes": [
+   "gate: 3329 rows, 1109 days"
+  ]
+ },
+ "DOGE_funding": {
+  "source": "gate",
+  "rows": 3329,
+  "from": 1699632000,
+  "notes": [
+   "gate: 3329 rows, 1109 days"
+  ]
+ },
+ "BNB_funding": {
+  "source": "gate",
+  "rows": 3330,
+  "from": 1699603200,
+  "notes": [
+   "gate: 3330 rows, 1110 days"
+  ]
+ },
+ "ADA_funding": {
+  "source": "gate",
+  "rows": 5780,
+  "from": 1699372800,
+  "notes": [
+   "gate: 5780 rows, 1112 days"
+  ]
+ },
+ "LINK_funding": {
+  "source": "gate",
+  "rows": 3329,
+  "from": 1699632000,
+  "notes": [
+   "gate: 3329 rows, 1109 days"
+  ]
+ },
+ "AVAX_funding": {
+  "source": "gate",
+  "rows": 5779,
+  "from": 1699401600,
+  "notes": [
+   "gate: 5779 rows, 1112 days"
+  ]
+ },
+ "SUI_funding": {
+  "source": "gate",
+  "rows": 3328,
+  "from": 1699660800,
+  "notes": [
+   "gate: 3328 rows, 1109 days"
+  ]
+ }
+}
