@@ -4,7 +4,7 @@
  * target every connected customer account follows. This module publishes, per strategy,
  * a monotonically increasing sequence number that changes ONLY when the league account's
  * holdings change (a fill), together with the target legs frozen at that moment:
- *   {symbol, side, weight (notional ÷ account equity), entry (league fill), opened_ms, stop, take}
+ *   {symbol, side, weight (notional ÷ account equity), entry (league fill), opened_ms, stop, take, take_frac?}
  * No customer data, keys or orders here. Core reads the ledger with the hub token, checks the
  * HMAC signature (same shared token) and freshness, and executes per customer.
  */
@@ -22,6 +22,8 @@ export function legsOf(acc){
   return Object.values(acc.positions||{}).map(p=>{const mark=fin(p.last_mark)?p.last_mark:p.entry;
     const leg={symbol:p.symbol,side:p.side,weight:rd(Math.abs(p.qty*mark)/eq,4),entry:rd(p.entry,10),opened_ms:p.opened_ms||null};
     if(fin(p.stop)&&p.stop>0)leg.stop=rd(p.stop,10);if(fin(p.take)&&p.take>0)leg.take=rd(p.take,10);
+    // 2026-11-24: a partial target (SIGNAL 50 %) — followers must not place a full-size take; they follow the league's reduction
+    if(fin(p.take_frac)&&p.take_frac>0&&p.take_frac<1&&leg.take)leg.take_frac=rd(p.take_frac,4);
     return leg;}).filter(l=>l.weight>0).sort((a,b)=>a.symbol.localeCompare(b.symbol));
 }
 /** Update st.signals in place; returns the public ledger document (unsigned). */
