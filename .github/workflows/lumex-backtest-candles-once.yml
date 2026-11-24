@@ -22,6 +22,6 @@ jobs:
         run: python tools/backtest/fetch_candles.py out
       - name: Commit data to this PR branch only (never main)
         run: |
-          mkdir -p tools/backtest/data && cp out/* tools/backtest/data/ && gzip -9 tools/backtest/data/*.csv
+          mkdir -p tools/backtest/data && rm -f tools/backtest/data/*_funding.csv.gz && cp out/* tools/backtest/data/ && gzip -9f tools/backtest/data/*.csv
           git config user.name "lumex-backtest-bot"; git config user.email "actions@users.noreply.github.com"
           git add tools/backtest/data && git commit -m "data: backtest candles $(date -u +%FT%TZ)" && git push origin HEAD:${{ github.ref_name }}
