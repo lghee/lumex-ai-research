@@ -1,4 +1,4 @@
-"""v4 — 3-year public USDT-perp history for strategy research round 2 (no keys, read-only).
+"""v4 (round 2) — 3-year public USDT-perp history for strategy research round 2 (no keys, read-only).
 Candles: OKX history-candles (1H/4H, 1095 days), Gate fallback. Funding: Gate funding history paged by time (3y),
 OKX funding-rate-history as extra recent coverage. Writes CSV per series + report.json. PR branch only."""
 import json, sys, time, urllib.request, pathlib, csv
