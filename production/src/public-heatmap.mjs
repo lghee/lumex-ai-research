@@ -70,6 +70,67 @@ async function fetchTickers(){
  if(payload.length<1000||payload.length>5500000)throw Error('provider_payload_size');
  try{return JSON.parse(payload)}catch{throw Error('provider_json_invalid')}
 }
+/* ---- 2026-11-25: per-contract 24h open-interest change and liquidations (Gate contract_stats, 1h) ----
+ * Same exchange and contracts as the board. Rows are hourly points; a row counts once its hour has closed
+ * (time + 1h <= now). 24h liquidations need at least 22 of the last 24 closed hours, OI change needs the
+ * point exactly 24h before the latest one. Anything missing stays null. */
+const STATS_KEY='stats.json',STATS_SCHEMA='lumex_public_heatmap_stats_v1',HOUR=3600;
+export const STATS_SOURCE='Gate USDT perpetual public contract_stats 1h';
+export function parseGateHourlyStats(rows,nowSec){
+ if(!Array.isArray(rows)||rows.length<2||rows.length>200)throw Error('gate_stats_schema');
+ const bars=new Map();
+ for(const r of rows){
+  const t=num(r?.time,1500000000,4102444800);
+  if(t===null||!Number.isSafeInteger(t)||t%HOUR!==0||t+HOUR>nowSec)continue;
+  bars.set(t,{oi:num(r?.open_interest_usd,0,1e15),long:num(r?.long_liq_usd,0,1e14),short:num(r?.short_liq_usd,0,1e14)});
+ }
+ const ts=[...bars.keys()].sort((a,b)=>a-b);if(!ts.length)throw Error('gate_stats_empty');
+ const last=ts.at(-1);if(last+HOUR<nowSec-3*HOUR)throw Error('gate_stats_stale');
+ let L=0,S=0,n=0;
+ for(let t=last-23*HOUR;t<=last;t+=HOUR){const b=bars.get(t);if(b&&b.long!==null&&b.short!==null){L+=b.long;S+=b.short;n++;}}
+ const oiNow=bars.get(last)?.oi??null,oiAgo=bars.get(last-24*HOUR)?.oi??null;
+ const chg=oiNow!==null&&oiAgo!==null&&oiAgo>0?(oiNow/oiAgo-1)*100:null;
+ return {sample_unix:last+HOUR,oi_usdt:oiNow===null?null:round(oiNow,2),
+   oi_change_24h_pct:chg!==null&&chg>=-100&&chg<=10000?round(chg,2):null,
+   liq_24h:n>=22?{long_usdt:round(L,2),short_usdt:round(S,2),hours:n}:null};
+}
+async function readJson(bucket,key){try{const o=await bucket.get(PREFIX+key);return o?await o.json():null;}catch{return null;}}
+/** Refreshes the stalest `batch` board contracts per run (10 × every 5 min → all 50 within 25 min). */
+export async function collectHeatmapStats(env,ms=Date.now(),{batch=10,fetchFn=fetch}={}){
+ if(!env?.MARKET_DATA)return {ok:false,reason:'market_storage_unavailable'};
+ const board=await readJson(env.MARKET_DATA,'latest.json');
+ if(board?.schema!==SCHEMA||!Array.isArray(board.coins))return {ok:false,reason:'board_unavailable'};
+ const prev=await readJson(env.MARKET_DATA,STATS_KEY);
+ const coins=prev?.schema===STATS_SCHEMA&&prev.coins&&typeof prev.coins==='object'?{...prev.coins}:{};
+ const listed=board.coins.map(c=>c.coin).filter(c=>CRYPTO_SET.has(c));
+ const seen=c=>Math.max(coins[c]?.fetched_ms||0,coins[c]?.attempted_ms||0);
+ const pick=listed.slice().sort((a,b)=>seen(a)-seen(b)).slice(0,Math.max(1,Math.min(25,batch)));
+ const nowSec=Math.floor(ms/1000);let ok=0,failed=0;
+ await Promise.all(pick.map(async coin=>{
+  try{
+   const res=await fetchFn('https://api.gateio.ws/api/v4/futures/usdt/contract_stats?contract='+coin+'_USDT&interval=1h&limit=26',
+     {headers:{accept:'application/json'},signal:AbortSignal.timeout(8000)});
+   if(!res.ok)throw Error('provider_http_'+res.status);
+   const text=await res.text();if(text.length>200000)throw Error('provider_payload_size');
+   coins[coin]={...parseGateHourlyStats(JSON.parse(text),nowSec),fetched_ms:ms};ok++;
+  }catch{coins[coin]={...(coins[coin]||{}),attempted_ms:ms};failed++;}
+ }));
+ for(const c of Object.keys(coins))if(!listed.includes(c)&&ms-seen(c)>24*HOUR*1000)delete coins[c];
+ await store(env.MARKET_DATA,STATS_KEY,{schema:STATS_SCHEMA,source:STATS_SOURCE,updated_ms:ms,coins});
+ return {ok:true,refreshed:ok,failed,tracked:Object.keys(coins).length};
+}
+/** Attaches fresh stats to the board rows (pure). Stats older than 75 min or a sample older than 3 h are left out. */
+export function attachStats(board,stats,ms){
+ if(stats?.schema!==STATS_SCHEMA||!stats.coins)return {...board,stats:{available:false}};
+ let oi=0,liq=0;
+ const coins=board.coins.map(c=>{const s=stats.coins[c.coin];
+  if(!s||!Number.isFinite(s.fetched_ms)||ms-s.fetched_ms>75*60000||!Number.isFinite(s.sample_unix)||ms/1000-s.sample_unix>3*HOUR)return c;
+  const o={...c,stats_as_of_unix:s.sample_unix};
+  if(s.oi_change_24h_pct!==null&&s.oi_change_24h_pct!==undefined){o.oi_change_24h_pct=s.oi_change_24h_pct;o.oi_usdt=s.oi_usdt;oi++;}
+  if(s.liq_24h){o.liq_24h_long_usdt=s.liq_24h.long_usdt;o.liq_24h_short_usdt=s.liq_24h.short_usdt;liq++;}
+  return o;});
+ return {...board,coins,stats:{available:oi>0||liq>0,source:STATS_SOURCE,exchange:'Gate',window_hours:24,coins_with_oi_change:oi,coins_with_liquidations:liq}};
+}
 async function store(bucket,name,data){await bucket.put(PREFIX+name,JSON.stringify(data),{httpMetadata:{contentType:'application/json'}})}
 export async function collectPublicHeatmap(env,ms=Date.now()){
  if(!env?.MARKET_DATA)return {ok:false,reason:'market_storage_unavailable'};
@@ -101,6 +162,7 @@ export async function heatmapPublicRoute(request,env,ms=Date.now()){
  if(source?.schema!==SCHEMA||!Array.isArray(source.coins)||source.coins.length!==50 ||
     !Number.isSafeInteger(source.collected_ms))return json({ok:false,error:'saved_data_invalid'},503);
  const age=Math.max(0,ms-source.collected_ms),stale=age>20*60000;
+ source=attachStats(source,await readJson(env.MARKET_DATA,STATS_KEY),ms);
  const result={...source,status:stale?'stale':'current',stale,age_seconds:Math.floor(age/1000),
     generated_at_utc:new Date(ms).toISOString()};
  const response=json(result,200,stale?0:45);
