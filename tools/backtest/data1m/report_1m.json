@@ -1,0 +1,26 @@
+{
+ "generated_ms": 1795641060000,
+ "days": 365,
+ "source": "OKX /api/v5/market/history-candles <COIN>-USDT-SWAP bar=1m",
+ "BTC": {
+  "rows": 525600,
+  "from": 1764105060000,
+  "to": 1795641000000,
+  "gaps": 0,
+  "secs": 1685
+ },
+ "ETH": {
+  "rows": 525600,
+  "from": 1764105060000,
+  "to": 1795641000000,
+  "gaps": 0,
+  "secs": 1679
+ },
+ "SOL": {
+  "rows": 525599,
+  "from": 1764105060000,
+  "to": 1795641000000,
+  "gaps": 1,
+  "secs": 1668
+ }
+}
