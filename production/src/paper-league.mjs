@@ -20,12 +20,12 @@ import {signalTick,SIGNALS} from './paper-league-signals.mjs';
 import {trend} from './paper-league-trend.mjs';
 import {chartsig} from './paper-league-chartsig.mjs';
 import {trendcrowd} from './paper-league-trendcrowd.mjs';
-import {dailyEma,dailyBreakout,rotation} from './paper-league-daily.mjs';
+import {dailyEma,dailyEma3x,dailyBreakout,rotation} from './paper-league-daily.mjs';
 /** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23)
  * + SIGNAL · 차트 신호 4H (2026-11-24, partial take + break-even stop) + TREND+ · 쏠림 브레이크 (2026-11-24)
  * + DAILY · 일봉 추세 추적, BREAKOUT · 20일 돌파, ROTATION · 강약 교체 (2026-11-26, daily bars).
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
-export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd,dailyEma,dailyBreakout,rotation];
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd,dailyEma,dailyBreakout,rotation,dailyEma3x];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'
@@ -281,7 +281,7 @@ export function summarize(acc,def,hist,now){
       rules:{half_at_pct:def.risk_overlay.ddHalf*100,flat_at_pct:def.risk_overlay.ddFlat*100,cooldown_hours:def.risk_overlay.cooldownH}}:null};
   return {...extra,id:def.id,name:def.name,family:def.family,risk:def.risk,kind:def.kind,symbols:def.symbols_label,interval:def.interval_label,summary:def.summary,rules:def.rules,
     started_ms:acc.started_ms,days:rd(days,2),equity:rd(acc.equity,2),return_pct:rd(ret,3),return_7d_pct:ago(7*86400000),return_30d_pct:ago(30*86400000),
-    mdd_pct:rd(acc.mdd_pct,3),trades:acc.trades,win_rate_pct:acc.trades?rd(acc.wins/acc.trades*100,1):null,
+    mdd_pct:rd(acc.mdd_pct,3),trades:acc.trades,wins:acc.wins||0,losses:Math.max(0,acc.trades-(acc.wins||0)),leverage:def.leverage||1,win_rate_pct:acc.trades?rd(acc.wins/acc.trades*100,1):null,
     profit_factor:acc.gross_loss>0?rd(acc.gross_win/acc.gross_loss,2):(acc.gross_win>0?null:null),
     fees:rd(acc.fees,2),funding:rd(acc.funding,2),exposure_pct:acc.exposure_pct,
     daily_sharpe_annualized:mean!==null&&sd>0&&dr.length>=14?rd(mean/sd*Math.sqrt(365),2):null,daily_samples:dr.length,
