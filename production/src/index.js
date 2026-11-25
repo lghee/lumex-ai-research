@@ -4987,8 +4987,11 @@ export default{
         .then(r=>{if(r?.ok===false)console.warn('official_news_partial',String(r.reason||'unavailable').slice(0,55));})
         .catch(()=>console.warn('official_news_r2_or_feed_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_HEATMAP==='true')
-      ctx.waitUntil(import('./public-heatmap.mjs').then(m=>m.collectPublicHeatmap(env))
-        .then(r=>{if(r?.ok===false)console.warn('public_heatmap_collect_limited',String(r.reason||'unknown').slice(0,60));})
+      ctx.waitUntil(import('./public-heatmap.mjs').then(async m=>{const r=await m.collectPublicHeatmap(env);
+          if(r?.ok===false)console.warn('public_heatmap_collect_limited',String(r.reason||'unknown').slice(0,60));
+          // 24h OI change + liquidations per board contract (10 contracts per run, stalest first)
+          const st=await m.collectHeatmapStats(env,Date.now(),{batch:Number(env.PUBLIC_HEATMAP_STATS_BATCH||10)});
+          if(st?.ok===false||st?.failed>3)console.warn('public_heatmap_stats_limited',String(st?.reason||st?.failed||'').slice(0,40));})
         .catch(()=>console.warn('public_heatmap_collect_unavailable')));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_PUBLIC_PULSE_FETCH==='true')
       ctx.waitUntil(import('./btc-onchain.mjs').then(m=>m.collectBtcOnchain(env)).catch(()=>console.error('btc_onchain_collect_failed')));
