@@ -20,10 +20,12 @@ import {signalTick,SIGNALS} from './paper-league-signals.mjs';
 import {trend} from './paper-league-trend.mjs';
 import {chartsig} from './paper-league-chartsig.mjs';
 import {trendcrowd} from './paper-league-trendcrowd.mjs';
+import {dailyEma,dailyBreakout,rotation} from './paper-league-daily.mjs';
 /** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23)
- * + SIGNAL · 차트 신호 4H (2026-11-24, partial take + break-even stop) + TREND+ · 쏠림 브레이크 (2026-11-24).
+ * + SIGNAL · 차트 신호 4H (2026-11-24, partial take + break-even stop) + TREND+ · 쏠림 브레이크 (2026-11-24)
+ * + DAILY · 일봉 추세 추적, BREAKOUT · 20일 돌파, ROTATION · 강약 교체 (2026-11-26, daily bars).
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
-export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd];
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd,dailyEma,dailyBreakout,rotation];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'
@@ -219,7 +221,10 @@ export async function runStrategy(def,acc,market,ctx){
               else{const old={...cur};delete acc.positions[l.symbol];const o=fill(acc,{symbol:l.symbol,side:l.side,qty:delta,ref:px.last,kind:'open',reason:'비중 확대',now});trades.push(o);
                 const added=acc.positions[l.symbol];acc.positions[l.symbol]={...old,qty:old.qty+delta,entry:(old.entry*old.qty+added.entry*delta)/(old.qty+delta),fees:old.fees+added.fees};}
             }
-            Object.assign(acc.positions[l.symbol],pickRisk(l,acc.positions[l.symbol].entry,now,true));continue;}
+            Object.assign(acc.positions[l.symbol],pickRisk(l,acc.positions[l.symbol].entry,now,true));
+            // 2026-11-26 daily strategies: the trailing stop moves once per closed bar, and only in the trade's favour
+            if(fin(l.trail_stop)&&l.trail_stop>0){const p=acc.positions[l.symbol];p.stop=p.side==='long'?Math.max(fin(p.stop)?p.stop:-Infinity,l.trail_stop):Math.min(fin(p.stop)?p.stop:Infinity,l.trail_stop);}
+            continue;}
           if(notional<50)continue;
           trades.push(fill(acc,{symbol:l.symbol,side:l.side,qty:notional/px.last,ref:px.last,kind:'open',reason:l.reason||out.note||'신호',now,extra:{}}));
           Object.assign(acc.positions[l.symbol],pickRisk(l,acc.positions[l.symbol].entry,now,false));
