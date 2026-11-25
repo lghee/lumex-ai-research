@@ -73,7 +73,7 @@ export function decideDaily(bars,held,rule){
   if(held&&rp.open&&rp.open.side===held)return {want:held,fresh:false,trail_stop:rp.open.stop};
   return {want:null,why:held?'추세 종료 · 청산':null};
 }
-function dailyStrategy(meta,rule){
+function dailyStrategy(meta,rule,w=COIN_WEIGHT){
   return {...meta,origin:'new',tier:'advanced',ai:false,kind:'trend',interval:'D',interval_label:'1D',symbols_label:'BTC 등 10종목',resize:false,
     async decide({market,acc}){
       const target=[],diag={},missing=[];let ok=0,exitWhy=null;
@@ -85,8 +85,8 @@ function dailyStrategy(meta,rule){
         ok++;diag[s]={want:d.want,fresh:!!d.fresh};
         if(d.why&&held&&!d.want)exitWhy=d.why;
         if(!d.want)continue;
-        if(d.fresh)target.push({symbol:s,side:d.want,weight:COIN_WEIGHT,stop_pct:d.stop_pct,reason:d.why});
-        else target.push({symbol:s,side:d.want,weight:COIN_WEIGHT,trail_stop:d.trail_stop,reason:'보유 유지'});
+        if(d.fresh)target.push({symbol:s,side:d.want,weight:w,stop_pct:d.stop_pct,reason:d.why});
+        else target.push({symbol:s,side:d.want,weight:w,trail_stop:d.trail_stop,reason:'보유 유지'});
       }
       if(ok<DAILY_SYMBOLS.length/2)return {error:'일봉 자료 부족'};
       const longs=target.filter(l=>l.side==='long').length;
@@ -99,6 +99,13 @@ export const dailyEma=dailyStrategy({id:'daily-ema-trail',name:'DAILY · 일봉 
 export const dailyBreakout=dailyStrategy({id:'daily-breakout-20',name:'BREAKOUT · 20일 돌파',family:'20일 신고가·신저가 돌파 + 추적 손절(롱·숏)',risk:'적극형',
   summary:'일봉 종가가 지난 20일 최고가를 넘으면 롱, 최저가를 깨면 숏을 잡습니다. 가장 유리했던 가격에서 변동폭의 3배만큼 되돌아오거나 반대쪽 돌파가 나오면 정리합니다.',
   rules:['진입: 일봉 종가가 직전 20일 최고가 위(최저가 아래)면 다음 날 시가에 롱(숏)','손절: 진입가에서 ATR14 2배','추적 손절: 보유 중 가장 높은(낮은) 가격에서 ATR14 3배, 하루에 한 번 올림(내림)','청산: 반대쪽 20일 돌파 때 방향 전환','코인별 자금 10%, 10종목 합계 1배 이하']},BREAKOUT_RULE);
+
+/** DAILY 3x: the same DAILY rule and signals, 30 % of the account per coin (up to 3x gross across 10 coins). Paper league only:
+ * research (3 years, realized basis) +479 % / max drawdown −25 % vs 1x +91 % / −9 %. Kept out of the copy/follow catalog. */
+export const DAILY_3X_WEIGHT=0.3;
+export const dailyEma3x=dailyStrategy({id:'daily-ema-trail-3x',name:'DAILY 3x · 일봉 추세 추적',family:'일봉 추세추종 + 추적 손절(롱·숏) · 레버리지 3배',risk:'적극형',leverage:3,
+  summary:'DAILY와 같은 신호로 같은 때 사고팝니다. 코인마다 자금의 30%를 넣어 10종목이 모두 열리면 계좌의 3배까지 거래합니다. 수익과 손실이 모두 약 3배로 커집니다.',
+  rules:['진입·손절·추적 손절·청산은 DAILY와 같음','코인별 자금 30%, 10종목 합계 3배 이하','레버리지 때문에 손익과 낙폭이 DAILY의 약 3배']},EMA_RULE,DAILY_3X_WEIGHT);
 
 /** ROTATION: once a week (the first tick after the Sunday daily close, UTC) rank the 10 coins by 14-day return; long the
  * best 2 that are above their EMA50, short the worst 2 that are below it; 25 % of the account each; hold to the next
