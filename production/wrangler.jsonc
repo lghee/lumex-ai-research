@@ -126,6 +126,8 @@
     "AUTO_SITE_MONITOR": "true",
     "AUTO_PUBLIC_HEATMAP": "true",
     "AUTO_OFFICIAL_NEWS": "true",
+    "AUTO_NEWS_FEED": "true",
+    "AUTO_MORNING_REPORT": "true",
     "AUTO_TOP50_UNIVERSE": "true",
     "AUTO_ORDER_FLOW_LIVE": "true",
     "AUTO_ORDER_FLOW_COVERAGE": "true",

@@ -4875,6 +4875,10 @@ export default{
     if(url.pathname==='/market-hub/v1/bls-oidc-ingest')
       return import('./bls-official-sidecar.mjs').then(m=>m.ingestBlsOidc(request,env,verifyGithubOfficialBlsOidc))
         .catch(()=>respond({ok:false,error:'bls_official_ingest_unavailable'},503));
+    // Phase 107: 코인 속보 (free sources, no per-item AI)
+    if(url.pathname==='/market-hub/v1/news'||url.pathname.startsWith('/market-hub/v1/news/item/'))
+      return import('./news-feed.mjs').then(m=>m.newsRoute(request,env))
+        .catch(()=>respond({ok:false,error:'news_unavailable'},503));
     if(url.pathname==='/market-hub/v1/official-news')
       return import('./official-news.mjs').then(m=>m.officialNewsPublicRoute(request,env))
         .catch(()=>respond({ok:false,error:'official_news_unavailable'},503));
@@ -4982,6 +4986,15 @@ export default{
     }
     if(controller.cron==='* * * * *'&&env.AUTO_HYPERLIQUID_WHALES==='true')
       ctx.waitUntil(import('./hyperliquid-whales.mjs').then(m=>m.collectHyperWhales(env)).catch(()=>console.error('hyperliquid_whales_collect_failed')));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_NEWS_FEED==='true')
+      ctx.waitUntil(import('./news-feed.mjs').then(m=>m.collectNews(env))
+        .then(r=>{if(r?.ok===false)console.warn('news_feed_incomplete',String(r.reason||'').slice(0,55));})
+        .catch(e=>console.warn('news_feed_failed',String(e?.message||e).slice(0,65))));
+    // Phase 107: 07:50 KST data bundle → Core, 08:00 KST publish ping (Core holds the OpenAI key).
+    if(controller.cron==='* * * * *'&&env.AUTO_MORNING_REPORT==='true')
+      ctx.waitUntil(import('./news-report.mjs').then(m=>m.morningReportTick(env))
+        .then(r=>{if(r?.ok===false)console.warn('morning_report_tick',String(r.reason||r.status||'').slice(0,55));})
+        .catch(e=>console.warn('morning_report_failed',String(e?.message||e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OFFICIAL_NEWS==='true')
       ctx.waitUntil(import('./official-news.mjs').then(m=>m.collectOfficialNews(env))
         .then(r=>{if(r?.ok===false)console.warn('official_news_partial',String(r.reason||'unavailable').slice(0,55));})
