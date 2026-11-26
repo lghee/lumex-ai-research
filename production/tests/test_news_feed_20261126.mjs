@@ -1,6 +1,6 @@
 // Phase 107: 코인 속보 (free sources, rule-based LUMEX 감지) + 아침 리포트 데이터 묶음.
 import assert from 'node:assert/strict';
-import {detectMove,detectFunding,detectOi,detectLiq,detectWhale,detectSignal,parseBybitAnnouncements,fromOfficial,mergeFeed,listView,publicItem,
+import {detectMove,detectFunding,detectOi,detectLiq,detectWhale,detectSignal,parseRss,xmlText,coinsIn,SOURCES,srcFilter,fromOfficial,mergeFeed,listView,publicItem,
   newsRoute,collectNews,fmtKrwUnit,fmtPrice,kstDay,ROOT,DEFAULTS} from '../src/news-feed.mjs';
 import {coinFacts,newsForReport,morningReportTick,buildBundle} from '../src/news-report.mjs';
 
@@ -45,32 +45,45 @@ const h4=[];let p=100;for(let i=0;i<150;i++){p*=i<140?0.997:1.02;h4.push(bar(now
 let sig=null;for(let n=120;n<=150&&!sig;n++)sig=detectSignal('BTC',h4.slice(0,n));
 assert.ok(sig&&sig.title==='LUMEX 4시간 신호 · BTC 롱'&&sig.tags[0]==='signal','4h long signal on some cut');
 
-// Bybit announcements
-const ann={retCode:0,result:{list:[
-  {title:'Bybit Will Delist XYZUSDT Perpetual',description:'<b>x</b> delisting soon',type:{key:'delistings',title:'Delistings'},tags:['Derivatives'],url:'https://announcements.bybit.com/en/article/x',dateTimestamp:now-H,publishTime:now-H},
-  {title:'Phishing',description:'',type:{key:'latest_bybit_news'},tags:[],url:'https://evil.example.com/a',dateTimestamp:now-H},
-  {title:'BTC event',description:'d',type:{key:'latest_activities'},tags:[],url:'https://www.bybit.com/en/promo',dateTimestamp:now-2*H}]}};
-const anns=parseBybitAnnouncements(ann,now);
-assert.equal(anns.length,2,'foreign host dropped');assert.ok(anns[0].importance===2&&anns[0].source==='Bybit 공지'&&anns[1].coins[0]==='BTC');
-assert.deepEqual(parseBybitAnnouncements({retCode:10001},now),[]);
-
+// RSS articles (Phase 108: exchange notices dropped)
+const BM=SOURCES.find(x=>x.key==='blockmedia'),CD=SOURCES.find(x=>x.key==='coindesk');
+const rssXml=`<?xml version="1.0"?><rss><channel><title>x</title>
+<item><title><![CDATA[비트코인, 9만 달러 회복…ETF 순유입 &amp; 거래량 증가]]></title><link>https://www.blockmedia.co.kr/archives/1200001</link><dc:creator><![CDATA[홍길동 기자]]></dc:creator><pubDate>${new Date(now-H).toUTCString()}</pubDate><description><![CDATA[<p>본문 일부</p>]]></description></item>
+<item><title>Phishing</title><link>https://evil.example.com/a</link><pubDate>${new Date(now-H).toUTCString()}</pubDate></item>
+<item><title>Old story</title><link>https://www.blockmedia.co.kr/archives/1</link><pubDate>${new Date(now-72*H).toUTCString()}</pubDate></item>
+<item><title>No link</title><guid isPermaLink="false">abc</guid><pubDate>${new Date(now-H).toUTCString()}</pubDate></item>
+</channel></rss>`;
+const arts=parseRss(rssXml,BM,now);
+assert.equal(arts.length,1,'foreign host / old / no link dropped');
+assert.equal(arts[0].title,'비트코인, 9만 달러 회복…ETF 순유입 & 거래량 증가');assert.deepEqual(arts[0].coins,['BTC']);
+assert.ok(arts[0].kind==='news'&&arts[0].src==='blockmedia'&&arts[0].lang==='ko'&&arts[0].summary===''&&arts[0].data.author==='홍길동 기자','title + link + byline only, no body');
+const cdXml=`<rss><channel><item><title>Ether Slides 5% as &#8220;Solana&#8221; ETF Odds Rise</title><link>https://www.coindesk.com/markets/2026/11/26/x/?utm=1#frag</link><pubDate>${new Date(now-2*H).toUTCString()}</pubDate></item></channel></rss>`;
+const cda=parseRss(cdXml,CD,now);assert.deepEqual(cda[0].coins,['ETH','SOL']);assert.equal(cda[0].lang,'en');assert.ok(!cda[0].url.includes('#'));
+assert.equal(xmlText('A &amp;&#x27;B&#39; <b>c</b>'),"A &'B' c");assert.deepEqual(coinsIn('XRP 리플 소송'),['XRP']);
+assert.deepEqual(parseRss(null,BM,now),[]);
 // official
 const off=fromOfficial({ok:true,items:[{published_ms:now-H,source_url:'https://www.federalreserve.gov/x',title_original:'FOMC statement',agency:'미국 연방준비제도',kind:'monetary_policy',description_ko:'연준의 공식 통화정책 발표입니다.'}]},now);
 assert.ok(off.length===1&&off[0].importance===3&&off[0].kind==='macro');
 
 // merge: ids, dedupe, ref price, after_1h
-let r=mergeFeed(null,[detectMove('BTC',[...b15.slice(0,4),bar(b15[4].t,100,104)]),...anns,...off],{BTC:104,ETH:3000},now);
+const exOld={key:'bybit:https://announcements.bybit.com/x',t:now-H,kind:'exchange',coins:[],title:'Old exchange notice',url:'https://announcements.bybit.com/x'};
+let r=mergeFeed(null,[detectMove('BTC',[...b15.slice(0,4),bar(b15[4].t,100,104)]),...arts,exOld,...off],{BTC:104,ETH:3000},now);
 assert.equal(r.added.length,4);assert.ok(r.feed.items.every(i=>/^20261126-000\d$/.test(i.id)),'KST-day ids');
 assert.equal(r.feed.items[0].id,'20261126-0004','newest first');
 const btcItem=r.feed.items.find(i=>i.coins.includes('BTC')&&i.kind==='lumex');assert.deepEqual(btcItem.ref_price,{BTC:104});
-let r2=mergeFeed(r.feed,[...anns],{BTC:106},now+5*60000);assert.equal(r2.added.length,0,'same keys skipped');
+let r2=mergeFeed(r.feed,[...arts],{BTC:106},now+5*60000);assert.equal(r2.added.length,0,'same keys skipped');
 r2=mergeFeed(r2.feed,[],{BTC:110},now+65*60000);
 assert.deepEqual(r2.feed.items.find(i=>i.id===btcItem.id).after_1h.price,{BTC:110},'1h-after price filled once');
 const v=listView(r2.feed,{tab:'lumex'});assert.ok(v.items.every(i=>i.kind==='lumex'));
+assert.ok(!listView(r2.feed,{}).items.some(i=>i.kind==='exchange'||i.kind==='news'),'no exchange; articles hidden without src=');
+const withSrc=listView(r2.feed,{tab:'news',src:'blockmedia,nope'});assert.ok(withSrc.items.length===1&&withSrc.items[0].src==='blockmedia'&&withSrc.items[0].lang==='ko');
+assert.equal(listView(r2.feed,{tab:'news',src:'coindesk'}).items.length,0,'only listed sources');
+assert.equal(listView(r2.feed,{tab:'exchange'}).items.some(i=>i.kind==='exchange'),false,'unknown tab = all, still no exchange');
+assert.ok(srcFilter('blockmedia')({kind:'lumex'}),'non-article kinds pass');
 const pi=publicItem(r2.feed.items.find(i=>i.id===btcItem.id),{BTC:114.4});assert.equal(pi.change_since_pct.BTC,10);assert.equal(pi.change_1h_after_pct.BTC,5.77);
 assert.ok(!('key' in pi),'internal key not public');
-const page=listView(r2.feed,{limit:2});assert.equal(page.items.length,2);assert.equal(page.next,page.items[1].id);
-assert.ok(listView(r2.feed,{before:page.next}).items.every(i=>i.id<page.next),'paging');
+const page=listView(r2.feed,{limit:2,src:'blockmedia'});assert.equal(page.items.length,2);assert.equal(page.next,page.items[1].id);
+assert.ok(listView(r2.feed,{before:page.next,src:'blockmedia'}).items.every(i=>i.id<page.next),'paging');
 
 // next day resets the sequence
 const r3=mergeFeed(r2.feed,[{...off[0],key:'official:new'}],{},Date.UTC(2026,10,26,15,10));assert.equal(r3.added[0].id,'20261127-0001');
@@ -80,9 +93,12 @@ function bucket(){const m=new Map();return {m,async get(k){if(!m.has(k))return n
 
 // route
 const B=bucket();await B.put(ROOT+'feed.json',JSON.stringify(r2.feed));
-let res=await newsRoute(new Request('https://w/market-hub/v1/news?tab=all&limit=3'),{MARKET_DATA:B});let j=await res.json();assert.ok(j.ok&&j.items.length===3);
+let res=await newsRoute(new Request('https://w/market-hub/v1/news?tab=all&limit=3'),{MARKET_DATA:B});let j=await res.json();assert.ok(j.ok&&j.items.length===2,'lumex + macro; exchange and unlisted articles hidden');
 res=await newsRoute(new Request('https://w/market-hub/v1/news/item/'+btcItem.id),{MARKET_DATA:B});j=await res.json();assert.ok(j.ok&&j.item.id===btcItem.id);
 res=await newsRoute(new Request('https://w/market-hub/v1/news/item/20990101-0001'),{MARKET_DATA:B});assert.equal(res.status,404);
+const exId=r2.feed.items.find(i=>i.kind==='exchange').id;res=await newsRoute(new Request('https://w/market-hub/v1/news/item/'+exId),{MARKET_DATA:B});assert.equal(res.status,404,'old exchange notice not served');
+res=await newsRoute(new Request('https://w/market-hub/v1/news?tab=news&src=blockmedia'),{MARKET_DATA:B});j=await res.json();assert.ok(j.items.length===1&&j.items[0].src==='blockmedia');
+res=await newsRoute(new Request('https://w/market-hub/v1/news/sources'),{MARKET_DATA:B});j=await res.json();assert.ok(j.ok&&j.sources.length===SOURCES.length&&j.sources[0].last===null);
 
 // collectNews end to end with mocked upstreams
 const calls=[];
@@ -92,18 +108,22 @@ const fetchMock=async url=>{calls.push(url);const u=String(url);let body;
   else if(u.includes('/v5/market/tickers'))body={retCode:0,result:{list:[{lastPrice:u.includes('BTC')?'104':'100',fundingRate:u.includes('ETH')?'0.0006':'0.0001',openInterestValue:'1000000'}]}};
   else if(u.includes('open-interest'))body={retCode:0,result:{list:Array.from({length:13},(_,i)=>({timestamp:String(now-i*300000),openInterest:'1000'}))}};
   else if(u.includes('contract_stats'))body=Array.from({length:25},(_,i)=>({time:Math.floor((now-(26-i)*H)/1000),long_liq_usd:100,short_liq_usd:100}));
-  else if(u.includes('announcements'))body=u.includes('ko-KR')?{retCode:0,result:{list:[]}}:ann;
+  else if(u==='https://www.blockmedia.co.kr/feed')return new Response(rssXml.replace(/now-H/,''),{status:200});
+  else if(u.startsWith('https://www.coindesk.com/'))return new Response(cdXml,{status:200});
   else return new Response('nope',{status:404});
   return new Response(JSON.stringify(body),{status:200});};
 const C=bucket();await C.put('market-hub/hyperliquid-whales/v1/latest.json',JSON.stringify({rows:[row]}));
-const cnow=Date.UTC(2026,10,26,13,16); // 15-minute announcement slot
+const cnow=Date.UTC(2026,10,26,13,12); // 10-minute article slot
 const out=await collectNews({MARKET_DATA:C},{now:cnow,fetchImpl:fetchMock});
 assert.ok(out.ok&&out.added>=4,'collected '+JSON.stringify(out));
 const fd=JSON.parse(C.m.get(ROOT+'feed.json'));
 assert.ok(fd.items.some(i=>i.title==='BTC 1시간 +4.0% 상승'),'btc move');assert.ok(fd.items.some(i=>i.title.startsWith('ETH 펀딩비')),'eth funding');
-assert.ok(fd.items.some(i=>i.tags.includes('whale')),'whale');assert.ok(fd.items.some(i=>i.source==='Bybit 공지'),'bybit en fallback');
+assert.ok(fd.items.some(i=>i.tags.includes('whale')),'whale');assert.ok(!fd.items.some(i=>i.kind==='exchange'),'no exchange notices collected');
+assert.ok(fd.items.some(i=>i.src==='blockmedia')&&fd.items.some(i=>i.src==='coindesk'),'articles collected');
+const src=JSON.parse(C.m.get(ROOT+'sources.json'));assert.ok(src.sources.blockmedia.ok&&src.sources.blockmedia.items===1&&src.sources.decrypt.ok===false,'per-source health');
 assert.ok(C.m.has(ROOT+'day/20261126.json'),'day archive');
-assert.ok(calls.every(u=>/^https:\/\/api\.(bybit\.com|gateio\.ws)\//.test(u)),'only bybit / gate hosts');
+assert.ok(calls.every(u=>/^https:\/\/api\.(bybit\.com|gateio\.ws)\//.test(u)||SOURCES.some(s=>s.url===u)),'only bybit / gate / listed feeds');
+assert.ok(!calls.some(u=>u.includes('announcements')),'no announcements API');
 const again=await collectNews({MARKET_DATA:C},{now:cnow+60000,fetchImpl:fetchMock});assert.equal(again.added,0,'no duplicates on the next run');
 
 // morning report facts
@@ -135,4 +155,4 @@ assert.equal((await morningReportTick(env,{now:at(8,1),fetchImpl:bundleFetch})).
 assert.equal(coreCalls.length,2);
 const b=await buildBundle({MARKET_DATA:bucket()},{now:at(7,50),fetchImpl:bundleFetch});assert.ok(b.ok&&b.schema==='lumex_morning_bundle_v1');
 const noTok=await morningReportTick({MARKET_DATA:bucket()},{now:at(7,52),fetchImpl:bundleFetch}).catch(e=>e.message);assert.equal(noTok,'worker_token_missing');
-console.log('PASS news feed: detectors (move/funding/OI/liq/whale/4H signal), Bybit announcements (host allowlist, en fallback), official, merge (KST ids, dedupe, ref/after-1h prices), public list/item/paging, collect end-to-end; morning bundle facts + 07:50/08:00 Core calls once per day');
+console.log('PASS news feed: detectors (move/funding/OI/liq/whale/4H signal), RSS articles (host allowlist, title/link/byline only, src on-list, health), no exchange notices, official, merge (KST ids, dedupe, ref/after-1h prices), public list/item/paging, collect end-to-end; morning bundle facts + 07:50/08:00 Core calls once per day');

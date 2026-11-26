@@ -50,7 +50,7 @@ export function coinFacts(sym,{h1,h4,d1,ticker,oi1h,liq}){
 }
 /** Pure: the last 24h of news titles that matter for BTC/ETH (plus macro and exchange notices). */
 export function newsForReport(feed,now){
-  return (feed?.items||[]).filter(i=>i.t>=now-24*HOUR&&(i.kind==='macro'||i.kind==='exchange'&&i.importance>=2||i.coins?.some(c=>c==='BTC'||c==='ETH')))
+  return (feed?.items||[]).filter(i=>i.t>=now-24*HOUR&&i.kind!=='exchange'&&(i.kind==='macro'||i.coins?.some(c=>c==='BTC'||c==='ETH')))
     .slice(0,25).map(i=>({at_kst:iso(i.t),source:i.source,title:i.title,coins:i.coins}));
 }
 async function getJson(fetchImpl,url,maxLen=600000){

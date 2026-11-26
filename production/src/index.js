@@ -4876,7 +4876,7 @@ export default{
       return import('./bls-official-sidecar.mjs').then(m=>m.ingestBlsOidc(request,env,verifyGithubOfficialBlsOidc))
         .catch(()=>respond({ok:false,error:'bls_official_ingest_unavailable'},503));
     // Phase 107: 코인 속보 (free sources, no per-item AI)
-    if(url.pathname==='/market-hub/v1/news'||url.pathname.startsWith('/market-hub/v1/news/item/'))
+    if(url.pathname==='/market-hub/v1/news'||url.pathname==='/market-hub/v1/news/sources'||url.pathname.startsWith('/market-hub/v1/news/item/'))
       return import('./news-feed.mjs').then(m=>m.newsRoute(request,env))
         .catch(()=>respond({ok:false,error:'news_unavailable'},503));
     if(url.pathname==='/market-hub/v1/official-news')

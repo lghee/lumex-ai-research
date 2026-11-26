@@ -1,8 +1,10 @@
 /** LUMEX 코인 속보 (Phase 107). Free sources only, no AI per item.
  * - LUMEX 감지: rule-based items from public market data (Bybit klines / tickers / open interest,
  *   Gate 1h liquidation aggregates, Hyperliquid whale fills already in R2, LUMEX 4H chart signal).
- * - Bybit 공지: official announcements API (title, description, link).
  * - 공식 경제 발표: the existing official-news R2 snapshot (titles + links).
+ * - 기사 (Phase 108): crypto media RSS — title, link, byline, time only (no body, no description).
+ *   Every source is collected; Core decides which sources are shown (운영센터 켜기) and translates English titles.
+ * Exchange announcements were dropped in Phase 108 (user decision).
  * Never copies third-party article bodies. Never claims a cause for a price move.
  * Storage: R2 market-hub/news/v1/feed.json (newest 400) + day/YYYY-MM-DD.json (KST day archive).
  */
@@ -110,19 +112,37 @@ export function detectSignal(coin,bars4h){
     summary:`4시간봉 마감 기준 ${coin}에 LUMEX 차트 ${long?'롱':'숏'} 신호가 나왔습니다. 신호 가격 ${fmtPrice(last.c)}달러.`,
     data:{side:n.side,price:last.c}};
 }
-/** Bybit announcements API → items. Only https links on announcements.bybit.com / www.bybit.com. */
-export function parseBybitAnnouncements(raw,now){
-  if(raw?.retCode!==0||!Array.isArray(raw?.result?.list))return [];
-  const out=[];
-  for(const a of raw.result.list.slice(0,30)){
-    const title=clip(a?.title,140),t=Number(a?.publishTime??a?.dateTimestamp);
-    let url=null;try{const u=new URL(String(a?.url||''));if(u.protocol==='https:'&&/(^|\.)bybit\.com$/.test(u.hostname))url=u.href;}catch{}
-    if(!title||!url||!fin(t)||t>now+HOUR||t<now-7*86400000)continue;
-    const type=String(a?.type?.key||''),tags=Array.isArray(a?.tags)?a.tags.map(String).slice(0,4):[];
-    const big=/delist/i.test(type+' '+tags.join(' '))||/new_crypto|listing/i.test(type);
-    const coins=COINS.filter(c=>new RegExp('\\b'+c+'\\b').test(title));
-    out.push({key:'bybit:'+url,t,kind:'exchange',tags:['bybit',type].filter(Boolean),coins,importance:big?2:1,source:'Bybit 공지',
-      title,summary:clip(a?.description,160),url,data:{type:clip(a?.type?.title,40)}});
+/** Crypto media RSS. Keys are what Core stores in its on/off list — do not rename. */
+export const SOURCES=Object.freeze([
+  {key:'blockmedia',name:'블록미디어',lang:'ko',url:'https://www.blockmedia.co.kr/feed',host:/(^|\.)blockmedia\.co\.kr$/},
+  {key:'beincrypto_kr',name:'비인크립토',lang:'ko',url:'https://kr.beincrypto.com/feed/',host:/(^|\.)beincrypto\.com$/},
+  {key:'coindesk',name:'CoinDesk',lang:'en',url:'https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml',host:/(^|\.)coindesk\.com$/},
+  {key:'cointelegraph',name:'Cointelegraph',lang:'en',url:'https://cointelegraph.com/rss',host:/(^|\.)cointelegraph\.com$/},
+  {key:'decrypt',name:'Decrypt',lang:'en',url:'https://decrypt.co/feed',host:/(^|\.)decrypt\.co$/},
+  {key:'theblock',name:'The Block',lang:'en',url:'https://www.theblock.co/rss.xml',host:/(^|\.)theblock\.co$/},
+]);
+const COIN_WORDS={BTC:/\bBTC\b|비트코인|\bBitcoin\b/i,ETH:/\bETH\b|이더리움|\bEther(eum)?\b/i,SOL:/\bSOL\b|솔라나|\bSolana\b/i,XRP:/\bXRP\b|리플|\bRipple\b/i};
+const ENT={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' ',hellip:'…',mdash:'—',ndash:'–',lsquo:'‘',rsquo:'’',ldquo:'“',rdquo:'”'};
+export function xmlText(s){
+  s=String(s||'').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/<[^>]*>/g,'');
+  return s.replace(/&#x([0-9a-f]+);/gi,(_,h)=>String.fromCodePoint(parseInt(h,16))).replace(/&#(\d+);/g,(_,d)=>String.fromCodePoint(+d))
+    .replace(/&([a-z]+);/gi,(m,n)=>ENT[n.toLowerCase()]??m).replace(/\s+/g,' ').trim();
+}
+const tag=(blk,name)=>{const m=blk.match(new RegExp('<'+name+'(?:\\s[^>]*)?>([\\s\\S]*?)</'+name+'>','i'));return m?m[1]:'';};
+export function coinsIn(title){return COINS.filter(c=>COIN_WORDS[c].test(title));}
+/** RSS XML → article candidates (title + link + byline + time). Links must be https on the source's own host. */
+export function parseRss(xml,src,now){
+  const out=[];if(typeof xml!=='string')return out;
+  for(const m of xml.matchAll(/<item[\s>][\s\S]*?<\/item>/gi)){
+    if(out.length>=20)break;
+    const blk=m[0],title=clip(xmlText(tag(blk,'title')),200);
+    let link=xmlText(tag(blk,'link'));if(!link){const g=xmlText(tag(blk,'guid'));if(/^https:\/\//.test(g))link=g;}
+    let url=null;try{const u=new URL(link);if(u.protocol==='https:'&&src.host.test(u.hostname)){u.hash='';url=u.href;}}catch{}
+    const t=Date.parse(xmlText(tag(blk,'pubDate'))||xmlText(tag(blk,'dc:date')));
+    if(!title||!url||!fin(t)||t>now+HOUR||t<now-48*HOUR)continue;
+    const author=clip(xmlText(tag(blk,'dc:creator'))||xmlText(tag(blk,'author')),40);
+    out.push({key:'rss:'+url,t,kind:'news',src:src.key,lang:src.lang,tags:['article'],coins:coinsIn(title),importance:1,source:src.name,
+      title,summary:'',url,data:author?{author}:{}});
   }
   return out;
 }
@@ -131,7 +151,7 @@ export function fromOfficial(snapshot,now){
   return snapshot.items.filter(x=>fin(x?.published_ms)&&x.published_ms>now-3*86400000&&x.source_url).slice(0,20).map(x=>({
     key:'official:'+x.source_url,t:x.published_ms,kind:'macro',tags:[String(x.kind||'macro')],coins:[],
     importance:x.kind==='monetary_policy'?3:2,source:String(x.agency||'공식 발표').slice(0,40),
-    title:clip(x.title_original,200),summary:clip(x.description_ko,160),url:x.source_url,data:{}}));
+    lang:'en',title:clip(x.title_original,200),summary:clip(x.description_ko,160),url:x.source_url,data:{}}));
 }
 
 /* ───────── merge (pure) ───────── */
@@ -146,7 +166,7 @@ export function mergeFeed(feed,candidates,prices,now){
     keys[c.key]=now;seq++;
     const ref={};for(const coin of c.coins||[])if(fin(prices?.[coin]))ref[coin]=prices[coin];
     added.push({id:day+'-'+String(seq).padStart(4,'0'),key:c.key,t:Math.min(c.t,now),created_ms:now,kind:c.kind,
-      source:c.source||'LUMEX 감지',tags:c.tags||[],coins:c.coins||[],importance:c.importance||1,
+      source:c.source||'LUMEX 감지',src:c.src||null,lang:c.lang||'ko',tags:c.tags||[],coins:c.coins||[],importance:c.importance||1,
       title:c.title,summary:c.summary||'',url:c.url||null,ref_price:ref,after_1h:null,data:c.data||{}});
   }
   const items=[...added.reverse(),...(f.items||[])].slice(0,FEED_MAX);
@@ -194,11 +214,14 @@ export async function collectNews(env,{now=Date.now(),fetchImpl=fetch}={}){
   }
   const whales=await r2json(bucket,'market-hub/hyperliquid-whales/v1/latest.json');
   for(const row of whales?.rows||[]){const x=detectWhale(row,now,th);if(x)cand.push(x);}
-  if(now%(15*60000)<5*60000){ // announcements: every 15 minutes
-    for(const locale of ['ko-KR','en-US']){
-      try{const raw=await getJson(fetchImpl,`https://api.bybit.com/v5/announcements/index?locale=${locale}&limit=20`,400000);
-        const list=parseBybitAnnouncements(raw,now);if(list.length){cand.push(...list);break;}}catch(e){note('bybit_'+locale,e);}
-    }
+  const rss={};
+  if(now%(10*60000)<5*60000){ // articles: every 10 minutes
+    await Promise.all(SOURCES.map(async src=>{
+      try{const r=await fetchImpl(src.url,{headers:{accept:'application/rss+xml, application/xml, text/xml'},signal:AbortSignal.timeout(8000)});
+        if(!r.ok)throw Error('http_'+r.status);const xml=await r.text();if(xml.length>3e6)throw Error('size');
+        const list=parseRss(xml,src,now);cand.push(...list);rss[src.key]={ok:true,items:list.length};}
+      catch(e){rss[src.key]={ok:false,error:String(e?.message||e).slice(0,50)};}
+    }));
   }
   cand.push(...fromOfficial(await r2json(bucket,'market-hub/official-news/v1/latest.json'),now));
   const feed=await r2json(bucket,ROOT+'feed.json');
@@ -211,22 +234,27 @@ export async function collectNews(env,{now=Date.now(),fetchImpl=fetch}={}){
       await bucket.put(key,JSON.stringify({schema:SCHEMA,day:d,items:[...list,...(old?.items||[])].slice(0,2000)}),{httpMetadata:{contentType:'application/json'}});
     }
   }
-  await bucket.put(ROOT+'health.json',JSON.stringify({ok:true,at_ms:now,added:added.length,candidates:cand.length,errors}),{httpMetadata:{contentType:'application/json'}});
+  let sources=null;
+  if(Object.keys(rss).length){sources=rss;await bucket.put(ROOT+'sources.json',JSON.stringify({at_ms:now,sources:rss}),{httpMetadata:{contentType:'application/json'}});}
+  await bucket.put(ROOT+'health.json',JSON.stringify({ok:true,at_ms:now,added:added.length,candidates:cand.length,errors,sources}),{httpMetadata:{contentType:'application/json'}});
   return {ok:true,added:added.length,errors};
 }
 
 /* ───────── public API ───────── */
-const TABS={all:()=>true,exchange:i=>i.kind==='exchange',lumex:i=>i.kind==='lumex',macro:i=>i.kind==='macro',news:i=>i.kind==='rss'};
+// Exchange notices collected before Phase 108 stay in R2 history but are never listed.
+const TABS={all:i=>i.kind!=='exchange',news:i=>i.kind==='news',lumex:i=>i.kind==='lumex',macro:i=>i.kind==='macro'};
+/** Articles are listed only for sources Core passes in src= (its 운영센터 on-list). No src= → no articles. */
+export function srcFilter(raw){const on=new Set(String(raw||'').split(',').map(x=>x.trim()).filter(x=>SOURCES.some(s=>s.key===x)));return i=>i.kind!=='news'||on.has(i.src);}
 export function publicItem(it,prices){
   const now_change={};
   for(const c of it.coins||[]){const a=it.ref_price?.[c],b=prices?.[c];if(fin(a)&&fin(b)&&a>0)now_change[c]=+((b/a-1)*100).toFixed(2);}
   const after={};
   if(it.after_1h)for(const c of it.coins||[]){const a=it.ref_price?.[c],b=it.after_1h.price?.[c];if(fin(a)&&fin(b)&&a>0)after[c]=+((b/a-1)*100).toFixed(2);}
-  return {id:it.id,t:it.t,kind:it.kind,source:it.source,tags:it.tags,coins:it.coins,importance:it.importance,title:it.title,summary:it.summary,url:it.url,
+  return {id:it.id,t:it.t,kind:it.kind,source:it.source,src:it.src||null,lang:it.lang||'ko',tags:it.tags,coins:it.coins,importance:it.importance,title:it.title,summary:it.summary,url:it.url,
     ref_price:it.ref_price,change_since_pct:now_change,change_1h_after_pct:Object.keys(after).length?after:null,data:it.data};
 }
-export function listView(feed,{tab='all',before='',limit=20}={}){
-  const f=TABS[tab]||TABS.all;let items=(feed?.items||[]).filter(f);
+export function listView(feed,{tab='all',before='',limit=20,src=''}={}){
+  const f=TABS[tab]||TABS.all,on=srcFilter(src);let items=(feed?.items||[]).filter(i=>f(i)&&on(i));
   if(/^\d{8}-\d{4}$/.test(before))items=items.filter(i=>i.id<before);
   const page=items.slice(0,Math.max(1,Math.min(50,limit)));
   return {ok:true,schema:'lumex_public_news_v1',updated_ms:feed?.updated_ms||null,tab,items:page.map(i=>publicItem(i,feed?.prices)),
@@ -241,12 +269,18 @@ export async function newsRoute(request,env){
     const id=m[1];let it=(feed?.items||[]).find(i=>i.id===id);
     if(!it){const day=await r2json(bucket,ROOT+'day/'+id.slice(0,8)+'.json');it=(day?.items||[]).find(i=>i.id===id);}
     if(!it)return respond({ok:false,error:'not_found'},404);
-    const related=(feed?.items||[]).filter(i=>i.id!==id&&i.coins?.some(c=>it.coins?.includes(c))).slice(0,3).map(i=>publicItem(i,feed?.prices));
+    if(it.kind==='exchange')return respond({ok:false,error:'not_found'},404);
+    const on=srcFilter(url.searchParams.get('src'));
+    const related=(feed?.items||[]).filter(i=>i.id!==id&&i.kind!=='exchange'&&on(i)&&i.coins?.some(c=>it.coins?.includes(c))).slice(0,3).map(i=>publicItem(i,feed?.prices));
     return respond({ok:true,schema:'lumex_public_news_item_v1',item:publicItem(it,feed?.prices),related},200,60);
   }
   if(url.pathname==='/market-hub/v1/news'){
     if(!feed)return respond({ok:true,schema:'lumex_public_news_v1',items:[],next:null,prices:{}},200,30);
-    return respond(listView(feed,{tab:url.searchParams.get('tab')||'all',before:url.searchParams.get('before')||'',limit:Number(url.searchParams.get('limit')||20)}),200,30);
+    return respond(listView(feed,{tab:url.searchParams.get('tab')||'all',before:url.searchParams.get('before')||'',limit:Number(url.searchParams.get('limit')||20),src:url.searchParams.get('src')||''}),200,30);
+  }
+  if(url.pathname==='/market-hub/v1/news/sources'){
+    const h=await r2json(bucket,ROOT+'sources.json');
+    return respond({ok:true,schema:'lumex_news_sources_v1',at_ms:h?.at_ms||null,sources:SOURCES.map(s=>({key:s.key,name:s.name,lang:s.lang,feed:s.url,last:h?.sources?.[s.key]||null}))},200,60);
   }
   return respond({ok:false,error:'not_found'},404);
 }
