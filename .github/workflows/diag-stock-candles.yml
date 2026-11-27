@@ -7,14 +7,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          date -u
-          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            R=$(curl -s -m 25 "$B/bots"); echo "$R" | head -c 300; echo
-            echo "$R" | grep -q '"strategies"' && break; sleep 60; done
-          echo "$R" | python3 -c "
+          S=https://lumexbot.com
+          echo "== daily page"; curl -s -m 30 -A 'Mozilla/5.0' -o /tmp/d.html -w '%{http_code}\n' "$S/daily/"; grep -o '<h1[^<]*</h1>\|lxgr-card[^>]*href="[^"]*"\|아직[^<]\{0,80\}\|준비[^<]\{0,60\}' /tmp/d.html | head -12
+          echo "== namespace routes"; curl -s -m 30 -A 'Mozilla/5.0' "$S/wp-json/lumex/v1" | python3 -c "
           import sys,json
-          j=json.load(sys.stdin);print('basket',j.get('basket'))
-          for s in j.get('strategies') or []:print(s['id'],s['equity'],s['return_pct'],s['trades'],repr(s['last_signal']),s['status'],'pos',[(p['symbol'],p['side'],p['entry']) for p in s['positions']])"
-          curl -s -m 25 "$B/bots-detail?id=stock-chart-4h" | head -c 600; echo
-          curl -s -m 25 "$B/bots-trades?symbol=NVDAUSDT" | head -c 400; echo
+          try:
+            j=json.load(sys.stdin);r=[k for k in j.get('routes',{}) if 'ai-report' in k or 'stock' in k or 'daily' in k];print(r)
+          except Exception as e:print('parse',e)"
+          echo "== backfill route (no token)"; curl -s -m 30 -X POST -A 'Mozilla/5.0' -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/backfill" | head -c 300; echo
+          echo "== bundle route (no token)"; curl -s -m 30 -X POST -A 'Mozilla/5.0' -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/bundle" | head -c 300; echo
+          echo "== no UA"; curl -s -m 30 -X POST -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/bundle" | head -c 300; echo
+          echo "== core version hint"; curl -s -m 30 -A 'Mozilla/5.0' "$S/" | grep -o 'lumex-core[^"]*ver=[0-9.]*\|lumex-pro[^"]*ver=[0-9.]*\|ver=0\.[0-9.]*' | sort -u | head
+          echo "== stocks bots page"; curl -s -m 30 -A 'Mozilla/5.0' -o /dev/null -w '%{http_code}\n' "$S/stocks/daily/"
