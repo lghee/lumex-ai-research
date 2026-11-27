@@ -5004,6 +5004,11 @@ export default{
       ctx.waitUntil(import('./news-report.mjs').then(m=>m.morningReportTick(env))
         .then(r=>{if(r?.ok===false)console.warn('morning_report_tick',String(r.reason||r.status||'').slice(0,55));})
         .catch(e=>console.warn('morning_report_failed',String(e?.message||e).slice(0,65))));
+    // Phase 113: rebuild the listed past days for /daily/ (one day per minute, stops once all are stored).
+    if(controller.cron==='* * * * *'&&env.DAILY_BACKFILL_DATES)
+      ctx.waitUntil(import('./news-report.mjs').then(m=>m.dailyBackfillTick(env))
+        .then(r=>{if(r?.ok===false)console.warn('daily_backfill',String(r.reason||'').slice(0,40),r.day||'');})
+        .catch(e=>console.warn('daily_backfill_failed',String(e?.message||e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_OFFICIAL_NEWS==='true')
       ctx.waitUntil(import('./official-news.mjs').then(m=>m.collectOfficialNews(env))
         .then(r=>{if(r?.ok===false)console.warn('official_news_partial',String(r.reason||'unavailable').slice(0,55));})
