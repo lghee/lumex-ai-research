@@ -2,37 +2,27 @@ name: diag stock candles (temporary)
 on:
   push:
     branches: [diag/stock-candles-20261127]
+permissions:
+  contents: write
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - run: |
-          echo "== bybit direct from runner"; curl -s -m 15 -o /dev/null -w '%{http_code}\n' 'https://api.bybit.com/v5/market/kline?category=linear&symbol=NVDAUSDT&interval=60&limit=2'
-          curl -s -m 15 -o /dev/null -w '%{http_code}\n' 'https://api.bytick.com/v5/market/kline?category=linear&symbol=NVDAUSDT&interval=60&limit=2'
           curl -s -m 25 https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1/universe > u.json
+          mkdir -p diag-logos/raw
           python3 - <<'PY'
-          import json,subprocess,os
-          u=json.load(open('u.json'));st=u['stocks'];print('stocks',len(st))
-          os.makedirs('logos',exist_ok=True)
-          src={'fmp':'https://financialmodelingprep.com/image-stock/{t}.png','nvstly':'https://raw.githubusercontent.com/nvstly/icons/main/ticker_icons/{t}.png','parqet':'https://assets.parqet.com/logos/symbol/{t}?format=png'}
-          hit={k:0 for k in src};rows=[]
+          import json,subprocess
+          st=json.load(open('u.json'))['stocks'];idx=[]
           for s in st:
-            t=s['ticker'];got=[]
-            for k,p in src.items():
-              f=f'logos/{k}_{t}.png'
-              r=subprocess.run(['curl','-s','-m','12','-L','-o',f,'-w','%{http_code} %{content_type} %{size_download}',p.format(t=t)],capture_output=True,text=True).stdout
-              code,ct,sz=(r.split()+['','',''])[:3]
-              ok=code=='200' and 'image' in ct and int(float(sz or 0))>300
-              if ok: hit[k]+=1; got.append(k)
-              else:
-                try: os.remove(f)
-                except: pass
-            rows.append((t,s['type'],s['name'],got))
-          print(hit)
-          for r in rows: print(*r)
-          json.dump(rows,open('logos/index.json','w'),ensure_ascii=False)
+            f=f"diag-logos/raw/{s['slug']}.png"
+            r=subprocess.run(['curl','-s','-m','12','-L','-o',f,'-w','%{http_code} %{content_type} %{size_download}',f"https://financialmodelingprep.com/image-stock/{s['ticker']}.png"],capture_output=True,text=True).stdout.split()
+            ok=len(r)==3 and r[0]=='200' and 'image' in r[1] and float(r[2])>300
+            if not ok: subprocess.run(['rm','-f',f])
+            idx.append({'slug':s['slug'],'ticker':s['ticker'],'name':s['name'],'type':s['type'],'fmp':ok})
+          json.dump(idx,open('diag-logos/index.json','w'),ensure_ascii=False,indent=0)
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: logos
-          path: logos
+          cd diag-logos && ls raw | wc -l && identify raw/*.png | awk '{print $3}' | sort | uniq -c | sort -rn | head
+          git config user.name diag-bot && git config user.email diag@users.noreply.github.com
+          git add . && git commit -qm "diag: fmp logos (temporary, not for main)" && git push -q
