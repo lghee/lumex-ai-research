@@ -2,12 +2,13 @@
  * No changes to LYRA, four-symbol research, exchange-compare Cron or orders. */
 const KEY='market-hub/universe/bybit-linear-top50-v1.json';
 const n=(x,min,max)=>{if(x===null||x===undefined||x===''||typeof x==='boolean')return null;const y=Number(x);return Number.isFinite(y)&&y>=min&&y<=max?y:null;};
-export function normalizeTop50(body,now=Date.now()){
+/** exclude = TradFi contract symbols (stocks, ETFs, commodities, forex) — coin ranking only (Phase 113). */
+export function normalizeTop50(body,now=Date.now(),exclude=new Set()){
  if(body?.retCode!==0||!Array.isArray(body?.result?.list)||body.result.list.length>3000)return null;
  const unique=new Map();
  for(const r of body.result.list){
   const symbol=String(r?.symbol||'');
-  if(!/^[A-Z0-9]{2,20}USDT$/.test(symbol)||symbol.length>24)continue;
+  if(!/^[A-Z0-9]{2,20}USDT$/.test(symbol)||symbol.length>24||exclude.has(symbol))continue;
   const price=n(r.lastPrice,1e-12,1e10),turnover=n(r.turnover24h,1,1e20),change=n(r.price24hPcnt,-1,1000);
   if(price===null||turnover===null||change===null)continue;
   const rate=n(r.fundingRate,-.2,.2),oi=n(r.openInterestValue,.00001,1e20);
@@ -52,7 +53,8 @@ export async function collectTop50(env,{now=Date.now(),fetchImpl=fetch}={}){
  if(Number(r.headers.get('content-length')||0)>750000)return {ok:false,reason:'body_oversize'};
  const body=await r.text();if(body.length<20||body.length>750000)return {ok:false,reason:'invalid_size'};
  let raw;try{raw=JSON.parse(body)}catch{return {ok:false,reason:'json_invalid'}}
- const catalog=normalizeTop50(raw,now);
+ let exclude=new Set();try{exclude=await (await import('./stock-hub.mjs')).tradfiSet(env);}catch{}
+ const catalog=normalizeTop50(raw,now,exclude);
  if(!checkTop50(catalog,now))return {ok:false,reason:'data_schema_rejected'};
  await env.MARKET_DATA.put(KEY,JSON.stringify(catalog),{httpMetadata:{contentType:'application/json'}});
  const saved=await env.MARKET_DATA.get(KEY);
