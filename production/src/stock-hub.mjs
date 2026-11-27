@@ -285,6 +285,12 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
   const url=new URL(request.url),p=url.pathname.slice('/stock-hub/v1/'.length),bucket=env?.MARKET_DATA;
   if(!bucket)return json({ok:false,error:'storage_unavailable'},503);
   if(p==='session')return json({ok:true,session:usSession(now),last_closed_session:lastClosedSession(now)},200,30);
+  // 2026-11-28: regular-session windows for a time range (the browser shades bars it got from Bybit itself)
+  if(p==='sessions'){
+    const from=Number(url.searchParams.get('from')),to=Number(url.searchParams.get('to'));
+    if(!Number.isFinite(from)||!Number.isFinite(to)||from>to||to-from>400*86400000)return json({ok:false,error:'range'},400);
+    return json({ok:true,from,to,regular_sessions:regularSessions(from,to),session:usSession(now)},200,300);
+  }
   if(p==='universe'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,schema:u.schema,source:u.source,updated_ms:u.updated_ms,count:u.count,stocks:u.stocks},200,600);}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
