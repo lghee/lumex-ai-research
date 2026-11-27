@@ -8,7 +8,7 @@ import {makeMarket,parseKlines} from './paper-league.mjs';
 import {ema,rsi,replay as chartReplay} from './paper-league-chartsig.mjs';
 import {ROOT as NEWS_ROOT,kstDay} from './news-feed.mjs';
 
-const HOUR=3600000,KST=9*HOUR,fin=Number.isFinite;
+const HOUR=3600000,MIN=60000,KST=9*HOUR,fin=Number.isFinite;
 const r2=n=>fin(n)?Math.round(n*100)/100:null,r4=n=>fin(n)?Math.round(n*1e4)/1e4:null;
 const iso=t=>new Date(t+KST).toISOString().slice(0,16).replace('T',' ')+' KST';
 
@@ -149,24 +149,39 @@ async function callCore(env,path,body,fetchImpl){
   const t=await r.text();let j=null;try{j=JSON.parse(t);}catch{}
   return {status:r.status,body:j};
 }
-/** Called from the 1-minute cron. Idempotent per KST date via R2 markers. */
+/** Called from the 1-minute cron. Idempotent per KST date via R2 markers.
+ * 07:50 KST: facts bundle → Core. If Core did not take it (e.g. the site was refusing the Worker), the bundle is rebuilt
+ * from the data at that time and sent again every 30 minutes until 11:59 KST. The publish ping goes only after Core
+ * stored a bundle, from 08:00 to 11:59 KST (a day that never reached Core is filled later by DAILY_BACKFILL_DATES). */
 export async function morningReportTick(env,{now=Date.now(),fetchImpl=fetch}={}){
   const k=new Date(now+KST),hh=k.getUTCHours(),mm=k.getUTCMinutes(),day=kstDay(now),bucket=env?.MARKET_DATA;
   if(!bucket)return {ok:false,reason:'r2_missing'};
-  const mark=async n=>{const o=await bucket.head(NEWS_ROOT+'report/'+day+'-'+n);return Boolean(o);};
-  const set=(n,x)=>bucket.put(NEWS_ROOT+'report/'+day+'-'+n,JSON.stringify(x),{httpMetadata:{contentType:'application/json'}});
-  if(hh===7&&mm>=50&&mm<58&&!(await mark('bundle'))){
+  const key=n=>NEWS_ROOT+'report/'+day+'-'+n;
+  const mark=async n=>Boolean(await bucket.head(key(n)));
+  const read=async n=>{try{const o=await bucket.get(key(n));return o?await o.json():null;}catch{return null;}};
+  const set=(n,x)=>bucket.put(key(n),JSON.stringify(x),{httpMetadata:{contentType:'application/json'}});
+  const send=async stage=>{
     const b=await buildBundle(env,{now,fetchImpl});
-    if(!b.ok){await set('bundle-failed',{at:now});return {ok:false,reason:'bundle_incomplete'};}
+    if(!b.ok){await set('bundle-failed',{at:now});return {ok:false,stage,reason:'bundle_incomplete'};}
     await set('bundle',{at:now});
-    const r=await callCore(env,'bundle',b,fetchImpl);
-    await set('bundle-sent',{at:now,status:r.status,result:r.body?.state||null});
-    return {ok:r.status<300,stage:'bundle',status:r.status};
-  }
-  if(hh===8&&mm<20&&!(await mark('publish'))){
-    const r=await callCore(env,'publish',{report_date:day},fetchImpl);
-    if(r.status<300&&r.body?.ok){await set('publish',{at:now,state:r.body.state||null});}
-    return {ok:r.status<300,stage:'publish',status:r.status,state:r.body?.state||null};
+    let r;try{r=await callCore(env,'bundle',b,fetchImpl);}catch(e){r={status:0,body:null,error:String(e?.message||e).slice(0,60)};}
+    await set('bundle-sent',{at:now,status:r.status,result:r.body?.state||null,error:r.error||null});
+    return {ok:r.status>=200&&r.status<300,stage,status:r.status,reason:r.error||undefined};
+  };
+  if(hh===7&&mm>=50&&mm<58&&!(await mark('bundle'))&&!(await mark('bundle-failed')))return send('bundle');
+  if(hh===7&&mm>=50&&mm<58&&!(await mark('bundle'))){const f=await read('bundle-failed');if(!f||now-(f.at||0)>=2*MIN)return send('bundle');}
+  if(hh>=8&&hh<12){
+    const sent=await read('bundle-sent');const stored=sent&&sent.status>=200&&sent.status<300;
+    if(!stored){
+      const last=Math.max(sent?.at||0,(await read('bundle'))?.at||0,(await read('bundle-failed'))?.at||0);
+      if(now-last>=30*MIN)return send('bundle_retry');
+      return {ok:true,stage:'wait_bundle'};
+    }
+    if(!(await mark('publish'))){
+      const r=await callCore(env,'publish',{report_date:day},fetchImpl);
+      if(r.status<300&&r.body?.ok){await set('publish',{at:now,state:r.body.state||null});}
+      return {ok:r.status<300,stage:'publish',status:r.status,state:r.body?.state||null};
+    }
   }
   return {ok:true,stage:'idle'};
 }

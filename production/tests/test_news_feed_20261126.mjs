@@ -154,5 +154,21 @@ let t2=await morningReportTick(env,{now:at(8,0),fetchImpl:bundleFetch});assert.o
 assert.equal((await morningReportTick(env,{now:at(8,1),fetchImpl:bundleFetch})).stage,'idle','publish once after ok');
 assert.equal(coreCalls.length,2);
 const b=await buildBundle({MARKET_DATA:bucket()},{now:at(7,50),fetchImpl:bundleFetch});assert.ok(b.ok&&b.schema==='lumex_morning_bundle_v1');
-const noTok=await morningReportTick({MARKET_DATA:bucket()},{now:at(7,52),fetchImpl:bundleFetch}).catch(e=>e.message);assert.equal(noTok,'worker_token_missing');
+const noTok=await morningReportTick({MARKET_DATA:bucket()},{now:at(7,52),fetchImpl:bundleFetch});assert.equal(noTok.ok,false);assert.equal(noTok.reason,'worker_token_missing');
+// 2026-11-28: Core refused the Worker (401) → retry every 30 min until 11:59 KST, publish only after Core stored the bundle
+{const R2=bucket(),calls=[];let refuse=true;
+ const f=async(url,init)=>{const u=String(url);if(u.startsWith('https://lumexbot.com/wp-json/lumex/v1/ai-report/')){calls.push(u.split('/').pop());
+   return refuse?new Response('{"code":"lumex_login_required"}',{status:401}):new Response(JSON.stringify({ok:true,state:u.endsWith('publish')?'published':'ready'}),{status:200});}
+   return bundleFetch(url,init);};
+ const e2={MARKET_DATA:R2,LUMEX_AI_LAB_WORKER_TOKEN:'t'.repeat(48)};
+ let x=await morningReportTick(e2,{now:at(7,50),fetchImpl:f});assert.equal(x.ok,false);assert.equal(x.status,401);
+ x=await morningReportTick(e2,{now:at(8,0),fetchImpl:f});assert.equal(x.stage,'wait_bundle','no publish ping for a bundle Core never stored');
+ x=await morningReportTick(e2,{now:at(8,20),fetchImpl:f});assert.equal(x.stage,'bundle_retry');assert.equal(x.status,401);
+ x=await morningReportTick(e2,{now:at(8,40),fetchImpl:f});assert.equal(x.stage,'wait_bundle','30 min between retries');
+ refuse=false;x=await morningReportTick(e2,{now:at(8,50),fetchImpl:f});assert.ok(x.ok&&x.stage==='bundle_retry');
+ x=await morningReportTick(e2,{now:at(8,51),fetchImpl:f});assert.ok(x.stage==='publish'&&x.state==='published');
+ x=await morningReportTick(e2,{now:at(8,52),fetchImpl:f});assert.equal(x.stage,'idle');
+ assert.deepEqual(calls,['bundle','bundle','bundle','publish']);
+ const R3=bucket(),e3={MARKET_DATA:R3,LUMEX_AI_LAB_WORKER_TOKEN:'t'.repeat(48)};refuse=true;await morningReportTick(e3,{now:at(7,50),fetchImpl:f});
+ x=await morningReportTick(e3,{now:at(12,10),fetchImpl:f});assert.equal(x.stage,'idle','after 11:59 the day is left to the backfill');}
 console.log('PASS news feed: detectors (move/funding/OI/liq/whale/4H signal), RSS articles (host allowlist, title/link/byline only, src on-list, health), no exchange notices, official, merge (KST ids, dedupe, ref/after-1h prices), public list/item/paging, collect end-to-end; morning bundle facts + 07:50/08:00 Core calls once per day');
