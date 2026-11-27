@@ -8,10 +8,13 @@ jobs:
     steps:
       - run: |
           B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          curl -s -m 25 "$B/radar" | python3 -c "
+          date -u
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            R=$(curl -s -m 25 "$B/bots"); echo "$R" | head -c 300; echo
+            echo "$R" | grep -q '"strategies"' && break; sleep 60; done
+          echo "$R" | python3 -c "
           import sys,json
-          j=json.load(sys.stdin);it=j.get('items') or [];print('ok',j.get('ok'),'items',len(it),'ranked',sum(1 for x in it if x.get('ranked')),'updated',j.get('updated_ms'))
-          print(sorted(it[0].keys()) if it else None)
-          r=sorted([x for x in it if x.get('ranked')],key=lambda x:-(x.get('turnover_24h_usd') or 0))[:10];print([x['symbol'] for x in r])"
-          curl -s -m 25 "$B/status" | head -c 1500; echo
-          curl -s -m 25 "https://lumex-ai-research2.kpiplus195.workers.dev/health" | head -c 400; echo
+          j=json.load(sys.stdin);print('basket',j.get('basket'))
+          for s in j.get('strategies') or []:print(s['id'],s['equity'],s['return_pct'],s['trades'],repr(s['last_signal']),s['status'],'pos',[(p['symbol'],p['side'],p['entry']) for p in s['positions']])"
+          curl -s -m 25 "$B/bots-detail?id=stock-chart-4h" | head -c 600; echo
+          curl -s -m 25 "$B/bots-trades?symbol=NVDAUSDT" | head -c 400; echo
