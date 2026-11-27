@@ -8,22 +8,10 @@ jobs:
     steps:
       - run: |
           B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          echo "== bots"; curl -s -m 25 -w ' HTTP %{http_code}\n' "$B/bots" | python3 -c "
+          curl -s -m 25 "$B/radar" | python3 -c "
           import sys,json
-          raw=sys.stdin.read();body,code=raw.rsplit(' HTTP ',1);print('http',code.strip())
-          j=json.loads(body);print('ok',j.get('ok'),j.get('error'),'basket',j.get('basket'))
-          for s in j.get('strategies') or []:print(s['id'],s['equity'],s['return_pct'],s['trades'],s['last_signal'],s['status'],'pos',[(p['symbol'],p['side']) for p in s['positions']])
-          "
-          echo "== bots-detail"; curl -s -m 25 "$B/bots-detail?id=stock-chart-4h" | head -c 700; echo
-          echo "== bots-trades"; curl -s -m 25 "$B/bots-trades?symbol=nvdausdt" | head -c 500; echo
-          echo "== whale detail"; A=$(curl -s -m 25 "$B/whales" | python3 -c "import sys,json;j=json.load(sys.stdin);print(j['positions'][0]['address'])"); echo $A
-          curl -s -m 30 "$B/whale?address=$A" | python3 -c "
-          import sys,json
-          j=json.load(sys.stdin);print('ok',j.get('ok'),j.get('error'),'stale',j.get('stale'))
-          print('acct',j.get('account_value_usd'),'stock',j.get('stock_value_usd'),'unreal',j.get('stock_unrealized_usd'))
-          for p in j.get('positions',[]):print(p)
-          print('fills',len(j.get('fills',[])));[print(f) for f in j.get('fills',[])[:4]]
-          print('events',len(j.get('events',[])))
-          "
-          echo "== untracked"; curl -s -m 20 -o /dev/null -w '%{http_code}\n' "$B/whale?address=0x0000000000000000000000000000000000000001"
-          echo "== site whale page"; curl -s -m 30 -o /dev/null -w '%{http_code}\n' "https://lumexbot.com/stocks/whales/$A/"
+          j=json.load(sys.stdin);it=j.get('items') or [];print('ok',j.get('ok'),'items',len(it),'ranked',sum(1 for x in it if x.get('ranked')),'updated',j.get('updated_ms'))
+          print(sorted(it[0].keys()) if it else None)
+          r=sorted([x for x in it if x.get('ranked')],key=lambda x:-(x.get('turnover_24h_usd') or 0))[:10];print([x['symbol'] for x in r])"
+          curl -s -m 25 "$B/status" | head -c 1500; echo
+          curl -s -m 25 "https://lumex-ai-research2.kpiplus195.workers.dev/health" | head -c 400; echo
