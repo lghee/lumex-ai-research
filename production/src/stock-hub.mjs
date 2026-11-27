@@ -180,9 +180,10 @@ export async function collectStockHub(env,{now=Date.now(),fetchImpl=fetch}={}){
   const ref=close&&close.date===lastClosedSession(now)?close:null;
   const radar=buildRadar(universe,tickers,session,ref,now);
   if(radar.ok)await rput(bucket,'radar.json',radar);
+  let gaps=null;try{gaps=await (await import('./stock-gaps.mjs')).recordGaps(bucket,{universe,tickers,radar,now,closeStored:due?close:null});}catch(e){gaps={error:String(e?.message||e).slice(0,40)};}
   let candles=null;try{candles=await collectCandles(env,radar,{now,fetchImpl});}catch(e){candles={ok:false,reason:String(e?.message||e).slice(0,40)};}
-  await rput(bucket,'status.json',{updated_ms:now,radar:{ok:radar.ok,count:radar.count??0},candles}).catch(()=>{});
-  return {ok:radar.ok,count:radar.count,close_captured:Boolean(due),candles};
+  await rput(bucket,'status.json',{updated_ms:now,radar:{ok:radar.ok,count:radar.count??0},gaps,candles}).catch(()=>{});
+  return {ok:radar.ok,count:radar.count,close_captured:Boolean(due),gaps,candles};
 }
 
 /* ───────── candles (stock chart) ─────────
@@ -288,6 +289,8 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
     return json({ok:true,schema:u.schema,source:u.source,updated_ms:u.updated_ms,count:u.count,stocks:u.stocks},200,600);}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,updated_ms:u.updated_ms,types:TRADFI_TYPES,symbols:u.tradfi},200,600);}
+  if(p==='gaps'){const g=await (await import('./stock-gaps.mjs')).gapsPayload(env,{now,days:Number(url.searchParams.get('days')||20)});return json(g,200,60);}
+  if(p==='whales'){const w=await (await import('./stock-whales.mjs')).whalesPayload(env,{now});return json(w,w.ok?200:503,30);}
   if(p==='status'){const st=await rget(bucket,'status.json');return json({ok:Boolean(st),...(st||{})},200,30);}
   if(p==='radar'){const r=await rget(bucket,'radar.json');if(!r?.ok)return json({ok:false,error:'not_collected'},503);
     return json({...r,stale:now-r.updated_ms>20*60000},200,60);}
