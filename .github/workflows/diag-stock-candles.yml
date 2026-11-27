@@ -8,11 +8,10 @@ jobs:
     steps:
       - run: |
           B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          sleep 420
-          for round in 1 2; do
+          for round in 1; do
             echo "== round $round"; curl -s -m 25 "$B/status"; echo
             curl -s -m 25 "$B/gaps" | python3 -c "import sys,json;j=json.load(sys.stdin);print('gaps',j.get('ok'),j.get('session'),j['live']['count'],j['live'].get('close_ref'),len(j['days']),j['recorded_days'])"
-            curl -s -m 25 -w '\nHTTP %{http_code}\n' "$B/whales" > w.txt; tail -1 w.txt; head -n -1 w.txt | python3 -c "import sys,json;j=json.load(sys.stdin);print('whales',j.get('ok'),j.get('error'),len(j.get('markets',[])),len(j.get('positions',[])),len(j.get('events',[])),j.get('coverage'));[print(p['ticker'],p['side'],round(p['value_usd']),p['address_short']) for p in j.get('positions',[])[:8]]" || true
+            curl -s -m 25 -w '\nHTTP %{http_code}\n' "$B/whales" > w.txt; tail -1 w.txt; head -n -1 w.txt | python3 -c "import sys,json;j=json.load(sys.stdin);print('whales',j.get('ok'),j.get('error'),len(j.get('markets',[])),len(j.get('positions',[])),len(j.get('events',[])),j.get('coverage'));[print(p['ticker'],p['side'],round(p['value_usd']),p['address_short']) for p in j.get('positions',[])[:8]];[print('EV',e.get('ticker'),e.get('side'),e.get('kind'),round(e.get('value_usd') or 0),e.get('r1h'),e.get('r4h')) for e in j.get('events',[])[:8]]" || true
             if [ $round = 1 ]; then sleep 600; fi
           done
           exit 0
