@@ -1,0 +1,14 @@
+name: diag stock candles (temporary)
+on:
+  push:
+    branches: [diag/stock-candles-20261127]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
+          for p in "session" "candles?symbol=NVDAUSDT&interval=60" "candles?symbol=NVDAUSDT&interval=D" "candles?symbol=TSLAUSDT&interval=15"; do
+            echo "== $p"; curl -s -m 25 -D - -o body.txt -H 'Origin: https://lumexbot.com' "$B/$p" | grep -i -E '^HTTP|access-control|cf-ray'; head -c 400 body.txt; echo; done
+          echo "== radar"; curl -s -m 25 "$B/radar" | head -c 300; echo
+          echo "== universe NVDA"; curl -s -m 25 "$B/universe" | grep -o '"symbol":"NVDAUSDT"[^}]*' | head -2
