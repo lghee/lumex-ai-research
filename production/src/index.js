@@ -4961,6 +4961,11 @@ export default{
       ctx.waitUntil(import('./stock-hub.mjs').then(m=>m.collectStockHub(env))
         .then(r=>{if(r?.ok===false)console.warn('stock_hub_incomplete',String(r.reason||'').slice(0,55));})
         .catch(e=>console.warn('stock_hub_failed',String(e?.message||e).slice(0,65))));
+    // Phase 120: AI 봇 주식 계좌 — simulated accounts on Bybit stock perpetuals, no orders, stock section only
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_STOCK_LEAGUE==='true')
+      ctx.waitUntil(import('./stock-league.mjs').then(m=>m.stockLeagueTick(env))
+        .then(r=>{if(r?.ok===false)console.warn('stock_league_incomplete',String(r.reason||'').slice(0,55));})
+        .catch(e=>console.warn('stock_league_failed',String(e?.message||e).slice(0,65))));
     // Phase 116: 주식 고래 (Hyperliquid xyz) — stock section only
     if(controller.cron==='*/5 * * * *'&&env.AUTO_STOCK_WHALES==='true')
       ctx.waitUntil(import('./stock-whales.mjs').then(m=>m.collectStockWhales(env))

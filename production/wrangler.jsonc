@@ -130,6 +130,7 @@
     "AUTO_MORNING_REPORT": "true",
     "AUTO_GROWTH_RECORDS": "true",
     "AUTO_STOCK_HUB": "true",
+    "AUTO_STOCK_LEAGUE": "true",
     "AUTO_STOCK_WHALES": "true",
     "DAILY_BACKFILL_DATES": "2026-11-20..2026-11-26",
     "AUTO_TOP50_UNIVERSE": "true",
