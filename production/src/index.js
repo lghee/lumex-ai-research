@@ -4879,6 +4879,9 @@ export default{
     if(url.pathname==='/market-hub/v1/news'||url.pathname==='/market-hub/v1/news/sources'||url.pathname.startsWith('/market-hub/v1/news/item/'))
       return import('./news-feed.mjs').then(m=>m.newsRoute(request,env))
         .catch(()=>respond({ok:false,error:'news_unavailable'},503));
+    if(url.pathname==='/market-hub/v1/chart-signals/record'||url.pathname==='/market-hub/v1/chart-signals/trade'||url.pathname==='/market-hub/v1/whale-cases')
+      return import('./growth-records.mjs').then(m=>m.growthRoute(request,env))
+        .catch(()=>respond({ok:false,error:'growth_records_unavailable'},503));
     if(url.pathname==='/market-hub/v1/official-news')
       return import('./official-news.mjs').then(m=>m.officialNewsPublicRoute(request,env))
         .catch(()=>respond({ok:false,error:'official_news_unavailable'},503));
@@ -4990,6 +4993,12 @@ export default{
       ctx.waitUntil(import('./news-feed.mjs').then(m=>m.collectNews(env))
         .then(r=>{if(r?.ok===false)console.warn('news_feed_incomplete',String(r.reason||'').slice(0,55));})
         .catch(e=>console.warn('news_feed_failed',String(e?.message||e).slice(0,65))));
+    // Phase 111: public records — LUMEX 4H signal record (once per closed bar) and Hyperliquid whale cases.
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_GROWTH_RECORDS==='true')
+      ctx.waitUntil(import('./growth-records.mjs').then(async m=>{
+          const a=await m.collectSignalRecord(env);if(a?.ok===false)console.warn('signal_record_incomplete',String(a.reason||'').slice(0,55));
+          const b=await m.collectWhaleCases(env);if(b?.ok===false)console.warn('whale_cases_incomplete',String(b.reason||'').slice(0,55));})
+        .catch(e=>console.warn('growth_records_failed',String(e?.message||e).slice(0,65))));
     // Phase 107: 07:50 KST data bundle → Core, 08:00 KST publish ping (Core holds the OpenAI key).
     if(controller.cron==='* * * * *'&&env.AUTO_MORNING_REPORT==='true')
       ctx.waitUntil(import('./news-report.mjs').then(m=>m.morningReportTick(env))
