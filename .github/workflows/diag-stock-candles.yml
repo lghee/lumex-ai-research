@@ -8,17 +8,22 @@ jobs:
     steps:
       - run: |
           B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          for q in "NVDAUSDT&interval=60" "NVDAUSDT&interval=240" "TSLAUSDT&interval=60" "SPYUSDT&interval=60"; do
-            echo "== $q"; curl -s -m 25 "$B/candles?symbol=$q" | python3 -c "
-          import sys,json,collections
-          j=json.load(sys.stdin);b=j.get('bars') or [];print('ok',j.get('ok'),j.get('error'),'n',len(b),'origin',j.get('origin'))
-          if b:
-            import datetime
-            d=collections.Counter((b[i]['t']-b[i-1]['t'])//60000 for i in range(1,len(b)));print('gaps(min):',dict(d))
-            print('first',datetime.datetime.utcfromtimestamp(b[0]['t']/1000),'last',datetime.datetime.utcfromtimestamp(b[-1]['t']/1000))
-            big=[(datetime.datetime.utcfromtimestamp(b[i-1]['t']/1000).isoformat(),(b[i]['t']-b[i-1]['t'])//60000) for i in range(1,len(b)) if b[i]['t']-b[i-1]['t']>3600000*4]
-            print('big gaps',big[:8]); zero=sum(1 for x in b if x['v']==0); print('zero-volume bars',zero)
-          "; done
-          echo "== whale detail probe"; A=$(curl -s -m 25 "$B/whales" | python3 -c "import sys,json;j=json.load(sys.stdin);print(j['positions'][0]['address'])"); echo $A
-          curl -s -m 20 -X POST https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"clearinghouseState\",\"user\":\"$A\",\"dex\":\"xyz\"}" | head -c 1500; echo
-          curl -s -m 20 -X POST https://api.hyperliquid.xyz/info -H 'content-type: application/json' -d "{\"type\":\"userFillsByTime\",\"user\":\"$A\",\"startTime\":$(( ($(date +%s)-7*86400)*1000 ))}" | python3 -c "import sys,json;f=json.load(sys.stdin);print('fills',len(f));x=[a for a in f if str(a.get('coin','')).startswith('xyz:')];print('xyz fills',len(x));print(json.dumps(x[:2]))"
+          echo "== bots"; curl -s -m 25 -w ' HTTP %{http_code}\n' "$B/bots" | python3 -c "
+          import sys,json
+          raw=sys.stdin.read();body,code=raw.rsplit(' HTTP ',1);print('http',code.strip())
+          j=json.loads(body);print('ok',j.get('ok'),j.get('error'),'basket',j.get('basket'))
+          for s in j.get('strategies') or []:print(s['id'],s['equity'],s['return_pct'],s['trades'],s['last_signal'],s['status'],'pos',[(p['symbol'],p['side']) for p in s['positions']])
+          "
+          echo "== bots-detail"; curl -s -m 25 "$B/bots-detail?id=stock-chart-4h" | head -c 700; echo
+          echo "== bots-trades"; curl -s -m 25 "$B/bots-trades?symbol=nvdausdt" | head -c 500; echo
+          echo "== whale detail"; A=$(curl -s -m 25 "$B/whales" | python3 -c "import sys,json;j=json.load(sys.stdin);print(j['positions'][0]['address'])"); echo $A
+          curl -s -m 30 "$B/whale?address=$A" | python3 -c "
+          import sys,json
+          j=json.load(sys.stdin);print('ok',j.get('ok'),j.get('error'),'stale',j.get('stale'))
+          print('acct',j.get('account_value_usd'),'stock',j.get('stock_value_usd'),'unreal',j.get('stock_unrealized_usd'))
+          for p in j.get('positions',[]):print(p)
+          print('fills',len(j.get('fills',[])));[print(f) for f in j.get('fills',[])[:4]]
+          print('events',len(j.get('events',[])))
+          "
+          echo "== untracked"; curl -s -m 20 -o /dev/null -w '%{http_code}\n' "$B/whale?address=0x0000000000000000000000000000000000000001"
+          echo "== site whale page"; curl -s -m 30 -o /dev/null -w '%{http_code}\n' "https://lumexbot.com/stocks/whales/$A/"
