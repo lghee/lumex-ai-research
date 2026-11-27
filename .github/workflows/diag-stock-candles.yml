@@ -7,19 +7,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          I=https://api.hyperliquid.xyz/info
-          p(){ curl -s -m 25 -X POST $I -H 'content-type: application/json' -d "$1"; }
-          echo "== perpDexs"; p '{"type":"perpDexs"}' | head -c 1500; echo
-          echo "== meta xyz"; p '{"type":"metaAndAssetCtxs","dex":"xyz"}' > m.json; head -c 300 m.json; echo
-          python3 - <<'PY'
-          import json
-          m=json.load(open('m.json'));u=m[0]['universe'];c=m[1]
-          rows=sorted([(x['name'],float(y.get('dayNtlVlm') or 0),float(y.get('openInterest') or 0)*float(y.get('markPx') or 0),y.get('markPx'),y.get('oraclePx'),y.get('funding'),x.get('maxLeverage'),x.get('isDelisted')) for x,y in zip(u,c)],key=lambda r:-r[1])
-          print(len(rows));[print(r) for r in rows[:40]]
-          print(json.dumps(c[0]))
-          PY
-          echo "== recentTrades xyz:NVDA"; p '{"type":"recentTrades","coin":"xyz:NVDA"}' > t.json; python3 -c "import json;t=json.load(open('t.json'));print(len(t));print(json.dumps(t[:2]))"
-          A=$(python3 -c "import json;t=json.load(open('t.json'));print(t[0]['users'][0] if t and 'users' in t[0] else '')")
-          echo "== user $A"; [ -n "$A" ] && p "{\"type\":\"clearinghouseState\",\"user\":\"$A\",\"dex\":\"xyz\"}" | head -c 1500; echo
-          [ -n "$A" ] && p "{\"type\":\"userFills\",\"user\":\"$A\"}" | head -c 600; echo
-          echo "== candleSnapshot"; p '{"type":"candleSnapshot","req":{"coin":"xyz:NVDA","interval":"1h","startTime":1795700000000}}' | head -c 300; echo
+          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
+          sleep 420
+          for round in 1 2; do
+            echo "== round $round"; curl -s -m 25 "$B/status"; echo
+            curl -s -m 25 "$B/gaps" | python3 -c "import sys,json;j=json.load(sys.stdin);print('gaps',j.get('ok'),j.get('session'),j['live']['count'],j['live'].get('close_ref'),len(j['days']),j['recorded_days'])"
+            curl -s -m 25 -w '\nHTTP %{http_code}\n' "$B/whales" > w.txt; tail -1 w.txt; head -n -1 w.txt | python3 -c "import sys,json;j=json.load(sys.stdin);print('whales',j.get('ok'),j.get('error'),len(j.get('markets',[])),len(j.get('positions',[])),len(j.get('events',[])),j.get('coverage'));[print(p['ticker'],p['side'],round(p['value_usd']),p['address_short']) for p in j.get('positions',[])[:8]]" || true
+            if [ $round = 1 ]; then sleep 600; fi
+          done
+          exit 0
