@@ -129,6 +129,7 @@
     "AUTO_NEWS_FEED": "true",
     "AUTO_MORNING_REPORT": "true",
     "AUTO_GROWTH_RECORDS": "true",
+    "DAILY_BACKFILL_DATES": "2026-11-20..2026-11-26",
     "AUTO_TOP50_UNIVERSE": "true",
     "AUTO_ORDER_FLOW_LIVE": "true",
     "AUTO_ORDER_FLOW_COVERAGE": "true",
