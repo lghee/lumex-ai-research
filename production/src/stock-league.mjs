@@ -17,7 +17,7 @@ import {makeMarket,newAccount,runStrategy,markEquity,summarize,START_USDT,TAKER}
 import {decideCoin,MIN_BARS,TP1_FRAC} from './paper-league-chartsig.mjs';
 
 const ROOT='stock-league/v1/';
-const STATE=ROOT+'state.json',HIST=ROOT+'history/';
+const STATE=ROOT+'state.json',HIST=ROOT+'history/',STATUS=ROOT+'status.json';
 const MIN=60000,HOUR=3600000;
 const rd=(x,d=8)=>Number(Number(x).toFixed(d));
 export const BASKET_SIZE=10;
@@ -93,10 +93,19 @@ export async function stockLeagueTick(env,{now=Date.now(),fetchImpl=fetch}={}){
   return {ok:true,strategies:strategies.length,basket:st.basket.length};
 }
 
+/** Cron entry: runs one tick and records how it ended (status.json), so a tick that never wrote state can be seen from the route. */
+export async function stockLeagueRun(env,opts={}){
+  const now=opts.now??Date.now();let r;
+  try{r=await stockLeagueTick(env,{...opts,now});}catch(e){r={ok:false,reason:'error',error:String(e?.message||e).slice(0,120)};}
+  try{await env?.MARKET_DATA?.put(STATUS,JSON.stringify({at_ms:now,...r}),{httpMetadata:{contentType:'application/json'}});}catch{}
+  return r;
+}
+
 /* ───────── payloads (routes in stock-hub.mjs) ───────── */
 export async function leaguePayload(env,now=Date.now()){
   const o=await env.MARKET_DATA.get(STATE);const st=o?await o.json().catch(()=>null):null;const s=st?.summary;
-  if(s?.schema!=='lumex_stock_league_summary_v1')return {status:503,body:{ok:false,error:'not_started'}};
+  if(s?.schema!=='lumex_stock_league_summary_v1'){const so=await env.MARKET_DATA.get(STATUS);const last=so?await so.json().catch(()=>null):null;
+    return {status:503,body:{ok:false,error:'not_started',last_tick:last?{at_ms:last.at_ms,ok:last.ok,reason:last.reason||null,error:last.error||null}:null}};}
   if(now-s.generated_at_ms>30*MIN)return {status:503,body:{ok:false,error:'stale',generated_at_ms:s.generated_at_ms}};
   return {status:200,body:s};
 }
