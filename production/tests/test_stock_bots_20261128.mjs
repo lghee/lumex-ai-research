@@ -1,6 +1,6 @@
 // AI 봇 주식 계좌 + 주식 고래 상세 (2026-11-28). Simulated only; QA 예시 prices.
 import assert from 'node:assert/strict';
-import {stockStrategies,pickBasket,stockLeagueTick,leaguePayload,leagueDetail,leagueTrades,BASKET_SIZE} from '../src/stock-league.mjs';
+import {stockStrategies,pickBasket,stockLeagueTick,stockLeagueRun,leaguePayload,leagueDetail,leagueTrades,BASKET_SIZE} from '../src/stock-league.mjs';
 import {groupFills,detailPositions,whaleDetail} from '../src/stock-whales.mjs';
 import {stockHubRoute} from '../src/stock-hub.mjs';
 const store=new Map();const bucket={get:async k=>store.has(k)?{json:async()=>JSON.parse(store.get(k))}:null,put:async(k,v)=>{store.set(k,String(v));}};
@@ -29,6 +29,9 @@ const fx=async url=>{calls.push(url);const U=new URL(url);const sym=U.searchPara
   return {ok:false,status:404,text:async()=>''};};
 // no radar → no basket → not started
 let r=await stockLeagueTick(env,{now:NOW,fetchImpl:fx});assert.deepEqual(r,{ok:false,reason:'no_basket'});
+r=await stockLeagueRun(env,{now:NOW-2*H4,fetchImpl:fx});assert.equal(r.reason,'no_basket');
+let np=await leaguePayload(env,NOW);assert.equal(np.status,503);assert.deepEqual(np.body.last_tick,{at_ms:NOW-2*H4,ok:false,reason:'no_basket',error:null},'why it has not started is visible');
+r=await stockLeagueRun({MARKET_DATA:{get:async k=>{if(k.endsWith('state.json'))throw Error('boom');return null;},put:async()=>{}}},{now:NOW,fetchImpl:fx});assert.equal(r.reason,'error');assert.equal(r.error,'boom','a thrown tick is recorded, not lost');
 put('stock-hub/v1/radar.json',{items});
 r=await stockLeagueTick(env,{now:NOW-H4,fetchImpl:fx});assert.equal(r.ok,true,'first tick creates the account (decides from the next closed bar)');
 let st=get('stock-league/v1/state.json');assert.equal(st.basket.length,10);assert.equal(st.accounts['stock-chart-4h'].equity,10000);
