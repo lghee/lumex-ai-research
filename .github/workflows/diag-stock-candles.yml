@@ -7,10 +7,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          for round in 1 2; do
-            echo "== round $round"; curl -s -m 25 "$B/status"; echo
-            for p in "candles?symbol=NVDAUSDT&interval=60" "candles?symbol=TSLAUSDT&interval=60" "candles?symbol=NVDAUSDT&interval=15" "candles?symbol=ORCLUSDT&interval=D"; do
-              echo "-- $p"; curl -s -m 25 "$B/$p" | python3 -c "import sys,json;j=json.load(sys.stdin);print({k:j.get(k) for k in ('ok','error','source_error','origin','as_of_ms','retrieved_ms')},len(j.get('bars') or []))"; done
-            [ $round = 1 ] && sleep 330
-          done
+          I=https://api.hyperliquid.xyz/info
+          p(){ curl -s -m 25 -X POST $I -H 'content-type: application/json' -d "$1"; }
+          echo "== perpDexs"; p '{"type":"perpDexs"}' | head -c 1500; echo
+          echo "== meta xyz"; p '{"type":"metaAndAssetCtxs","dex":"xyz"}' > m.json; head -c 300 m.json; echo
+          python3 - <<'PY'
+          import json
+          m=json.load(open('m.json'));u=m[0]['universe'];c=m[1]
+          rows=sorted([(x['name'],float(y.get('dayNtlVlm') or 0),float(y.get('openInterest') or 0)*float(y.get('markPx') or 0),y.get('markPx'),y.get('oraclePx'),y.get('funding'),x.get('maxLeverage'),x.get('isDelisted')) for x,y in zip(u,c)],key=lambda r:-r[1])
+          print(len(rows));[print(r) for r in rows[:40]]
+          print(json.dumps(c[0]))
+          PY
+          echo "== recentTrades xyz:NVDA"; p '{"type":"recentTrades","coin":"xyz:NVDA"}' > t.json; python3 -c "import json;t=json.load(open('t.json'));print(len(t));print(json.dumps(t[:2]))"
+          A=$(python3 -c "import json;t=json.load(open('t.json'));print(t[0]['users'][0] if t and 'users' in t[0] else '')")
+          echo "== user $A"; [ -n "$A" ] && p "{\"type\":\"clearinghouseState\",\"user\":\"$A\",\"dex\":\"xyz\"}" | head -c 1500; echo
+          [ -n "$A" ] && p "{\"type\":\"userFills\",\"user\":\"$A\"}" | head -c 600; echo
+          echo "== candleSnapshot"; p '{"type":"candleSnapshot","req":{"coin":"xyz:NVDA","interval":"1h","startTime":1795700000000}}' | head -c 300; echo
