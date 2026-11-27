@@ -152,9 +152,73 @@ export async function whalesPayload(env,{now=Date.now()}={}){
   const bySym={};for(const p of positions){const s=bySym[p.ticker]||(bySym[p.ticker]={ticker:p.ticker,slug:p.slug,long_usd:0,short_usd:0,whales:0});s[p.side+'_usd']+=p.value_usd;s.whales++;}
   const markets=(mk.markets||[]).map(m=>({...m,whale_long_usd:bySym[m.ticker]?.long_usd||0,whale_short_usd:bySym[m.ticker]?.short_usd||0,whales:bySym[m.ticker]?.whales||0}));
   const events=(st.events||[]).slice(0,150).map(e=>({...e,address_short:short(e.address),r1h:e.r1h===false?null:e.r1h,r4h:e.r4h===false?null:e.r4h,r24h:e.r24h===false?null:e.r24h}));
-  return {ok:true,schema:'lumex_stock_whales_v1',source:'Hyperliquid xyz (trade.xyz) 공개 정보',updated_ms:mk.updated_ms,
+  return {ok:true,schema:'lumex_stock_whales_v1',source:'Hyperliquid 주식 선물 공개 정보',updated_ms:mk.updated_ms,
     thresholds:{whale_usd:WHALE_MIN_USD,entry_usd:ENTRY_MIN_USD,trade_usd:TRADE_MIN_USD},
     coverage:{candidates:health?.candidates??null,holders:health?.holders??null,checks_per_run:CHECKS_PER_RUN,
       note:'큰 체결에 나온 주소와 Hyperliquid 리더보드 주소만 확인합니다. 전체 계좌가 아닙니다.'},
     markets,positions:positions.slice(0,100),events,order_execution:false};
+}
+
+/* ───────── 2026-11-28 stock whale detail (/stock-hub/v1/whale?address=) ─────────
+ * One tracked account: its stock positions (entry, mark, size, leverage, unrealized P&L, return on margin, liquidation,
+ * funding since open) and its recent stock fills grouped into orders. Only addresses the collector already tracks
+ * are answered (not a general lookup); results are kept 60 seconds. */
+const DETAIL_TTL=60000,FILL_GROUP_MS=10*60000,FILL_GROUPS=40;
+/** Fills → order groups (same coin, same direction, within 10 minutes of the first fill). Pure. */
+export function groupFills(fills,markets){
+  const by=new Map(markets.map(m=>[m.coin,m]));const rows=[];
+  const list=(Array.isArray(fills)?fills:[]).filter(f=>by.has(f?.coin)&&num(f.px)>0&&num(f.sz)>0&&num(f.time)>0).sort((a,b)=>a.time-b.time);
+  let g=null;
+  for(const f of list){
+    const dir=String(f.dir||'');
+    if(g&&g.coin===f.coin&&g.dir===dir&&f.time-g.first_ms<=FILL_GROUP_MS){g.size+=num(f.sz);g.value+=num(f.px)*num(f.sz);g.closed_pnl+=num(f.closedPnl)||0;g.fee+=num(f.fee)||0;g.last_ms=f.time;g.fills++;continue;}
+    if(g)rows.push(g);
+    const m=by.get(f.coin);
+    g={coin:f.coin,ticker:m.ticker,slug:m.slug,dir,first_ms:f.time,last_ms:f.time,size:num(f.sz),value:num(f.px)*num(f.sz),closed_pnl:num(f.closedPnl)||0,fee:num(f.fee)||0,fills:1};
+  }
+  if(g)rows.push(g);
+  return rows.reverse().slice(0,FILL_GROUPS).map(x=>{
+    const open=/^Open/i.test(x.dir),close=/^Close/i.test(x.dir),long=/Long/i.test(x.dir);
+    return {ticker:x.ticker,slug:x.slug,action:open?'open':close?'close':'other',side:long?'long':/Short/i.test(x.dir)?'short':null,
+      at_ms:x.first_ms,last_ms:x.last_ms,price:Number((x.value/x.size).toPrecision(8)),size:Number(x.size.toPrecision(8)),value_usd:Math.round(x.value),
+      closed_pnl_usd:close?Math.round(x.closed_pnl):null,fee_usd:Number(x.fee.toFixed(2)),fills:x.fills};
+  });
+}
+/** clearinghouseState (xyz) → detailed stock positions. Pure. */
+export function detailPositions(state,markets){
+  if(!Array.isArray(state?.assetPositions))throw Error('positions_schema');
+  const by=new Map(markets.map(m=>[m.coin,m]));const rows=[];
+  for(const a of state.assetPositions){
+    const p=a?.position,m=by.get(p?.coin);if(!m)continue;
+    const szi=num(p.szi),entry=num(p.entryPx),value=num(p.positionValue);if(!szi||!(entry>0)||value===null)continue;
+    const side=szi>0?'long':'short',size=Math.abs(szi),mark=value/size;
+    rows.push({ticker:m.ticker,slug:m.slug,name:m.name,side,size,entry_price:entry,mark_price:Number(mark.toPrecision(8)),value_usd:Math.round(value),
+      unrealized_usd:num(p.unrealizedPnl),roe_pct:num(p.returnOnEquity)===null?null:Number((num(p.returnOnEquity)*100).toFixed(2)),
+      move_pct:Number((((mark/entry)-1)*100*(side==='long'?1:-1)).toFixed(2)),leverage:num(p.leverage?.value),margin_usd:num(p.marginUsed),
+      liquidation_price:num(p.liquidationPx),funding_since_open_usd:num(p.cumFunding?.sinceOpen)===null?null:-num(p.cumFunding.sinceOpen)});
+  }
+  return rows.sort((a,b)=>b.value_usd-a.value_usd);
+}
+export async function whaleDetail(env,address,{now=Date.now(),fetchImpl=fetch}={}){
+  if(!isAddr(address))return {status:400,body:{ok:false,error:'address'}};
+  const a=address.toLowerCase(),bucket=env.MARKET_DATA;
+  const [st,mk]=await Promise.all([rget(bucket,ROOT+'state.json'),rget(bucket,ROOT+'markets.json')]);
+  if(!st||!mk?.markets)return {status:503,body:{ok:false,error:'not_collected'}};
+  if(!st.positions?.[a]&&!st.candidates?.[a])return {status:404,body:{ok:false,error:'not_tracked'}};
+  const cached=await rget(bucket,ROOT+'detail/'+a+'.json');
+  if(cached?.ok&&now-cached.checked_ms<DETAIL_TTL)return {status:200,body:cached};
+  let state,fills;
+  try{[state,fills]=await Promise.all([info(fetchImpl,{type:'clearinghouseState',user:a,dex:DEX}),info(fetchImpl,{type:'userFills',user:a})]);}
+  catch(e){return cached?.ok?{status:200,body:{...cached,stale:true}}:{status:503,body:{ok:false,error:'source_'+String(e?.message||e).slice(0,30)}};}
+  let positions;try{positions=detailPositions(state,mk.markets);}catch{return {status:503,body:{ok:false,error:'positions_schema'}};}
+  const groups=groupFills(fills,mk.markets);
+  const ms=state?.marginSummary||{};
+  const body={ok:true,schema:'lumex_stock_whale_detail_v1',address:a,address_short:a.slice(0,6)+'…'+a.slice(-4),checked_ms:now,
+    account_value_usd:num(ms.accountValue),margin_used_usd:num(ms.totalMarginUsed),
+    stock_value_usd:positions.reduce((s,p)=>s+p.value_usd,0),stock_unrealized_usd:positions.reduce((s,p)=>s+(p.unrealized_usd||0),0),
+    positions,fills:groups,fills_from_ms:groups.length?groups.at(-1).at_ms:null,
+    events:(st.events||[]).filter(e=>e.address===a).slice(0,20).map(e=>({ticker:e.ticker,slug:e.slug,side:e.side,kind:e.kind,value_usd:e.value_usd,detected_ms:e.detected_ms,entry_price:e.entry_price??null,r1h:e.r1h===false?null:e.r1h,r4h:e.r4h===false?null:e.r4h,r24h:e.r24h===false?null:e.r24h})),
+    source:'Hyperliquid 공개 계정 정보',order_execution:false};
+  await rput(bucket,ROOT+'detail/'+a+'.json',body);
+  return {status:200,body};
 }

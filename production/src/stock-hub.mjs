@@ -298,6 +298,11 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
     return json({ok:true,schema:u.schema,source:u.source,updated_ms:u.updated_ms,count:u.count,stocks:u.stocks},200,600);}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,updated_ms:u.updated_ms,types:TRADFI_TYPES,symbols:u.tradfi},200,600);}
+  // 2026-11-28 AI 봇 주식 계좌 (simulated, no orders) and stock whale detail
+  if(p==='bots'){const r=await (await import('./stock-league.mjs')).leaguePayload(env,now);return json(r.body,r.status,60);}
+  if(p==='bots-detail'){const r=await (await import('./stock-league.mjs')).leagueDetail(env,url.searchParams.get('id')||'');return json(r.body,r.status,60);}
+  if(p==='bots-trades'){const r=await (await import('./stock-league.mjs')).leagueTrades(env,(url.searchParams.get('symbol')||'').toUpperCase());return json(r.body,r.status,60);}
+  if(p==='whale'){const r=await (await import('./stock-whales.mjs')).whaleDetail(env,url.searchParams.get('address')||'',{now,fetchImpl});return json(r.body,r.status,r.status===200?30:10);}
   // 2026-11-28 주식 데일리 기록
   if(p==='daily-index'){const d=await (await import('./stock-daily.mjs')).dailyIndex(env);return json(d,200,300);}
   if(p==='daily'){const d=await (await import('./stock-daily.mjs')).dailyPayload(env,url.searchParams.get('date')||'');return d?json(d,200,600):json({ok:false,error:'not_found'},404,60);}
