@@ -12,7 +12,7 @@
  *    including the ones where price went against the whale. Observation only — no orders, no keys.
  */
 import {makeMarket} from './paper-league.mjs';
-import {replay} from './paper-league-chartsig.mjs';
+import {replay,ema} from './paper-league-chartsig.mjs';
 
 export const ROOT='market-hub/growth/v1/';
 export const RECORD_COINS=['BTC','ETH','SOL','XRP'];
@@ -98,11 +98,17 @@ export async function collectSignalRecord(env,{now=Date.now(),fetchImpl=fetch}={
   return {ok:true,stage:'computed',trades:rec.trades.length};
 }
 /** One trade with the candles around it (up to 30 bars before entry, 8 after exit, max 110). */
-export function tradeWindow(trade,bars){
+export function tradeRange(trade,bars){
   const i0=bars.findIndex(b=>b[0]===trade.entry_t),i1=bars.findIndex(b=>b[0]===trade.exit_t);
   if(i0<0||i1<0)return null;
   let a=Math.max(0,i0-30),b=Math.min(bars.length,i1+9);if(b-a>110)a=Math.max(0,b-110);
-  return bars.slice(a,b);
+  return [a,b];
+}
+export function tradeWindow(trade,bars){const r=tradeRange(trade,bars);return r?bars.slice(r[0],r[1]):null;}
+/** EMA20/50 over the full series (as the chart draws them), cut to the window. */
+export function tradeEmas(trade,bars){
+  const r=tradeRange(trade,bars);if(!r)return null;const c=bars.map(b=>b[4]),cut=a=>a.slice(r[0],r[1]).map(v=>v===null?null:r4(v));
+  return {ema20:cut(ema(c,20)),ema50:cut(ema(c,50))};
 }
 
 /* ───────────────────────────── 2) whale cases ───────────────────────────── */
@@ -196,9 +202,9 @@ export async function growthRoute(request,env){
     const id=u.searchParams.get('id')||'';if(!/^[a-z]{2,6}-\d{8}-\d{2}$/.test(id))return json({ok:false,error:'invalid_id'},400);
     const rec=await rget(bucket,'signal-record.json');if(!rec?.ok)return json({ok:false,error:'not_collected'},503,30);
     const t=rec.trades.find(x=>x.id===id);if(!t)return json({ok:false,error:'not_found'},404,300);
-    const b=await rget(bucket,'signal-bars/'+t.coin+'.json');const w=b?tradeWindow(t,b.bars):null;
+    const b=await rget(bucket,'signal-bars/'+t.coin+'.json');const w=b?tradeWindow(t,b.bars):null,em=b?tradeEmas(t,b.bars):null;
     const same=rec.trades.filter(x=>x.coin===t.coin&&x.id!==id).slice(0,6);
-    return json({ok:true,schema:'lumex_signal_trade_v1',trade:t,bars:w,same_coin:same,source:rec.source,fee_round_pct:rec.fee_round_pct,rule:rec.rule},200,600);
+    return json({ok:true,schema:'lumex_signal_trade_v1',trade:t,bars:w,ema20:em?.ema20??null,ema50:em?.ema50??null,same_coin:same,source:rec.source,fee_round_pct:rec.fee_round_pct,rule:rec.rule},200,600);
   }
   if(u.pathname==='/market-hub/v1/whale-cases'){
     const st=await rget(bucket,'whale-cases.json');if(!st?.items)return json({ok:false,error:'not_collected'},503,30);

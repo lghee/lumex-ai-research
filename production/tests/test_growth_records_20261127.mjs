@@ -56,6 +56,7 @@ let res=await growthRoute(new Request('https://w/market-hub/v1/chart-signals/rec
 let j=await res.json();assert.equal(j.ok,true);assert.equal(j.trades.length,trades.length*4);
 res=await growthRoute(new Request('https://w/market-hub/v1/chart-signals/trade?id='+trades[3].id),{MARKET_DATA:B});
 j=await res.json();assert.equal(j.ok,true);assert.equal(j.trade.id,trades[3].id);assert.ok(j.bars.length>10&&j.same_coin.length<=6);
+assert.equal(j.ema20.length,j.bars.length);assert.equal(j.ema50.length,j.bars.length);assert.ok(j.ema50.every(v=>v===null||v>0));
 res=await growthRoute(new Request('https://w/market-hub/v1/chart-signals/trade?id=../x'),{MARKET_DATA:B});assert.equal(res.status,400);
 res=await growthRoute(new Request('https://w/market-hub/v1/chart-signals/trade?id=btc-20000101-01'),{MARKET_DATA:B});assert.equal(res.status,404);
 
