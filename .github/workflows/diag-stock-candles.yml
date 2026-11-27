@@ -2,27 +2,15 @@ name: diag stock candles (temporary)
 on:
   push:
     branches: [diag/stock-candles-20261127]
-permissions:
-  contents: write
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - run: |
-          curl -s -m 25 https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1/universe > u.json
-          mkdir -p diag-logos/raw
-          python3 - <<'PY'
-          import json,subprocess
-          st=json.load(open('u.json'))['stocks'];idx=[]
-          for s in st:
-            f=f"diag-logos/raw/{s['slug']}.png"
-            r=subprocess.run(['curl','-s','-m','12','-L','-o',f,'-w','%{http_code} %{content_type} %{size_download}',f"https://financialmodelingprep.com/image-stock/{s['ticker']}.png"],capture_output=True,text=True).stdout.split()
-            ok=len(r)==3 and r[0]=='200' and 'image' in r[1] and float(r[2])>300
-            if not ok: subprocess.run(['rm','-f',f])
-            idx.append({'slug':s['slug'],'ticker':s['ticker'],'name':s['name'],'type':s['type'],'fmp':ok})
-          json.dump(idx,open('diag-logos/index.json','w'),ensure_ascii=False,indent=0)
-          PY
-          cd diag-logos && ls raw | wc -l && identify raw/*.png | awk '{print $3}' | sort | uniq -c | sort -rn | head
-          git config user.name diag-bot && git config user.email diag@users.noreply.github.com
-          git add . && git commit -qm "diag: fmp logos (temporary, not for main)" && git push -q
+          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
+          for round in 1 2; do
+            echo "== round $round"; curl -s -m 25 "$B/status"; echo
+            for p in "candles?symbol=NVDAUSDT&interval=60" "candles?symbol=TSLAUSDT&interval=60" "candles?symbol=NVDAUSDT&interval=15" "candles?symbol=ORCLUSDT&interval=D"; do
+              echo "-- $p"; curl -s -m 25 "$B/$p" | python3 -c "import sys,json;j=json.load(sys.stdin);print({k:j.get(k) for k in ('ok','error','source_error','origin','as_of_ms','retrieved_ms')},len(j.get('bars') or []))"; done
+            [ $round = 1 ] && sleep 330
+          done
