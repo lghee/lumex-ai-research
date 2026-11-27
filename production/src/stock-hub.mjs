@@ -6,7 +6,7 @@
  *     The full TradFi set is also published so coin rankings can drop those contracts.
  *   - instrument-summary: company full names.
  *   - tickers (category=linear): price, 24h change, turnover, funding, open interest, index price.
- *   - kline: candles for the stock chart (served through this Worker, cached).
+ *   - kline: candles for the stock chart (kept in R2 by the collector; see the candles section).
  * US market sessions follow the NYSE published 2026–2028 calendar (checked against nyse.com 2026-11-27);
  * years outside it answer 'unknown' instead of guessing.
  * Nothing is estimated: a missing value stays null.
@@ -180,27 +180,103 @@ export async function collectStockHub(env,{now=Date.now(),fetchImpl=fetch}={}){
   const ref=close&&close.date===lastClosedSession(now)?close:null;
   const radar=buildRadar(universe,tickers,session,ref,now);
   if(radar.ok)await rput(bucket,'radar.json',radar);
-  return {ok:radar.ok,count:radar.count,close_captured:Boolean(due)};
+  let candles=null;try{candles=await collectCandles(env,radar,{now,fetchImpl});}catch(e){candles={ok:false,reason:String(e?.message||e).slice(0,40)};}
+  await rput(bucket,'status.json',{updated_ms:now,radar:{ok:radar.ok,count:radar.count??0},candles}).catch(()=>{});
+  return {ok:radar.ok,count:radar.count,close_captured:Boolean(due),candles};
+}
+
+/* ───────── candles (stock chart) ─────────
+ * Bybit answers 403 to requests leaving some Cloudflare locations (seen 2026-11-27: every visitor request from the
+ * US edge failed while the 5-minute collector kept working). So candles are kept in R2:
+ *   - the collector refreshes the 1-hour bars of the most traded stocks, plus every symbol·interval a visitor asked
+ *     for in the last 2 hours ("wanted");
+ *   - a visitor request serves the stored copy while it is fresh, otherwise tries Bybit live (two official hosts),
+ *     then falls back to the stored copy with its own time (as_of_ms). Nothing is invented when both are missing:
+ *     the answer is 503 'warming' and the symbol is queued for the next collector run. */
+const BYBIT_HOSTS=[BYBIT,'https://api.bytick.com'];
+const CANDLE_LIMIT=500;
+const FRESH_MS={'5':120000,'15':180000,'60':480000,'240':900000,'D':1800000};      // serve the stored copy without asking Bybit
+const MAX_AGE_MS={'5':1800000,'15':3600000,'60':10800000,'240':28800000,'D':259200000}; // older than this is not shown
+const WANTED_TTL=2*3600000,WANTED_TOUCH=10*60000,ROTATE_TOP=40,ROTATE_PER_RUN=20,CANDLE_TASKS_PER_RUN=45;
+const candleKey=(symbol,interval)=>`candles/${symbol}/${interval}.json`;
+export function parseKlineBars(list,frame,asOf){
+  const bars=[];
+  for(const r of list||[]){
+    if(!Array.isArray(r)||r.length<6)continue;const [t,o,h,l,c,v]=r.slice(0,6).map(Number);
+    if(![t,o,h,l,c,v].every(fin)||o<=0||l<=0||c<=0||h<Math.max(o,c,l)||l>Math.min(o,c,h)||v<0)continue;
+    bars.push({t,o,h,l,c,v,closed:t+frame<=asOf});
+  }
+  bars.sort((a,b)=>a.t-b.t);
+  return bars.filter((b,i,a)=>!i||b.t!==a[i-1].t);
+}
+export async function fetchKline(fetchImpl,symbol,interval,now){
+  const frame=INTERVALS[interval];let error='source_unavailable';
+  for(const host of BYBIT_HOSTS){
+    try{
+      const j=await getJson(fetchImpl,`${host}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${CANDLE_LIMIT}`);
+      if(j?.retCode!==0||!Array.isArray(j?.result?.list)){error='source_schema';continue;}
+      const bars=parseKlineBars(j.result.list,frame,now);
+      if(bars.length<2){error='too_few_bars';continue;}
+      return {ok:true,bars,host:host.replace('https://','')};
+    }catch(e){error=String(e?.message||e).slice(0,40);}
+  }
+  return {ok:false,error};
+}
+async function storeCandles(bucket,symbol,interval,got,now){
+  await rput(bucket,candleKey(symbol,interval),{symbol,interval,fetched_ms:now,host:got.host,bars:got.bars});
+}
+async function markWanted(bucket,symbol,interval,now){
+  const w=(await rget(bucket,'candles/wanted.json'))||{};const k=symbol+'|'+interval;
+  if(now-(w[k]||0)<WANTED_TOUCH)return;
+  w[k]=now;for(const [x,t] of Object.entries(w))if(now-t>WANTED_TTL)delete w[x];
+  await rput(bucket,'candles/wanted.json',w);
+}
+/** Collector part: called from collectStockHub every 5 minutes. */
+export async function collectCandles(env,radar,{now=Date.now(),fetchImpl=fetch}={}){
+  const bucket=env?.MARKET_DATA;if(!bucket)return {ok:false,reason:'r2_missing'};
+  const wanted=(await rget(bucket,'candles/wanted.json'))||{};
+  const tasks=[],seen=new Set(),add=(s,iv)=>{const k=s+'|'+iv;if(!seen.has(k)&&INTERVALS[iv]&&/^[A-Z0-9]{1,24}USDT$/.test(s)){seen.add(k);tasks.push([s,iv]);}};
+  for(const [k] of Object.entries(wanted).filter(([,t])=>now-t<=WANTED_TTL).sort((a,b)=>b[1]-a[1])){const [s,iv]=k.split('|');add(s,iv);}
+  const top=(radar?.items||[]).filter(x=>x.ranked).slice(0,ROTATE_TOP);
+  const half=Math.floor(now/300000)%2;
+  top.forEach((x,i)=>{if(i<10||i%2===half)add(x.symbol,'60');});                       // top 10 every run, the rest every other run
+  let ok=0,fail=0;const errors={};
+  const run=tasks.slice(0,CANDLE_TASKS_PER_RUN);
+  for(let i=0;i<run.length;i+=5){
+    await Promise.all(run.slice(i,i+5).map(async([s,iv])=>{
+      const got=await fetchKline(fetchImpl,s,iv,now);
+      if(got.ok){await storeCandles(bucket,s,iv,got,now);ok++;}else{fail++;errors[got.error]=(errors[got.error]||0)+1;}
+    }));
+  }
+  const pruned=Object.fromEntries(Object.entries(wanted).filter(([,t])=>now-t<=WANTED_TTL));
+  if(Object.keys(pruned).length!==Object.keys(wanted).length)await rput(bucket,'candles/wanted.json',pruned);
+  return {ok:fail===0,tasks:run.length,stored:ok,failed:fail,errors};
 }
 
 /* ───────── public routes /stock-hub/v1/* ───────── */
-export async function candlesFor(env,symbol,interval,{fetchImpl=fetch,now=Date.now(),limit=500}={}){
+export async function candlesFor(env,symbol,interval,{fetchImpl=fetch,now=Date.now()}={}){
   const u=await readUniverse(env);const s=u?.stocks?.find(x=>x.symbol===symbol);
   if(!s)return {status:404,body:{ok:false,error:'unknown_symbol'}};
   const frame=INTERVALS[interval];if(!frame)return {status:400,body:{ok:false,error:'interval'}};
-  const lim=Math.max(50,Math.min(1000,limit|0||500));
-  let j;try{j=await getJson(fetchImpl,`${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${lim}`);}catch{return {status:503,body:{ok:false,error:'source_unavailable'}};}
-  if(j?.retCode!==0||!Array.isArray(j?.result?.list))return {status:503,body:{ok:false,error:'source_schema'}};
-  const bars=[];
-  for(const r of j.result.list){
-    if(!Array.isArray(r)||r.length<6)continue;const [t,o,h,l,c,v]=r.slice(0,6).map(Number);
-    if(![t,o,h,l,c,v].every(fin)||o<=0||l<=0||c<=0||h<Math.max(o,c,l)||l>Math.min(o,c,h)||v<0)continue;
-    bars.push({t,o,h,l,c,v,closed:t+frame<=now});
+  const bucket=env.MARKET_DATA;
+  const stored=await rget(bucket,candleKey(symbol,interval));
+  const age=stored?now-Number(stored.fetched_ms||0):Infinity;
+  let bars=null,asOf=0,origin='';
+  if(Array.isArray(stored?.bars)&&stored.bars.length>=2&&age>=0&&age<=FRESH_MS[interval]){bars=stored.bars;asOf=stored.fetched_ms;origin='store';}
+  let error=null;
+  if(!bars){
+    const got=await fetchKline(fetchImpl,symbol,interval,now);
+    if(got.ok){bars=got.bars;asOf=now;origin='live';await storeCandles(bucket,symbol,interval,got,now).catch(()=>{});}
+    else{
+      error=got.error;
+      if(Array.isArray(stored?.bars)&&stored.bars.length>=2&&age>=0&&age<=MAX_AGE_MS[interval]){bars=stored.bars;asOf=stored.fetched_ms;origin='store';}
+    }
   }
-  bars.sort((a,b)=>a.t-b.t);
-  if(bars.length<2)return {status:503,body:{ok:false,error:'too_few_bars'}};
+  await markWanted(bucket,symbol,interval,now).catch(()=>{});
+  if(!bars)return {status:503,body:{ok:false,error:'warming',source_error:error,retry_after_s:60}};
+  bars=bars.map(b=>({...b,closed:b.t+frame<=asOf}));
   return {status:200,body:{ok:true,schema:'lumex_stock_candles_v1',symbol,ticker:s.ticker,name:s.name,interval,source:'Bybit',
-    retrieved_ms:now,bars,regular_sessions:regularSessions(bars[0].t,bars.at(-1).t+frame),session:usSession(now)}};
+    retrieved_ms:now,as_of_ms:asOf,origin,bars,regular_sessions:regularSessions(bars[0].t,bars.at(-1).t+frame),session:usSession(now)}};
 }
 export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}={}){
   if(request.method==='OPTIONS')return new Response(null,{status:204,headers:CORS});
@@ -212,6 +288,7 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
     return json({ok:true,schema:u.schema,source:u.source,updated_ms:u.updated_ms,count:u.count,stocks:u.stocks},200,600);}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,updated_ms:u.updated_ms,types:TRADFI_TYPES,symbols:u.tradfi},200,600);}
+  if(p==='status'){const st=await rget(bucket,'status.json');return json({ok:Boolean(st),...(st||{})},200,30);}
   if(p==='radar'){const r=await rget(bucket,'radar.json');if(!r?.ok)return json({ok:false,error:'not_collected'},503);
     return json({...r,stale:now-r.updated_ms>20*60000},200,60);}
   if(p==='candles'){
