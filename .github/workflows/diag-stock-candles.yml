@@ -7,8 +7,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
-          for p in "session" "candles?symbol=NVDAUSDT&interval=60" "candles?symbol=NVDAUSDT&interval=D" "candles?symbol=TSLAUSDT&interval=15"; do
-            echo "== $p"; curl -s -m 25 -D - -o body.txt -H 'Origin: https://lumexbot.com' "$B/$p" | grep -i -E '^HTTP|access-control|cf-ray'; head -c 400 body.txt; echo; done
-          echo "== radar"; curl -s -m 25 "$B/radar" | head -c 300; echo
-          echo "== universe NVDA"; curl -s -m 25 "$B/universe" | grep -o '"symbol":"NVDAUSDT"[^}]*' | head -2
+          echo "== bybit direct from runner"; curl -s -m 15 -o /dev/null -w '%{http_code}\n' 'https://api.bybit.com/v5/market/kline?category=linear&symbol=NVDAUSDT&interval=60&limit=2'
+          curl -s -m 15 -o /dev/null -w '%{http_code}\n' 'https://api.bytick.com/v5/market/kline?category=linear&symbol=NVDAUSDT&interval=60&limit=2'
+          curl -s -m 25 https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1/universe > u.json
+          python3 - <<'PY'
+          import json,subprocess,os
+          u=json.load(open('u.json'));st=u['stocks'];print('stocks',len(st))
+          os.makedirs('logos',exist_ok=True)
+          src={'fmp':'https://financialmodelingprep.com/image-stock/{t}.png','nvstly':'https://raw.githubusercontent.com/nvstly/icons/main/ticker_icons/{t}.png','parqet':'https://assets.parqet.com/logos/symbol/{t}?format=png'}
+          hit={k:0 for k in src};rows=[]
+          for s in st:
+            t=s['ticker'];got=[]
+            for k,p in src.items():
+              f=f'logos/{k}_{t}.png'
+              r=subprocess.run(['curl','-s','-m','12','-L','-o',f,'-w','%{http_code} %{content_type} %{size_download}',p.format(t=t)],capture_output=True,text=True).stdout
+              code,ct,sz=(r.split()+['','',''])[:3]
+              ok=code=='200' and 'image' in ct and int(float(sz or 0))>300
+              if ok: hit[k]+=1; got.append(k)
+              else:
+                try: os.remove(f)
+                except: pass
+            rows.append((t,s['type'],s['name'],got))
+          print(hit)
+          for r in rows: print(*r)
+          json.dump(rows,open('logos/index.json','w'),ensure_ascii=False)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos
+          path: logos
