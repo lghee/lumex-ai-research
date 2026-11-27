@@ -107,13 +107,13 @@ export async function collectStockWhales(env,{now=Date.now(),fetchImpl=fetch}={}
   const others=Object.keys(st.candidates).filter(k=>!holders.includes(k))
     .sort((a,b)=>(st.positions[a]?.at_ms||0)-(st.positions[b]?.at_ms||0)||st.candidates[b].seen_ms-st.candidates[a].seen_ms)
     .slice(0,CHECKS_PER_RUN-holders.length);
-  let checked=0,found=0;
+  let checked=0,found=0;const dayNew=[];
   for(let i=0,list=[...holders,...others];i<list.length;i+=5){
     await Promise.all(list.slice(i,i+5).map(async a=>{
       try{
         const rows=stockPositions(await info(fetchImpl,{type:'clearinghouseState',user:a,dex:DEX}),markets);
         const old=st.positions[a];
-        if(old?.at_ms){const ev=diffEntries(a,old.rows,rows,markets,now);ev.forEach(e=>e.prev_checked_ms=old.at_ms);st.events.unshift(...ev);found+=ev.length;}
+        if(old?.at_ms){const ev=diffEntries(a,old.rows,rows,markets,now);ev.forEach(e=>e.prev_checked_ms=old.at_ms);st.events.unshift(...ev);found+=ev.length;dayNew.push(...ev);}
         st.positions[a]={at_ms:now,rows:rows.filter(p=>p.value_usd>=10000).slice(0,20)};checked++;
       }catch{err('positions');}
     }));
@@ -128,6 +128,9 @@ export async function collectStockWhales(env,{now=Date.now(),fetchImpl=fetch}={}
     }catch{err('candles');}
   }
   st.events=st.events.slice(0,EVENTS_KEEP);
+  // 2026-11-28: per-ET-day summary for the daily record (events roll over within hours)
+  if(dayNew.length){try{const {addWhaleDay}=await import('./stock-daily.mjs');const {etParts}=await import('./stock-hub.mjs');const date=etParts(now).date;
+    await rput(bucket,ROOT+'day/'+date+'.json',addWhaleDay(await rget(bucket,ROOT+'day/'+date+'.json'),date,dayNew));}catch{}}
   st.cursor=0;
   await rput(bucket,ROOT+'state.json',st);
   const holdersNow=Object.values(st.positions).filter(p=>p.rows?.some(r=>r.value_usd>=WHALE_MIN_USD)).length;
