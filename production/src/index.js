@@ -4882,6 +4882,10 @@ export default{
     if(url.pathname==='/market-hub/v1/chart-signals/record'||url.pathname==='/market-hub/v1/chart-signals/trade'||url.pathname==='/market-hub/v1/whale-cases')
       return import('./growth-records.mjs').then(m=>m.growthRoute(request,env))
         .catch(()=>respond({ok:false,error:'growth_records_unavailable'},503));
+    // Phase 113: 주식 선물 — its own path, never mixed into /market-hub coin data.
+    if(url.pathname.startsWith('/stock-hub/v1/'))
+      return import('./stock-hub.mjs').then(m=>m.stockHubRoute(request,env))
+        .catch(()=>respond({ok:false,error:'stock_hub_unavailable'},503));
     if(url.pathname==='/market-hub/v1/official-news')
       return import('./official-news.mjs').then(m=>m.officialNewsPublicRoute(request,env))
         .catch(()=>respond({ok:false,error:'official_news_unavailable'},503));
@@ -4953,6 +4957,10 @@ export default{
     if(controller.cron==='*/5 * * * *'&&env.AUTO_BINANCE_CONTAINER_EGRESS_PROBE==='true')
       ctx.waitUntil(probeBinanceContainerEgress(env).catch(e=>
         console.warn('binance_egress_probe_failed',safeError(e).slice(0,65))));
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_STOCK_HUB==='true')
+      ctx.waitUntil(import('./stock-hub.mjs').then(m=>m.collectStockHub(env))
+        .then(r=>{if(r?.ok===false)console.warn('stock_hub_incomplete',String(r.reason||'').slice(0,55));})
+        .catch(e=>console.warn('stock_hub_failed',String(e?.message||e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_TOP50_UNIVERSE==='true')
       ctx.waitUntil(import('./pro-top50.mjs').then(m=>m.collectTop50(env)).then(async r=>{
         if(r?.ok!==true){
