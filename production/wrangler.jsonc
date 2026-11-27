@@ -128,6 +128,7 @@
     "AUTO_OFFICIAL_NEWS": "true",
     "AUTO_NEWS_FEED": "true",
     "AUTO_MORNING_REPORT": "true",
+    "AUTO_GROWTH_RECORDS": "true",
     "AUTO_TOP50_UNIVERSE": "true",
     "AUTO_ORDER_FLOW_LIVE": "true",
     "AUTO_ORDER_FLOW_COVERAGE": "true",
