@@ -20,12 +20,13 @@ import {signalTick,SIGNALS} from './paper-league-signals.mjs';
 import {trend} from './paper-league-trend.mjs';
 import {chartsig} from './paper-league-chartsig.mjs';
 import {trendcrowd} from './paper-league-trendcrowd.mjs';
+import {trendvt} from './paper-league-trendvt.mjs';
 import {dailyEma,dailyEma3x,dailyBreakout,rotation} from './paper-league-daily.mjs';
 /** Active league: the 7 registered strategies (capital carried from their history) + 5 advanced + TREND (2026-11-23)
  * + SIGNAL · 차트 신호 4H (2026-11-24, partial take + break-even stop) + TREND+ · 쏠림 브레이크 (2026-11-24)
  * + DAILY · 일봉 추세 추적, BREAKOUT · 20일 돌파, ROTATION · 강약 교체 (2026-11-26, daily bars).
  * The first six simple 'new' strategies (2026-11-22 21:00 KST) are retired; their records stay in R2. */
-export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd,dailyEma,dailyBreakout,rotation,dailyEma3x];
+export const STRATEGIES=[...BASE.filter(d=>d.origin==='existing'),...ADVANCED,trend,chartsig,trendcrowd,dailyEma,dailyBreakout,rotation,dailyEma3x,trendvt];
 
 const STATE='paper-league/v1/state.json';
 const HIST='paper-league/v1/history/';            // + id + '.json'

@@ -19,7 +19,7 @@ for(let end=coin.length-1;end>=200&&cuts<6;end-=3){
 }
 assert.ok(cuts>=6&&checked>=30,'enough non-empty decisions compared');
 const d=STRATEGIES.find(x=>x.id==='daily-ema-trail-3x');assert.ok(d&&d.leverage===3&&d.interval==='D'&&d.resize===false&&d.rules.length>=3);
-assert.equal(STRATEGIES.at(-1).id,'daily-ema-trail-3x','appended last: earlier ids keep their order');
+assert.equal(STRATEGIES[STRATEGIES.findIndex(x=>x.id==='trend-voltarget-4h')-1].id,'daily-ema-trail-3x','DAILY 3x keeps its place; later accounts are appended after it');
 
 const now=Date.UTC(2026,10,26),acc=newAccount(dailyEma3x,now-86400000*3);
 fill(acc,{symbol:'BTCUSDT',side:'long',qty:0.01,ref:90000,kind:'open',reason:'t',now:now-86400000*2});
