@@ -47,3 +47,12 @@ mode='ok';r=await collectCandles(env,{items:[]},{fetchImpl:fx,now:T0+7*3600000})
 store.set('stock-hub/v1/status.json',JSON.stringify({updated_ms:T0,candles:{stored:2}}));
 const res=await stockHubRoute(new Request('https://w.dev/stock-hub/v1/status'),env,{now:T0});assert.equal((await res.json()).candles.stored,2);
 console.log('stock candles 20261127: all checks passed');
+// 8) 2026-11-28 sessions route: windows for any range (from is an ET date, Thanksgiving closed, Friday early close), range limits
+{
+  const r=await stockHubRoute(new Request('https://w.dev/stock-hub/v1/sessions?from='+Date.parse('2026-11-25T00:00:00Z')+'&to='+Date.parse('2026-11-28T00:00:00Z')),env,{now:T0});
+  const j=await r.json();assert.equal(r.status,200);
+  assert.deepEqual(j.regular_sessions,[[Date.parse('2026-11-24T14:30:00Z'),Date.parse('2026-11-24T21:00:00Z')],[Date.parse('2026-11-25T14:30:00Z'),Date.parse('2026-11-25T21:00:00Z')],[Date.parse('2026-11-27T14:30:00Z'),Date.parse('2026-11-27T18:00:00Z')]]);
+  assert.equal(r.headers.get('access-control-allow-origin'),'*');
+  for(const q of ['from=1&to=0','from=x&to=1','from=0&to='+401*86400000]){const b=await stockHubRoute(new Request('https://w.dev/stock-hub/v1/sessions?'+q),env,{now:T0});assert.equal(b.status,400,q);}
+  console.log('sessions route: ok');
+}
