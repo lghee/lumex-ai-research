@@ -4961,6 +4961,11 @@ export default{
       ctx.waitUntil(import('./stock-hub.mjs').then(m=>m.collectStockHub(env))
         .then(r=>{if(r?.ok===false)console.warn('stock_hub_incomplete',String(r.reason||'').slice(0,55));})
         .catch(e=>console.warn('stock_hub_failed',String(e?.message||e).slice(0,65))));
+    // Phase 116: 주식 고래 (Hyperliquid xyz) — stock section only
+    if(controller.cron==='*/5 * * * *'&&env.AUTO_STOCK_WHALES==='true')
+      ctx.waitUntil(import('./stock-whales.mjs').then(m=>m.collectStockWhales(env))
+        .then(r=>{if(r?.ok===false)console.warn('stock_whales_incomplete',String(r.reason||JSON.stringify(r.errors||{})).slice(0,80));})
+        .catch(e=>console.warn('stock_whales_failed',String(e?.message||e).slice(0,65))));
     if(controller.cron==='*/5 * * * *'&&env.AUTO_TOP50_UNIVERSE==='true')
       ctx.waitUntil(import('./pro-top50.mjs').then(m=>m.collectTop50(env)).then(async r=>{
         if(r?.ok!==true){
