@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          for p in "" news/ news/report/2026-11-28/ daily/ market/ stocks/ guide/ tools/ calendar/ learn/; do
+          for p in "" news/; do
             echo "=== /$p"; curl -s -m 30 -A 'Mozilla/5.0' "https://lumexbot.com/$p" -o /tmp/p.html -w 'HTTP %{http_code}\n'
             python3 - <<'PY'
           import re,html
@@ -19,5 +19,7 @@ jobs:
           dock=re.search(r'class="lx-mobile-dock.*?</nav>',t,re.S)
           if dock: print('DOCK',[h.replace('https://lumexbot.com','') for h in re.findall(r'href="([^"]+)"',dock.group(0))])
           print('KICK',re.findall(r'lx-side-kicker[^>]*>([^<]+)<',t))
+          print('count side',t.count('lx-side-link'),'len',len(t))
+          i=t.find('lx-side-nav');print(re.sub(r'<svg.*?</svg>','',t[i:i+2500],flags=re.S)[:1800])
           PY
           done
