@@ -4962,6 +4962,11 @@ export default{
         .then(r=>{if(r?.ok===false)console.warn('stock_hub_incomplete',String(r.reason||'').slice(0,55));})
         .catch(e=>console.warn('stock_hub_failed',String(e?.message||e).slice(0,65))));
     // Phase 120: AI 봇 주식 계좌 — simulated accounts on Bybit stock perpetuals, no orders, stock section only
+    // 주식 신호 스캐너: 16 symbols per run at :01 :03 :04 :06 :08 :09 … (own invocations, away from :00 and :02)
+    if(controller.cron==='* * * * *'&&env.AUTO_STOCK_SCAN==='true'&&[1,3,4].includes(new Date(controller.scheduledTime||Date.now()).getUTCMinutes()%5))
+      ctx.waitUntil(import('./stock-scan.mjs').then(m=>m.stockScanTick(env))
+        .then(r=>{if(r?.ok===false)console.warn('stock_scan_incomplete',String(r.reason||'').slice(0,55));})
+        .catch(e=>console.warn('stock_scan_failed',String(e?.message||e).slice(0,65))));
     // runs in the minute cron at :02/:07/… so it has its own invocation (the */5 invocation already carries ~20 collectors)
     if(controller.cron==='* * * * *'&&env.AUTO_STOCK_LEAGUE==='true'&&new Date(controller.scheduledTime||Date.now()).getUTCMinutes()%5===2)
       ctx.waitUntil(import('./stock-league.mjs').then(m=>m.stockLeagueRun(env))
