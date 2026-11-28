@@ -13,7 +13,7 @@
  * over ~170 symbols takes about 20 minutes. A symbol whose bars could not be read keeps its last result with its time;
  * results older than 6 hours are dropped from the payload. Nothing is estimated.
  * The route is read by Core with the Worker bearer (PRO content is served by the site, not by a public URL). */
-import {makeMarket} from './paper-league.mjs';
+import {parseKlines} from './paper-league.mjs';
 import {replay,ema,rsi,atr,MIN_BARS} from './paper-league-chartsig.mjs';
 
 const KEY='stock-scan/v1/state.json';
@@ -61,18 +61,22 @@ export async function stockScanTick(env,{now=Date.now(),fetchImpl=fetch}={}){
   if(!list.length)return {ok:false,reason:'no_radar'};
   let st=await read(KEY);if(st?.schema!=='lumex_stock_scan_state_v1')st={schema:'lumex_stock_scan_state_v1',cursor:0,syms:{}};
   const start=st.cursor%list.length,batch=[];for(let i=0;i<Math.min(BATCH,list.length);i++)batch.push(list[(start+i)%list.length]);
-  const m=makeMarket(fetchImpl,now);let done=0,failed=0;
+  const frame={'240':14400000,'60':3600000};
+  // Bybit refuses some Worker edges; the second official host is tried before a symbol counts as failed
+  const bars=async(sym,iv)=>{for(const host of ['api.bybit.com','api.bytick.com']){try{const res=await fetchImpl(`https://${host}/v5/market/kline?category=linear&symbol=${sym}&interval=${iv}&limit=${LIMIT}`,{headers:{accept:'application/json'},signal:AbortSignal.timeout(12000)});
+      if(!res.ok)continue;const rows=parseKlines(JSON.parse(await res.text()),frame[iv],now);if(rows&&rows.length)return rows;}catch{}}return null;};
+  let done=0,failed=0;
   for(const it of batch){
     const row=st.syms[it.symbol]||{};let any=false;
     for(const iv of INTERVALS){
-      const bars=await m.bars(it.symbol,iv,LIMIT);const a=bars?analyse(bars):null;
+      const rows=await bars(it.symbol,iv);const a=rows?analyse(rows):null;
       if(a){row['h'+(iv==='240'?4:1)]=a;any=true;}
     }
     if(any){row.at_ms=now;done++;}else failed++;
     row.ticker=it.ticker;row.slug=it.slug;row.name=it.name;row.type=it.type;row.turnover_24h_usd=it.turnover_24h_usd??null;row.last=it.last??null;row.change_24h_pct=it.change_24h_pct??null;
     st.syms[it.symbol]=row;
   }
-  st.cursor=(start+batch.length)%list.length;st.updated_ms=now;st.last_batch={at_ms:now,done,failed,from:batch[0]?.symbol||null};
+  st.cursor=done?(start+batch.length)%list.length:start;   // a run where every symbol failed (refused edge) retries the same batchst.updated_ms=now;st.last_batch={at_ms:now,done,failed,from:batch[0]?.symbol||null};
   for(const [k,v] of Object.entries(st.syms))if(!v.at_ms||now-v.at_ms>KEEP_MS*4)delete st.syms[k];
   await bucket.put(KEY,JSON.stringify(st),{httpMetadata:{contentType:'application/json'}});
   return {ok:true,done,failed,cursor:st.cursor,total:list.length};
