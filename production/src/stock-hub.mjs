@@ -298,6 +298,9 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
     return json({ok:true,schema:u.schema,source:u.source,updated_ms:u.updated_ms,count:u.count,stocks:u.stocks},200,600);}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,updated_ms:u.updated_ms,types:TRADFI_TYPES,symbols:u.tradfi},200,600);}
+  // 2026-11-28 주식 신호 스캐너 — PRO content: only Core (Worker bearer) reads it
+  if(p==='scan'){const m=await import('./stock-scan.mjs');if(!m.bearerOk(request,env))return json({ok:false,error:'unauthorized'},401);
+    const r=await m.scanPayload(env,now);return new Response(JSON.stringify(r.body),{status:r.status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}});}
   // 2026-11-28 AI 봇 주식 계좌 (simulated, no orders) and stock whale detail
   if(p==='bots'){const r=await (await import('./stock-league.mjs')).leaguePayload(env,now);return json(r.body,r.status,60);}
   if(p==='bots-detail'){const r=await (await import('./stock-league.mjs')).leagueDetail(env,url.searchParams.get('id')||'');return json(r.body,r.status,60);}
