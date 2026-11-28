@@ -7,8 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          mkdir out
-          for iv in 5 15 60 240 D; do curl -s -m 30 -A 'Mozilla/5.0' "https://lumexbot.com/wp-json/lumex/v1/public/stock-candles?symbol=SOXLUSDT&interval=$iv" -o out/soxl_$iv.json; python3 -c "import json;j=json.load(open('out/soxl_$iv.json'));print('$iv',j.get('ok'),len(j.get('bars') or []),j.get('error'))"; done
-          curl -s -m 30 "https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1/sessions?from=$(( ($(date +%s)-40*86400)*1000 ))&to=$(( ($(date +%s)+3*86400)*1000 ))" -o out/sessions.json; head -c 200 out/sessions.json; echo
-          curl -s -m 30 "https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1/bots-trades?symbol=SOXLUSDT" -o out/bots_soxl.json; head -c 300 out/bots_soxl.json; echo
-          for f in soxl_15 soxl_60 soxl_5 sessions; do echo "B64START $f"; gzip -c out/$f.json | base64 -w 0; echo; echo "B64END $f"; done
+          B=https://lumex-ai-research2.kpiplus195.workers.dev/stock-hub/v1
+          date -u
+          echo "== scan-status"; curl -s -m 25 "$B/scan-status"; echo
+          echo "== scan no token"; curl -s -m 25 -o /dev/null -w '%{http_code}\n' "$B/scan"
+          echo "== bots"; curl -s -m 25 "$B/bots" | head -c 300; echo
