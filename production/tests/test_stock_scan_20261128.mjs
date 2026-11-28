@@ -29,12 +29,16 @@ const fx=async url=>{calls++;const U=new URL(url),sym=U.searchParams.get('symbol
   const f=iv==='240'?4*H:H;const list=bars.map((b,i)=>[NOW-(bars.length-i)*f-f+60000,b.o,b.h,b.l,b.c,b.v].map(String)).reverse();
   return {ok:true,status:200,text:async()=>JSON.stringify({retCode:0,result:{list}})};};
 let r=await stockScanTick(env,{now:NOW,fetchImpl:fx});assert.equal(r.done+r.failed,BATCH);assert.equal(r.failed,1,'S3 failed (403)');assert.equal(r.cursor,BATCH);assert.equal(r.total,39);
-assert.equal(calls,BATCH*2,'two intervals per symbol');
+assert.equal(calls,BATCH*2+2,'two intervals per symbol (S3 tried on both hosts)');
 let p=await scanPayload(env,NOW);assert.equal(p.status,200);assert.equal(p.body.count,BATCH-1,'failed symbol not listed');
 assert.ok(p.body.items[0].symbol==='S0USDT'&&p.body.items[0].h4&&p.body.items[0].h1,'turnover order, both intervals');
 assert.ok(!p.body.items.some(x=>x.symbol==='S5USDT'),'unranked never scanned');
-r=await stockScanTick(env,{now:NOW+60000,fetchImpl:fx});assert.equal(r.cursor,BATCH*2);
-r=await stockScanTick(env,{now:NOW+120000,fetchImpl:fx});assert.equal(r.cursor,(BATCH*3)%39,'wraps around');
+const refuse=async()=>({ok:false,status:403,text:async()=>''});
+r=await stockScanTick(env,{now:NOW+30000,fetchImpl:refuse});assert.equal(r.done,0);assert.equal(r.cursor,BATCH,'all refused → same batch next run');
+let hosts=[];const alt=async u=>{hosts.push(new URL(u).host);return new URL(u).host==='api.bybit.com'?{ok:false,status:403,text:async()=>''}:fx(u);};
+r=await stockScanTick(env,{now:NOW+45000,fetchImpl:alt});assert.ok(r.done>0&&hosts.includes('api.bytick.com'),'second host used');assert.equal(r.cursor,BATCH*2);
+r=await stockScanTick(env,{now:NOW+60000,fetchImpl:fx});assert.equal(r.cursor,BATCH*3%39);
+r=await stockScanTick(env,{now:NOW+120000,fetchImpl:fx});assert.equal(r.cursor,(BATCH*4)%39,'wraps around');
 p=await scanPayload(env,NOW+7*H);assert.equal(p.body.count,0,'older than 6 hours → dropped');
 // route: bearer only
 const req=(h)=>new Request('https://w.dev/stock-hub/v1/scan',{headers:h});
