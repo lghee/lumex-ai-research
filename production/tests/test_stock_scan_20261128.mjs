@@ -42,4 +42,6 @@ let res=await stockHubRoute(req({}),env,{now:NOW});assert.equal(res.status,401);
 res=await stockHubRoute(req({authorization:'Bearer '+'k'.repeat(47)+'x'}),env,{now:NOW});assert.equal(res.status,401);
 res=await stockHubRoute(req({authorization:'Bearer '+'k'.repeat(48)}),env,{now:NOW+180000});assert.equal(res.status,200);assert.equal(res.headers.get('access-control-allow-origin'),null,'not readable from browsers');
 assert.equal(bearerOk(req({authorization:'Bearer x'}),{LUMEX_AI_LAB_WORKER_TOKEN:'short'}),false,'short token never accepted');
+res=await stockHubRoute(new Request('https://w.dev/stock-hub/v1/scan-status'),env,{now:NOW+180000});const ss=await res.json();
+assert.equal(res.status,200);assert.ok(ss.count>0&&ss.h4>0&&!('items' in ss),'status: counts only, public');
 console.log('stock scan 20261128: all checks passed');

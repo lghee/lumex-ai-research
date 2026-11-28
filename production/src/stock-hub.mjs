@@ -299,6 +299,10 @@ export async function stockHubRoute(request,env,{fetchImpl=fetch,now=Date.now()}
   if(p==='tradfi-symbols'){const u=await readUniverse(env);if(!u?.ok)return json({ok:false,error:'not_collected'},503);
     return json({ok:true,updated_ms:u.updated_ms,types:TRADFI_TYPES,symbols:u.tradfi},200,600);}
   // 2026-11-28 주식 신호 스캐너 — PRO content: only Core (Worker bearer) reads it
+  if(p==='scan-status'){const r=await (await import('./stock-scan.mjs')).scanPayload(env,now);   // counts only (no symbols, no prices)
+    if(r.status!==200)return json({ok:false,error:r.body.error},r.status,30);const it=r.body.items;
+    return json({ok:true,updated_ms:r.body.updated_ms,last_batch:r.body.last_batch,count:it.length,h4:it.filter(x=>x.h4).length,h1:it.filter(x=>x.h1).length,
+      signals_h4:it.filter(x=>x.h4?.signal).length,open_h4:it.filter(x=>x.h4?.open).length},200,30);}
   if(p==='scan'){const m=await import('./stock-scan.mjs');if(!m.bearerOk(request,env))return json({ok:false,error:'unauthorized'},401);
     const r=await m.scanPayload(env,now);return new Response(JSON.stringify(r.body),{status:r.status,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'}});}
   // 2026-11-28 AI 봇 주식 계좌 (simulated, no orders) and stock whale detail
