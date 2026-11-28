@@ -7,15 +7,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          S=https://lumexbot.com
-          echo "== daily page"; curl -s -m 30 -A 'Mozilla/5.0' -o /tmp/d.html -w '%{http_code}\n' "$S/daily/"; grep -o '<h1[^<]*</h1>\|lxgr-card[^>]*href="[^"]*"\|아직[^<]\{0,80\}\|준비[^<]\{0,60\}' /tmp/d.html | head -12
-          echo "== namespace routes"; curl -s -m 30 -A 'Mozilla/5.0' "$S/wp-json/lumex/v1" | python3 -c "
-          import sys,json
-          try:
-            j=json.load(sys.stdin);r=[k for k in j.get('routes',{}) if 'ai-report' in k or 'stock' in k or 'daily' in k];print(r)
-          except Exception as e:print('parse',e)"
-          echo "== backfill route (no token)"; curl -s -m 30 -X POST -A 'Mozilla/5.0' -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/backfill" | head -c 300; echo
-          echo "== bundle route (no token)"; curl -s -m 30 -X POST -A 'Mozilla/5.0' -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/bundle" | head -c 300; echo
-          echo "== no UA"; curl -s -m 30 -X POST -H 'content-type: application/json' -d '{}' -w ' HTTP %{http_code}\n' "$S/wp-json/lumex/v1/ai-report/bundle" | head -c 300; echo
-          echo "== core version hint"; curl -s -m 30 -A 'Mozilla/5.0' "$S/" | grep -o 'lumex-core[^"]*ver=[0-9.]*\|lumex-pro[^"]*ver=[0-9.]*\|ver=0\.[0-9.]*' | sort -u | head
-          echo "== stocks bots page"; curl -s -m 30 -A 'Mozilla/5.0' -o /dev/null -w '%{http_code}\n' "$S/stocks/daily/"
+          for p in "" news/ news/report/2026-11-28/ daily/ market/ stocks/ guide/ tools/ calendar/ learn/; do
+            echo "=== /$p"; curl -s -m 30 -A 'Mozilla/5.0' "https://lumexbot.com/$p" -o /tmp/p.html -w 'HTTP %{http_code}\n'
+            python3 - <<'PY'
+          import re,html
+          t=open('/tmp/p.html',encoding='utf-8',errors='ignore').read()
+          side=re.findall(r'class="lx-side-link[^"]*"\s+href="([^"]+)"[^>]*>.*?<span>([^<]*)</span>',t,re.S)
+          print('SIDE',[(h.replace('https://lumexbot.com',''),l) for h,l in side])
+          tabs=re.search(r'<nav class="ds-tabs".*?</nav>',t,re.S)
+          if tabs: print('TABS',[(h.replace('https://lumexbot.com',''),html.unescape(l)) for h,l in re.findall(r'href="([^"]+)"[^>]*>([^<]+)</a>',tabs.group(0))])
+          dock=re.search(r'class="lx-mobile-dock.*?</nav>',t,re.S)
+          if dock: print('DOCK',[h.replace('https://lumexbot.com','') for h in re.findall(r'href="([^"]+)"',dock.group(0))])
+          print('KICK',re.findall(r'lx-side-kicker[^>]*>([^<]+)<',t))
+          PY
+          done
